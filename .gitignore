@@ -20,3 +20,6 @@ Thumbs.db
 .tmp/
 tmp/
 *.log
+
+# Large local research corpus
+Research/
