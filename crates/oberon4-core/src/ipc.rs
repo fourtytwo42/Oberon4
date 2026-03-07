@@ -6,10 +6,12 @@ use crate::{AppConfig, ChatMessage, DaemonStatus, OAuthProviderKind, SavedSessio
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DaemonCommand {
     GetStatus,
+    Shutdown,
     SendChat {
         session_id: Option<String>,
         messages: Vec<ChatMessage>,
     },
+    EndpointHealth,
     SaveConfig {
         config: AppConfig,
     },
@@ -25,6 +27,18 @@ pub enum DaemonCommand {
         provider: OAuthProviderKind,
     },
     ListAccounts,
+    ActivateAccount {
+        provider: OAuthProviderKind,
+        account_id: String,
+    },
+    DisableAccount {
+        provider: OAuthProviderKind,
+        account_id: String,
+    },
+    DisconnectAccount {
+        provider: OAuthProviderKind,
+        account_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,6 +68,9 @@ pub enum DaemonEvent {
     OAuthStarted {
         provider: OAuthProviderKind,
         url: String,
+    },
+    Ack {
+        message: String,
     },
     Error {
         message: String,

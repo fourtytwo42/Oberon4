@@ -1,21 +1,18 @@
-use oberon4_cli::{CliApp, CliCommand, run_cli};
+use oberon4_cli::{CliApp, CliCommand};
 use oberon4_tui::TuiApp;
-
-fn run(args: &[&str]) -> oberon4_cli::CliOutput {
-    let owned: Vec<String> = args.iter().map(|value| value.to_string()).collect();
-    run_cli(&owned)
-}
 
 #[test]
 fn end_to_end_endpoint_configuration_and_connectivity() {
-    let set_endpoint = run(&[
-        "config",
-        "set",
-        "endpoint.base_url",
-        "https://gateway.example.test",
-    ]);
-    let set_model = run(&["config", "set", "endpoint.model", "o4-mini"]);
-    let endpoint_test = run(&["endpoint", "test"]);
+    let mut app = CliApp::default();
+    let set_endpoint = app.run(CliCommand::ConfigSet {
+        key: "endpoint.base_url".to_string(),
+        value: "https://gateway.example.test".to_string(),
+    });
+    let set_model = app.run(CliCommand::ConfigSet {
+        key: "endpoint.model".to_string(),
+        value: "o4-mini".to_string(),
+    });
+    let endpoint_test = app.run(CliCommand::EndpointTest);
 
     assert_eq!(set_endpoint.exit_code, 0);
     assert_eq!(set_model.exit_code, 0);
@@ -53,7 +50,10 @@ fn end_to_end_oauth_account_connect_and_switch() {
 
 #[test]
 fn end_to_end_cli_chat_and_tui_chat_path() {
-    let cli_chat = run(&["chat", "--message", "hello"]);
+    let mut cli = CliApp::default();
+    let cli_chat = cli.run(CliCommand::Chat {
+        message: "hello".to_string(),
+    });
 
     let mut tui = TuiApp::default();
     let tui_chat = tui.handle_input("hello from tui").unwrap();

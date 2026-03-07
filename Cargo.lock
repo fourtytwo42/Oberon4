@@ -541,7 +541,9 @@ dependencies = [
 name = "oberon4-daemon"
 version = "0.1.0"
 dependencies = [
+ "oberon4-auth",
  "oberon4-core",
+ "oberon4-provider-openai",
  "serde",
  "serde_json",
 ]

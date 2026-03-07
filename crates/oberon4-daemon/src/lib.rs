@@ -1,9 +1,18 @@
+use std::{
+    fs,
+    io::{Read, Write},
+    os::unix::net::{UnixListener, UnixStream},
+    path::{Path, PathBuf},
+};
+
 use serde::{Deserialize, Serialize};
 
+use oberon4_auth::{AccountRegistry, TokenBundle};
 use oberon4_core::{
-    AppConfig, ChatProvider, ChatProviderKind, DaemonCommand, DaemonEvent, DaemonStatus,
-    InMemoryConfigStore, InMemorySessionStore, OAuthProvider, OberonError, RequestId,
-    ServiceEnvelope, SessionStore,
+    AppConfig, ChatMessage, ChatProvider, ChatProviderKind, ConfigStore, DaemonCommand,
+    DaemonEvent, DaemonStatus, InMemoryConfigStore, InMemorySecretStore, InMemorySessionStore,
+    OAuthProvider, OAuthProviderKind, OberonError, RequestId, SecretStore, ServiceEnvelope,
+    SessionStore,
 };
 
 pub fn daemon_status(config: &AppConfig) -> ServiceEnvelope<String> {
@@ -51,13 +60,17 @@ pub fn log_entry(level: LogLevel, message: impl Into<String>) -> Result<String, 
     .map_err(|err| OberonError::Storage(err.to_string()))
 }
 
-pub fn status_snapshot(config: &AppConfig, lifecycle: LifecycleState) -> DaemonStatus {
+fn status_snapshot(
+    config: &AppConfig,
+    lifecycle: LifecycleState,
+    active_account: Option<String>,
+) -> DaemonStatus {
     DaemonStatus {
         running: lifecycle == LifecycleState::Running,
         endpoint_base_url: config.endpoint.base_url.clone(),
         model: config.endpoint.model.clone(),
         active_provider: ChatProviderKind::OpenAiCompatible,
-        active_account: None,
+        active_account,
     }
 }
 
@@ -88,12 +101,12 @@ impl Default for DaemonRuntime<InMemoryConfigStore, InMemorySessionStore> {
 
 impl<C, S> DaemonRuntime<C, S>
 where
-    C: oberon4_core::ConfigStore,
+    C: ConfigStore,
     S: SessionStore,
 {
     pub fn start(&mut self) -> Result<DaemonStatus, OberonError> {
         self.lifecycle = LifecycleState::Running;
-        Ok(status_snapshot(&self.config_store.load()?, self.lifecycle))
+        Ok(status_snapshot(&self.config_store.load()?, self.lifecycle, None))
     }
 
     pub fn stop(&mut self) {
@@ -105,7 +118,7 @@ where
     }
 
     pub fn status(&self) -> Result<DaemonStatus, OberonError> {
-        Ok(status_snapshot(&self.config_store.load()?, self.lifecycle))
+        Ok(status_snapshot(&self.config_store.load()?, self.lifecycle, None))
     }
 
     pub fn health(&self) -> Result<HealthReport, OberonError> {
@@ -119,122 +132,414 @@ where
     pub fn save_config(&mut self, config: &AppConfig) -> Result<(), OberonError> {
         self.config_store.save(config)
     }
+}
 
-    pub fn handle_command<P: ChatProvider, O: OAuthProvider>(
-        &mut self,
-        command: DaemonCommand,
-        chat_provider: &P,
-        oauth_provider: &O,
-    ) -> Result<DaemonEvent, OberonError> {
-        match command {
-            DaemonCommand::GetStatus => Ok(DaemonEvent::Status {
-                status: self.status()?,
-            }),
-            DaemonCommand::SendChat { messages, .. } => {
-                if self.lifecycle != LifecycleState::Running {
-                    return Err(OberonError::Validation(
-                        "daemon must be running before chat requests".to_string(),
-                    ));
-                }
-                let config = self.config_store.load()?;
-                let reply = chat_provider.send_message(
-                    &config.endpoint.base_url,
-                    &config.endpoint.model,
-                    &messages,
-                )?;
-                Ok(DaemonEvent::ChatComplete { message: reply })
-            }
-            DaemonCommand::SaveConfig { config } => {
-                self.save_config(&config)?;
-                Ok(DaemonEvent::ConfigLoaded { config })
-            }
-            DaemonCommand::LoadConfig => Ok(DaemonEvent::ConfigLoaded {
-                config: self.load_config()?,
-            }),
-            DaemonCommand::SaveSession { session } => {
-                self.session_store.save_session(session.clone())?;
-                Ok(DaemonEvent::SessionLoaded { session })
-            }
-            DaemonCommand::LoadSession { session_id } => {
-                let session = self.session_store.load_session(&session_id)?;
-                Ok(DaemonEvent::SessionLoaded { session })
-            }
-            DaemonCommand::ListSessions => {
-                let sessions = self.session_store.list_sessions()?;
-                Ok(DaemonEvent::SessionList { sessions })
-            }
-            DaemonCommand::ConnectAccount { provider } => {
-                if provider != oauth_provider.provider_kind() {
-                    return Err(OberonError::Validation(
-                        "oauth provider mismatch for runtime".to_string(),
-                    ));
-                }
-                let url = oauth_provider.start_connect_flow()?;
-                Ok(DaemonEvent::OAuthStarted { provider, url })
-            }
-            DaemonCommand::ListAccounts => Ok(DaemonEvent::AccountsListed { accounts: vec![] }),
-        }
+#[derive(Debug)]
+struct CommandOutcome {
+    event: DaemonEvent,
+    should_shutdown: bool,
+}
+
+pub struct DaemonApp<C, S, P, OO, AO, SS> {
+    runtime: DaemonRuntime<C, S>,
+    chat_provider: P,
+    openai_oauth: OO,
+    anthropic_oauth: AO,
+    accounts: AccountRegistry,
+    secrets: SS,
+}
+
+impl Default
+    for DaemonApp<
+        InMemoryConfigStore,
+        InMemorySessionStore,
+        oberon4_provider_openai::OpenAiCompatibleClient<oberon4_provider_openai::ReqwestTransport>,
+        oberon4_auth::OpenAiOAuthAdapter,
+        oberon4_auth::AnthropicOAuthAdapter,
+        InMemorySecretStore,
+    >
+{
+    fn default() -> Self {
+        let config = AppConfig::default();
+        Self::new(
+            DaemonRuntime::default(),
+            oberon4_provider_openai::OpenAiCompatibleClient::new(
+                config.endpoint.base_url.clone(),
+                oberon4_provider_openai::RetryPolicy::from_config(&config),
+                oberon4_provider_openai::ReqwestTransport,
+            ),
+            oberon4_auth::OpenAiOAuthAdapter::default(),
+            oberon4_auth::AnthropicOAuthAdapter::default(),
+            AccountRegistry::default(),
+            InMemorySecretStore::default(),
+        )
     }
 }
 
-pub struct LocalIpcServer<'a, C, S, P, O> {
-    runtime: &'a mut DaemonRuntime<C, S>,
-    chat_provider: &'a P,
-    oauth_provider: &'a O,
-}
-
-impl<'a, C, S, P, O> LocalIpcServer<'a, C, S, P, O>
+impl<C, S, P, OO, AO, SS> DaemonApp<C, S, P, OO, AO, SS>
 where
-    C: oberon4_core::ConfigStore,
+    C: ConfigStore,
     S: SessionStore,
     P: ChatProvider,
-    O: OAuthProvider,
+    OO: OAuthProvider,
+    AO: OAuthProvider,
+    SS: SecretStore,
 {
     pub fn new(
-        runtime: &'a mut DaemonRuntime<C, S>,
-        chat_provider: &'a P,
-        oauth_provider: &'a O,
+        runtime: DaemonRuntime<C, S>,
+        chat_provider: P,
+        openai_oauth: OO,
+        anthropic_oauth: AO,
+        accounts: AccountRegistry,
+        secrets: SS,
     ) -> Self {
         Self {
             runtime,
             chat_provider,
-            oauth_provider,
+            openai_oauth,
+            anthropic_oauth,
+            accounts,
+            secrets,
         }
     }
 
-    pub fn handle_json(&mut self, input: &str) -> String {
-        let response = match serde_json::from_str::<DaemonCommand>(input) {
-            Ok(command) => {
-                self.runtime
-                    .handle_command(command, self.chat_provider, self.oauth_provider)
-            }
-            Err(err) => Err(OberonError::Validation(format!(
-                "invalid IPC command payload: {err}"
-            ))),
-        };
+    pub fn start(&mut self) -> Result<DaemonStatus, OberonError> {
+        self.runtime.start()?;
+        self.status()
+    }
 
-        match response {
-            Ok(event) => serde_json::to_string(&event)
-                .unwrap_or_else(|err| format!(r#"{{"type":"error","message":"{err}"}}"#)),
-            Err(err) => serde_json::to_string(&DaemonEvent::Error {
-                message: err.to_string(),
-            })
-            .unwrap_or_else(|fallback_err| {
-                format!(r#"{{"type":"error","message":"{fallback_err}"}}"#)
+    pub fn status(&self) -> Result<DaemonStatus, OberonError> {
+        let config = self.runtime.load_config()?;
+        Ok(status_snapshot(
+            &config,
+            self.runtime.lifecycle_state(),
+            self.active_account(),
+        ))
+    }
+
+    pub(crate) fn handle_command(
+        &mut self,
+        command: DaemonCommand,
+    ) -> Result<CommandOutcome, OberonError> {
+        match command {
+            DaemonCommand::GetStatus => Ok(CommandOutcome {
+                event: DaemonEvent::Status {
+                    status: self.status()?,
+                },
+                should_shutdown: false,
             }),
+            DaemonCommand::Shutdown => {
+                self.runtime.stop();
+                Ok(CommandOutcome {
+                    event: DaemonEvent::Ack {
+                        message: "daemon stopped".to_string(),
+                    },
+                    should_shutdown: true,
+                })
+            }
+            DaemonCommand::SendChat { messages, .. } => {
+                if self.runtime.lifecycle_state() != LifecycleState::Running {
+                    return Err(OberonError::Validation(
+                        "daemon must be running before chat requests".to_string(),
+                    ));
+                }
+                let config = self.runtime.load_config()?;
+                let reply = self.chat_provider.send_message(
+                    &config.endpoint.base_url,
+                    &config.endpoint.model,
+                    &messages,
+                )?;
+                Ok(CommandOutcome {
+                    event: DaemonEvent::ChatComplete { message: reply },
+                    should_shutdown: false,
+                })
+            }
+            DaemonCommand::EndpointHealth => {
+                if self.runtime.lifecycle_state() != LifecycleState::Running {
+                    return Err(OberonError::Validation(
+                        "daemon must be running before endpoint health checks".to_string(),
+                    ));
+                }
+                let config = self.runtime.load_config()?;
+                let probe = [ChatMessage {
+                    role: oberon4_core::ChatRole::User,
+                    content: "health".to_string(),
+                }];
+                let _ = self.chat_provider.send_message(
+                    &config.endpoint.base_url,
+                    &config.endpoint.model,
+                    &probe,
+                )?;
+                Ok(CommandOutcome {
+                    event: DaemonEvent::Ack {
+                        message: "endpoint test passed".to_string(),
+                    },
+                    should_shutdown: false,
+                })
+            }
+            DaemonCommand::SaveConfig { config } => {
+                self.runtime.save_config(&config)?;
+                Ok(CommandOutcome {
+                    event: DaemonEvent::ConfigLoaded { config },
+                    should_shutdown: false,
+                })
+            }
+            DaemonCommand::LoadConfig => Ok(CommandOutcome {
+                event: DaemonEvent::ConfigLoaded {
+                    config: self.runtime.load_config()?,
+                },
+                should_shutdown: false,
+            }),
+            DaemonCommand::SaveSession { session } => {
+                self.runtime.session_store.save_session(session.clone())?;
+                Ok(CommandOutcome {
+                    event: DaemonEvent::SessionLoaded { session },
+                    should_shutdown: false,
+                })
+            }
+            DaemonCommand::LoadSession { session_id } => {
+                let session = self.runtime.session_store.load_session(&session_id)?;
+                Ok(CommandOutcome {
+                    event: DaemonEvent::SessionLoaded { session },
+                    should_shutdown: false,
+                })
+            }
+            DaemonCommand::ListSessions => Ok(CommandOutcome {
+                event: DaemonEvent::SessionList {
+                    sessions: self.runtime.session_store.list_sessions()?,
+                },
+                should_shutdown: false,
+            }),
+            DaemonCommand::ConnectAccount { provider } => {
+                let url = self.oauth_provider(provider)?.start_connect_flow()?;
+                let bundle = TokenBundle {
+                    access_token: format!("access-{provider:?}").to_ascii_lowercase(),
+                    refresh_token: Some(format!("refresh-{provider:?}").to_ascii_lowercase()),
+                    expires_at_unix: 60,
+                    account_id: format!("{}-default", provider_name(provider)),
+                    label: format!("{} Default", provider_label(provider)),
+                };
+                let _ = self
+                    .accounts
+                    .connect(provider, &bundle, &mut self.secrets)?;
+                Ok(CommandOutcome {
+                    event: DaemonEvent::OAuthStarted { provider, url },
+                    should_shutdown: false,
+                })
+            }
+            DaemonCommand::ListAccounts => Ok(CommandOutcome {
+                event: DaemonEvent::AccountsListed {
+                    accounts: self.accounts.list(),
+                },
+                should_shutdown: false,
+            }),
+            DaemonCommand::ActivateAccount {
+                provider,
+                account_id,
+            } => {
+                self.accounts.activate(provider, &account_id)?;
+                Ok(CommandOutcome {
+                    event: DaemonEvent::Ack {
+                        message: format!("activated {} {}", provider_name(provider), account_id),
+                    },
+                    should_shutdown: false,
+                })
+            }
+            DaemonCommand::DisableAccount {
+                provider,
+                account_id,
+            } => {
+                self.accounts.disable(provider, &account_id)?;
+                Ok(CommandOutcome {
+                    event: DaemonEvent::Ack {
+                        message: format!("disabled {} {}", provider_name(provider), account_id),
+                    },
+                    should_shutdown: false,
+                })
+            }
+            DaemonCommand::DisconnectAccount {
+                provider,
+                account_id,
+            } => {
+                self.accounts.disconnect(provider, &account_id)?;
+                Ok(CommandOutcome {
+                    event: DaemonEvent::Ack {
+                        message: format!(
+                            "disconnected {} {}",
+                            provider_name(provider),
+                            account_id
+                        ),
+                    },
+                    should_shutdown: false,
+                })
+            }
         }
+    }
+
+    fn oauth_provider(&self, provider: OAuthProviderKind) -> Result<&dyn OAuthProvider, OberonError> {
+        match provider {
+            OAuthProviderKind::OpenAi => Ok(&self.openai_oauth),
+            OAuthProviderKind::Anthropic => Ok(&self.anthropic_oauth),
+        }
+    }
+
+    fn active_account(&self) -> Option<String> {
+        [OAuthProviderKind::OpenAi, OAuthProviderKind::Anthropic]
+            .into_iter()
+            .find_map(|provider| self.accounts.active_account_id(provider).map(str::to_string))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DaemonIpcClient {
+    socket_path: PathBuf,
+}
+
+impl DaemonIpcClient {
+    pub fn new(socket_path: impl Into<PathBuf>) -> Self {
+        Self {
+            socket_path: socket_path.into(),
+        }
+    }
+
+    pub fn socket_path(&self) -> &Path {
+        &self.socket_path
+    }
+
+    pub fn send(&self, command: &DaemonCommand) -> Result<DaemonEvent, OberonError> {
+        let mut stream = UnixStream::connect(&self.socket_path).map_err(|err| {
+            OberonError::Storage(format!(
+                "daemon socket connect failed ({}): {err}",
+                self.socket_path.display()
+            ))
+        })?;
+        let body = serde_json::to_vec(command)
+            .map_err(|err| OberonError::Storage(format!("ipc request encode failed: {err}")))?;
+        stream
+            .write_all(&body)
+            .map_err(|err| OberonError::Storage(format!("ipc request write failed: {err}")))?;
+        let _ = stream.shutdown(std::net::Shutdown::Write);
+
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .map_err(|err| OberonError::Storage(format!("ipc response read failed: {err}")))?;
+
+        serde_json::from_slice(&response)
+            .map_err(|err| OberonError::Validation(format!("invalid ipc response payload: {err}")))
+    }
+}
+
+pub fn default_socket_path() -> PathBuf {
+    if let Some(path) = std::env::var_os("OBERON4_SOCKET_PATH") {
+        return PathBuf::from(path);
+    }
+    std::env::temp_dir().join("oberon4-daemon.sock")
+}
+
+pub fn serve_unix_socket<C, S, P, OO, AO, SS>(
+    socket_path: impl AsRef<Path>,
+    mut app: DaemonApp<C, S, P, OO, AO, SS>,
+) -> Result<(), OberonError>
+where
+    C: ConfigStore,
+    S: SessionStore,
+    P: ChatProvider,
+    OO: OAuthProvider,
+    AO: OAuthProvider,
+    SS: SecretStore,
+{
+    let socket_path = socket_path.as_ref();
+    if let Some(parent) = socket_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| OberonError::Storage(format!("socket directory create failed: {err}")))?;
+    }
+    if socket_path.exists() {
+        fs::remove_file(socket_path)
+            .map_err(|err| OberonError::Storage(format!("stale socket cleanup failed: {err}")))?;
+    }
+
+    let _ = app.start()?;
+    let listener = UnixListener::bind(socket_path)
+        .map_err(|err| OberonError::Storage(format!("socket bind failed: {err}")))?;
+
+    let mut stop = false;
+    while !stop {
+        let (mut stream, _) = listener
+            .accept()
+            .map_err(|err| OberonError::Storage(format!("socket accept failed: {err}")))?;
+        stop = handle_stream(&mut stream, &mut app)?;
+    }
+
+    let _ = fs::remove_file(socket_path);
+    Ok(())
+}
+
+fn handle_stream<C, S, P, OO, AO, SS>(
+    stream: &mut UnixStream,
+    app: &mut DaemonApp<C, S, P, OO, AO, SS>,
+) -> Result<bool, OberonError>
+where
+    C: ConfigStore,
+    S: SessionStore,
+    P: ChatProvider,
+    OO: OAuthProvider,
+    AO: OAuthProvider,
+    SS: SecretStore,
+{
+    let mut input = Vec::new();
+    stream
+        .read_to_end(&mut input)
+        .map_err(|err| OberonError::Storage(format!("ipc request read failed: {err}")))?;
+
+    let response = match serde_json::from_slice::<DaemonCommand>(&input) {
+        Ok(command) => match app.handle_command(command) {
+            Ok(outcome) => (outcome.event, outcome.should_shutdown),
+            Err(err) => (DaemonEvent::Error { message: err.to_string() }, false),
+        },
+        Err(err) => (
+            DaemonEvent::Error {
+                message: format!("validation failed: invalid IPC command payload: {err}"),
+            },
+            false,
+        ),
+    };
+
+    let encoded = serde_json::to_vec(&response.0)
+        .map_err(|err| OberonError::Storage(format!("ipc response encode failed: {err}")))?;
+    stream
+        .write_all(&encoded)
+        .map_err(|err| OberonError::Storage(format!("ipc response write failed: {err}")))?;
+    Ok(response.1)
+}
+
+fn provider_name(provider: OAuthProviderKind) -> &'static str {
+    match provider {
+        OAuthProviderKind::OpenAi => "openai",
+        OAuthProviderKind::Anthropic => "anthropic",
+    }
+}
+
+fn provider_label(provider: OAuthProviderKind) -> &'static str {
+    match provider {
+        OAuthProviderKind::OpenAi => "OpenAI",
+        OAuthProviderKind::Anthropic => "Anthropic",
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::{thread, time::Duration};
+
     use super::{
-        DaemonRuntime, LifecycleState, LocalIpcServer, LogEntry, LogLevel, daemon_status, log_entry,
+        DaemonApp, DaemonIpcClient, DaemonRuntime, LifecycleState, LogEntry, LogLevel,
+        default_socket_path, daemon_status, log_entry, serve_unix_socket,
     };
+    use oberon4_auth::AccountRegistry;
     use oberon4_core::{
         AppConfig, ChatMessage, ChatProviderKind, ChatRole, DaemonCommand, DaemonEvent,
-        FakeChatProvider, FakeOAuthProvider, OAuthProviderKind, SavedSession, SessionId,
-        SessionSummary,
+        FakeChatProvider, FakeOAuthProvider, InMemorySecretStore, OAuthProviderKind, SavedSession,
+        SessionId, SessionSummary,
     };
 
     #[test]
@@ -291,21 +596,62 @@ mod tests {
     }
 
     #[test]
-    fn ipc_get_status_returns_status_event() {
-        let mut runtime = DaemonRuntime::default();
-        runtime.start().unwrap();
-        let event = runtime
-            .handle_command(
-                DaemonCommand::GetStatus,
-                &FakeChatProvider::default(),
-                &FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
-            )
-            .unwrap();
+    fn app_handles_status_chat_and_accounts() {
+        let mut app = DaemonApp::new(
+            DaemonRuntime::default(),
+            FakeChatProvider::default(),
+            FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
+            FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+            AccountRegistry::default(),
+            InMemorySecretStore::default(),
+        );
+        let _ = app.start().unwrap();
 
-        match event {
+        let status = app.handle_command(DaemonCommand::GetStatus).unwrap().event;
+        match status {
             DaemonEvent::Status { status } => {
                 assert!(status.running);
                 assert_eq!(status.active_provider, ChatProviderKind::OpenAiCompatible);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let chat = app
+            .handle_command(DaemonCommand::SendChat {
+                session_id: None,
+                messages: vec![ChatMessage {
+                    role: ChatRole::User,
+                    content: "hello".to_string(),
+                }],
+            })
+            .unwrap()
+            .event;
+        match chat {
+            DaemonEvent::ChatComplete { message } => {
+                assert_eq!(message.role, ChatRole::Assistant);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let connect = app
+            .handle_command(DaemonCommand::ConnectAccount {
+                provider: OAuthProviderKind::OpenAi,
+            })
+            .unwrap()
+            .event;
+        match connect {
+            DaemonEvent::OAuthStarted { provider, url } => {
+                assert_eq!(provider, OAuthProviderKind::OpenAi);
+                assert!(url.contains("openai"));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let accounts = app.handle_command(DaemonCommand::ListAccounts).unwrap().event;
+        match accounts {
+            DaemonEvent::AccountsListed { accounts } => {
+                assert_eq!(accounts.len(), 1);
+                assert_eq!(accounts[0].id, "openai-default");
             }
             other => panic!("unexpected event: {other:?}"),
         }
@@ -313,19 +659,22 @@ mod tests {
 
     #[test]
     fn ipc_send_chat_requires_running_daemon() {
-        let mut runtime = DaemonRuntime::default();
-        let err = runtime
-            .handle_command(
-                DaemonCommand::SendChat {
-                    session_id: None,
-                    messages: vec![ChatMessage {
-                        role: ChatRole::User,
-                        content: "hello".to_string(),
-                    }],
-                },
-                &FakeChatProvider::default(),
-                &FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
-            )
+        let mut app = DaemonApp::new(
+            DaemonRuntime::default(),
+            FakeChatProvider::default(),
+            FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
+            FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+            AccountRegistry::default(),
+            InMemorySecretStore::default(),
+        );
+        let err = app
+            .handle_command(DaemonCommand::SendChat {
+                session_id: None,
+                messages: vec![ChatMessage {
+                    role: ChatRole::User,
+                    content: "hello".to_string(),
+                }],
+            })
             .expect_err("chat should fail when daemon is stopped");
 
         assert_eq!(
@@ -335,119 +684,88 @@ mod tests {
     }
 
     #[test]
-    fn ipc_send_chat_returns_fake_reply() {
-        let mut runtime = DaemonRuntime::default();
-        runtime.start().unwrap();
-        let event = runtime
-            .handle_command(
-                DaemonCommand::SendChat {
-                    session_id: None,
-                    messages: vec![ChatMessage {
-                        role: ChatRole::User,
-                        content: "hello".to_string(),
-                    }],
-                },
-                &FakeChatProvider::default(),
-                &FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
-            )
-            .unwrap();
+    fn socket_server_round_trips_status_and_shutdown() {
+        let socket_path = default_socket_path().with_file_name(format!(
+            "oberon4-daemon-test-{}.sock",
+            std::process::id()
+        ));
+        let thread_socket = socket_path.clone();
+        let handle = thread::spawn(move || {
+            let app = DaemonApp::new(
+                DaemonRuntime::default(),
+                FakeChatProvider::default(),
+                FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
+                FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+                AccountRegistry::default(),
+                InMemorySecretStore::default(),
+            );
+            serve_unix_socket(&thread_socket, app)
+        });
 
-        match event {
-            DaemonEvent::ChatComplete { message } => {
-                assert_eq!(message.role, ChatRole::Assistant);
+        for _ in 0..20 {
+            if socket_path.exists() {
+                break;
             }
+            thread::sleep(Duration::from_millis(25));
+        }
+
+        let client = DaemonIpcClient::new(&socket_path);
+        let status = client.send(&DaemonCommand::GetStatus).unwrap();
+        match status {
+            DaemonEvent::Status { status } => assert!(status.running),
             other => panic!("unexpected event: {other:?}"),
         }
+
+        let stop = client.send(&DaemonCommand::Shutdown).unwrap();
+        match stop {
+            DaemonEvent::Ack { message } => assert_eq!(message, "daemon stopped"),
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        handle.join().unwrap().unwrap();
+        assert!(!socket_path.exists());
     }
 
     #[test]
-    fn ipc_session_round_trips() {
-        let mut runtime = DaemonRuntime::default();
-        let saved = SavedSession {
+    fn session_commands_round_trip() {
+        let mut app = DaemonApp::new(
+            DaemonRuntime::default(),
+            FakeChatProvider::default(),
+            FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
+            FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+            AccountRegistry::default(),
+            InMemorySecretStore::default(),
+        );
+        let _ = app.start().unwrap();
+        let session = SavedSession {
             summary: SessionSummary {
                 id: SessionId::new("session-1"),
                 title: "Demo".to_string(),
                 provider: ChatProviderKind::OpenAiCompatible,
                 model: "gpt-4.1-mini".to_string(),
             },
-            messages: vec![],
+            messages: vec![ChatMessage {
+                role: ChatRole::Assistant,
+                content: "hi".to_string(),
+            }],
         };
 
-        runtime
-            .handle_command(
-                DaemonCommand::SaveSession {
-                    session: saved.clone(),
-                },
-                &FakeChatProvider::default(),
-                &FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
-            )
-            .unwrap();
+        let saved = app
+            .handle_command(DaemonCommand::SaveSession {
+                session: session.clone(),
+            })
+            .unwrap()
+            .event;
+        assert!(matches!(saved, DaemonEvent::SessionLoaded { .. }));
 
-        let event = runtime
-            .handle_command(
-                DaemonCommand::LoadSession {
-                    session_id: "session-1".to_string(),
-                },
-                &FakeChatProvider::default(),
-                &FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
-            )
-            .unwrap();
-
-        match event {
-            DaemonEvent::SessionLoaded { session } => {
-                assert_eq!(session.summary.id.as_str(), "session-1");
-            }
-            other => panic!("unexpected event: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn ipc_connect_account_enforces_provider_match() {
-        let mut runtime = DaemonRuntime::default();
-        let err = runtime
-            .handle_command(
-                DaemonCommand::ConnectAccount {
-                    provider: OAuthProviderKind::Anthropic,
-                },
-                &FakeChatProvider::default(),
-                &FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
-            )
-            .expect_err("mismatched provider should fail");
-
-        assert_eq!(
-            err.to_string(),
-            "validation failed: oauth provider mismatch for runtime"
-        );
-    }
-
-    #[test]
-    fn local_ipc_server_handles_valid_json_requests() {
-        let mut runtime = DaemonRuntime::default();
-        runtime.start().unwrap();
-        let command = serde_json::to_string(&DaemonCommand::GetStatus).unwrap();
-        let chat_provider = FakeChatProvider::default();
-        let oauth_provider = FakeOAuthProvider::new(OAuthProviderKind::OpenAi);
-        let mut server = LocalIpcServer::new(&mut runtime, &chat_provider, &oauth_provider);
-
-        let response = server.handle_json(&command);
-        let event: DaemonEvent = serde_json::from_str(&response).unwrap();
-        assert!(matches!(event, DaemonEvent::Status { .. }));
-    }
-
-    #[test]
-    fn local_ipc_server_returns_error_event_for_malformed_requests() {
-        let mut runtime = DaemonRuntime::default();
-        let chat_provider = FakeChatProvider::default();
-        let oauth_provider = FakeOAuthProvider::new(OAuthProviderKind::OpenAi);
-        let mut server = LocalIpcServer::new(&mut runtime, &chat_provider, &oauth_provider);
-
-        let response = server.handle_json("{bad json");
-        let event: DaemonEvent = serde_json::from_str(&response).unwrap();
-
-        match event {
-            DaemonEvent::Error { message } => {
-                assert!(message.contains("invalid IPC command payload"));
-            }
+        let loaded = app
+            .handle_command(DaemonCommand::LoadSession {
+                session_id: "session-1".to_string(),
+            })
+            .unwrap()
+            .event;
+        match loaded {
+            DaemonEvent::SessionLoaded { session: loaded } => assert_eq!(loaded, session),
             other => panic!("unexpected event: {other:?}"),
         }
     }

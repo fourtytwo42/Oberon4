@@ -1,9 +1,16 @@
+use std::{
+    path::PathBuf,
+    process::{Command, Stdio},
+    thread,
+    time::Duration,
+};
+
 use oberon4_auth::{AccountRegistry, AnthropicOAuthAdapter, OpenAiOAuthAdapter, TokenBundle};
 use oberon4_core::{
     AppConfig, ChatMessage, ChatProvider, ChatRole, InMemoryConfigStore, InMemorySecretStore,
     InMemorySessionStore, OAuthProvider, OAuthProviderKind, OberonError,
 };
-use oberon4_daemon::{DaemonRuntime, LogLevel, log_entry};
+use oberon4_daemon::{DaemonIpcClient, DaemonRuntime, LogLevel, log_entry};
 use oberon4_provider_openai::{FakeTransport, OpenAiCompatibleClient, RetryPolicy};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -215,10 +222,255 @@ impl CliApp {
 pub fn run_cli(args: &[String]) -> CliOutput {
     match parse_command(args) {
         Ok(command) => {
-            let mut app = CliApp::default();
-            app.run(command)
+            if std::env::var_os("OBERON4_FORCE_LOCAL").is_some() {
+                let mut app = CliApp::default();
+                return app.run(command);
+            }
+            run_cli_via_daemon(command)
         }
         Err(err) => CliOutput::error(err.to_string(), 2),
+    }
+}
+
+fn run_cli_via_daemon(command: CliCommand) -> CliOutput {
+    match execute_via_daemon(command) {
+        Ok(output) => output,
+        Err(err) => CliOutput::error(err.to_string(), 3),
+    }
+}
+
+fn execute_via_daemon(command: CliCommand) -> Result<CliOutput, OberonError> {
+    match command {
+        CliCommand::DaemonStart => {
+            ensure_daemon_running()?;
+            format_status_output(daemon_client()?.send(&oberon4_core::DaemonCommand::GetStatus)?)
+        }
+        CliCommand::DaemonStop => {
+            let client = daemon_client()?;
+            match client.send(&oberon4_core::DaemonCommand::Shutdown) {
+                Ok(oberon4_core::DaemonEvent::Ack { .. }) => {
+                    Ok(CliOutput::success("running=false"))
+                }
+                Ok(event) => daemon_protocol_error(event),
+                Err(_) => Ok(CliOutput::success("running=false")),
+            }
+        }
+        CliCommand::DaemonStatus => {
+            let client = daemon_client()?;
+            match client.send(&oberon4_core::DaemonCommand::GetStatus) {
+                Ok(event) => format_status_output(event),
+                Err(_) => {
+                    let default = AppConfig::default();
+                    Ok(CliOutput::success(format!(
+                        "running=false endpoint={} model={}",
+                        default.endpoint.base_url, default.endpoint.model
+                    )))
+                }
+            }
+        }
+        CliCommand::Tui => Ok(CliOutput::success(
+            "tui launch delegated to oberon4-tui (real daemon boundary only wired for CLI in this step)",
+        )),
+        CliCommand::ConfigShow => {
+            ensure_daemon_running()?;
+            match daemon_client()?.send(&oberon4_core::DaemonCommand::LoadConfig)? {
+                oberon4_core::DaemonEvent::ConfigLoaded { config } => {
+                    Ok(CliOutput::success(redacted_config_json(&config)?))
+                }
+                event => daemon_protocol_error(event),
+            }
+        }
+        CliCommand::ConfigSet { key, value } => {
+            ensure_daemon_running()?;
+            let client = daemon_client()?;
+            let mut config = match client.send(&oberon4_core::DaemonCommand::LoadConfig)? {
+                oberon4_core::DaemonEvent::ConfigLoaded { config } => config,
+                event => return daemon_protocol_error(event),
+            };
+            apply_config_value(&mut config, &key, &value)?;
+            match client.send(&oberon4_core::DaemonCommand::SaveConfig { config })? {
+                oberon4_core::DaemonEvent::ConfigLoaded { .. } => {
+                    Ok(CliOutput::success(format!("set {key}={value}")))
+                }
+                event => daemon_protocol_error(event),
+            }
+        }
+        CliCommand::EndpointTest => {
+            ensure_daemon_running()?;
+            match daemon_client()?.send(&oberon4_core::DaemonCommand::EndpointHealth)? {
+                oberon4_core::DaemonEvent::Ack { message } => Ok(CliOutput::success(message)),
+                event => daemon_protocol_error(event),
+            }
+        }
+        CliCommand::Chat { message } => {
+            ensure_daemon_running()?;
+            match daemon_client()?.send(&oberon4_core::DaemonCommand::SendChat {
+                session_id: None,
+                messages: vec![ChatMessage {
+                    role: ChatRole::User,
+                    content: message,
+                }],
+            })? {
+                oberon4_core::DaemonEvent::ChatComplete { message } => {
+                    Ok(CliOutput::success(message.content))
+                }
+                event => daemon_protocol_error(event),
+            }
+        }
+        CliCommand::LogsTail => Ok(CliOutput::success(log_entry(
+            LogLevel::Info,
+            "cli requested log tail",
+        )?)),
+        CliCommand::Doctor => {
+            ensure_daemon_running()?;
+            let client = daemon_client()?;
+            match client.send(&oberon4_core::DaemonCommand::GetStatus)? {
+                oberon4_core::DaemonEvent::Status { status } if status.running => {}
+                oberon4_core::DaemonEvent::Status { .. } => {
+                    return Ok(CliOutput::error("daemon is not running", 3));
+                }
+                event => return daemon_protocol_error(event),
+            }
+            match client.send(&oberon4_core::DaemonCommand::EndpointHealth)? {
+                oberon4_core::DaemonEvent::Ack { message } => Ok(CliOutput::success(
+                    if message == "endpoint test passed" {
+                        "doctor passed".to_string()
+                    } else {
+                        message
+                    },
+                )),
+                event => daemon_protocol_error(event),
+            }
+        }
+        CliCommand::AccountConnect { provider } => {
+            ensure_daemon_running()?;
+            match daemon_client()?.send(&oberon4_core::DaemonCommand::ConnectAccount { provider })?
+            {
+                oberon4_core::DaemonEvent::OAuthStarted { url, .. } => Ok(CliOutput::success(url)),
+                event => daemon_protocol_error(event),
+            }
+        }
+        CliCommand::AccountList => {
+            ensure_daemon_running()?;
+            match daemon_client()?.send(&oberon4_core::DaemonCommand::ListAccounts)? {
+                oberon4_core::DaemonEvent::AccountsListed { accounts } => {
+                    let accounts = serde_json::to_string_pretty(&accounts)
+                        .map_err(|err| OberonError::Storage(err.to_string()))?;
+                    Ok(CliOutput::success(accounts))
+                }
+                event => daemon_protocol_error(event),
+            }
+        }
+        CliCommand::AccountActivate { provider, account } => {
+            ensure_daemon_running()?;
+            match daemon_client()?.send(&oberon4_core::DaemonCommand::ActivateAccount {
+                provider,
+                account_id: account,
+            })? {
+                oberon4_core::DaemonEvent::Ack { message } => Ok(CliOutput::success(message)),
+                event => daemon_protocol_error(event),
+            }
+        }
+        CliCommand::AccountDisable { provider, account } => {
+            ensure_daemon_running()?;
+            match daemon_client()?.send(&oberon4_core::DaemonCommand::DisableAccount {
+                provider,
+                account_id: account,
+            })? {
+                oberon4_core::DaemonEvent::Ack { message } => Ok(CliOutput::success(message)),
+                event => daemon_protocol_error(event),
+            }
+        }
+        CliCommand::AccountDisconnect { provider, account } => {
+            ensure_daemon_running()?;
+            match daemon_client()?.send(&oberon4_core::DaemonCommand::DisconnectAccount {
+                provider,
+                account_id: account,
+            })? {
+                oberon4_core::DaemonEvent::Ack { message } => Ok(CliOutput::success(message)),
+                event => daemon_protocol_error(event),
+            }
+        }
+    }
+}
+
+fn daemon_client() -> Result<DaemonIpcClient, OberonError> {
+    Ok(DaemonIpcClient::new(oberon4_daemon::default_socket_path()))
+}
+
+fn ensure_daemon_running() -> Result<(), OberonError> {
+    let client = daemon_client()?;
+    if client.send(&oberon4_core::DaemonCommand::GetStatus).is_ok() {
+        return Ok(());
+    }
+
+    spawn_daemon_process(client.socket_path().to_path_buf())?;
+
+    for _ in 0..40 {
+        if client.send(&oberon4_core::DaemonCommand::GetStatus).is_ok() {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    Err(OberonError::Storage(
+        "daemon failed to become ready after spawn".to_string(),
+    ))
+}
+
+fn spawn_daemon_process(socket_path: PathBuf) -> Result<(), OberonError> {
+    let daemon_binary = daemon_binary_path()?;
+    Command::new(daemon_binary)
+        .env("OBERON4_SOCKET_PATH", socket_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|err| OberonError::Storage(format!("failed to spawn daemon: {err}")))?;
+    Ok(())
+}
+
+fn daemon_binary_path() -> Result<PathBuf, OberonError> {
+    let current = std::env::current_exe()
+        .map_err(|err| OberonError::Storage(format!("current executable lookup failed: {err}")))?;
+    let direct = current
+        .parent()
+        .map(|dir| dir.join("oberon4-daemon"))
+        .ok_or_else(|| {
+            OberonError::Storage("current executable has no parent directory".to_string())
+        })?;
+    if direct.exists() {
+        return Ok(direct);
+    }
+    let sibling = current
+        .parent()
+        .and_then(|dir| dir.parent())
+        .map(|dir| dir.join("oberon4-daemon"))
+        .ok_or_else(|| OberonError::Storage("daemon binary path resolution failed".to_string()))?;
+    if sibling.exists() {
+        return Ok(sibling);
+    }
+    Err(OberonError::Storage(
+        "oberon4-daemon binary not found next to current executable".to_string(),
+    ))
+}
+
+fn format_status_output(event: oberon4_core::DaemonEvent) -> Result<CliOutput, OberonError> {
+    match event {
+        oberon4_core::DaemonEvent::Status { status } => Ok(CliOutput::success(format!(
+            "running={} endpoint={} model={}",
+            status.running, status.endpoint_base_url, status.model
+        ))),
+        other => daemon_protocol_error(other),
+    }
+}
+
+fn daemon_protocol_error(event: oberon4_core::DaemonEvent) -> Result<CliOutput, OberonError> {
+    match event {
+        oberon4_core::DaemonEvent::Error { message } => Err(OberonError::Validation(message)),
+        other => Err(OberonError::Storage(format!(
+            "unexpected daemon response: {other:?}"
+        ))),
     }
 }
 
