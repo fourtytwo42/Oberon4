@@ -5,7 +5,7 @@ Status: active
 Owner: Oberon4
 WorkflowType: feature-development
 WorkflowMode: incremental-gates
-TaskState: planned
+TaskState: in-progress
 Stack: rust
 Risk: high-risk
 
@@ -53,7 +53,7 @@ Build Oberon4 as a modular Rust-first local daemon with:
 ## 5. Progress Tracker
 
 ### Phase 0: Foundations
-- [ ] `P0.1` Create Rust workspace and crate skeletons:
+- [x] `P0.1` Create Rust workspace and crate skeletons:
   - `oberon4-core`
   - `oberon4-daemon`
   - `oberon4-cli`
@@ -61,11 +61,11 @@ Build Oberon4 as a modular Rust-first local daemon with:
   - `oberon4-provider-openai`
   - `oberon4-auth`
   - `oberon4-tray`
-- [ ] `P0.2` Establish shared lint, format, and workspace test commands.
-- [ ] `P0.3` Define shared error model, request ID contract, and result envelope.
-- [ ] `P0.4` Define shared configuration schema and config file loading rules.
-- [ ] `P0.5` Define secret storage abstraction and local state storage abstraction.
-- [ ] `P0.6` Add baseline unit tests for config parsing, error handling, and state abstractions.
+- [x] `P0.2` Establish shared lint, format, and workspace test commands.
+- [x] `P0.3` Define shared error model, request ID contract, and result envelope.
+- [x] `P0.4` Define shared configuration schema and config file loading rules.
+- [x] `P0.5` Define secret storage abstraction and local state storage abstraction.
+- [x] `P0.6` Add baseline unit tests for config parsing, error handling, and state abstractions.
 
 Verification gate `EG-P0`:
 - `cargo fmt --all -- --check`

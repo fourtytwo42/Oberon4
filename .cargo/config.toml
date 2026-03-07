@@ -1,0 +1,4 @@
+[alias]
+xtest = "test --workspace"
+xlint = "clippy --workspace --all-targets -- -D warnings"
+xfmt = "fmt --all -- --check"

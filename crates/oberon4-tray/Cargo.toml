@@ -1,0 +1,9 @@
+[package]
+name = "oberon4-tray"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+oberon4-core = { path = "../oberon4-core" }

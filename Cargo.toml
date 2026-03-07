@@ -1,6 +1,24 @@
-[package]
-name = "oberon4"
+[workspace]
+members = [
+  "crates/oberon4-auth",
+  "crates/oberon4-cli",
+  "crates/oberon4-core",
+  "crates/oberon4-daemon",
+  "crates/oberon4-provider-openai",
+  "crates/oberon4-tray",
+  "crates/oberon4-tui",
+]
+resolver = "2"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+rust-version = "1.85"
 
-[dependencies]
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+toml = "0.8"
+ulid = "1.2"
