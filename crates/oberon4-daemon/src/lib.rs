@@ -427,11 +427,7 @@ mod tests {
         let command = serde_json::to_string(&DaemonCommand::GetStatus).unwrap();
         let chat_provider = FakeChatProvider::default();
         let oauth_provider = FakeOAuthProvider::new(OAuthProviderKind::OpenAi);
-        let mut server = LocalIpcServer::new(
-            &mut runtime,
-            &chat_provider,
-            &oauth_provider,
-        );
+        let mut server = LocalIpcServer::new(&mut runtime, &chat_provider, &oauth_provider);
 
         let response = server.handle_json(&command);
         let event: DaemonEvent = serde_json::from_str(&response).unwrap();
@@ -443,11 +439,7 @@ mod tests {
         let mut runtime = DaemonRuntime::default();
         let chat_provider = FakeChatProvider::default();
         let oauth_provider = FakeOAuthProvider::new(OAuthProviderKind::OpenAi);
-        let mut server = LocalIpcServer::new(
-            &mut runtime,
-            &chat_provider,
-            &oauth_provider,
-        );
+        let mut server = LocalIpcServer::new(&mut runtime, &chat_provider, &oauth_provider);
 
         let response = server.handle_json("{bad json");
         let event: DaemonEvent = serde_json::from_str(&response).unwrap();

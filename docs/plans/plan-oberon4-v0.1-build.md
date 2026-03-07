@@ -109,12 +109,12 @@ Verification gate `EG-P2`:
 - no panic on malformed local IPC request
 
 ### Phase 3: OpenAI-Compatible Provider
-- [ ] `P3.1` Implement provider client with configurable base URL.
-- [ ] `P3.2` Implement `/v1/chat/completions` request/response translation.
-- [ ] `P3.3` Implement timeout and retry policy in provider layer.
-- [ ] `P3.4` Implement endpoint health/test request path.
-- [ ] `P3.5` Add contract tests against mocked OpenAI-compatible responses.
-- [ ] `P3.6` Add failure-path tests for malformed responses, timeout, and auth failure.
+- [x] `P3.1` Implement provider client with configurable base URL.
+- [x] `P3.2` Implement `/v1/chat/completions` request/response translation.
+- [x] `P3.3` Implement timeout and retry policy in provider layer.
+- [x] `P3.4` Implement endpoint health/test request path.
+- [x] `P3.5` Add contract tests against mocked OpenAI-compatible responses.
+- [x] `P3.6` Add failure-path tests for malformed responses, timeout, and auth failure.
 
 Dependencies:
 - depends on `EG-P2`

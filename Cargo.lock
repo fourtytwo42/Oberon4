@@ -116,6 +116,8 @@ name = "oberon4-provider-openai"
 version = "0.1.0"
 dependencies = [
  "oberon4-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

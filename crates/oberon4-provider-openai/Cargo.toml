@@ -7,3 +7,5 @@ rust-version.workspace = true
 
 [dependencies]
 oberon4-core = { path = "../oberon4-core" }
+serde.workspace = true
+serde_json.workspace = true
