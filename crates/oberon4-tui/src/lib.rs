@@ -1,10 +1,16 @@
 use std::{
+    io,
     path::PathBuf,
     process::{Command, Stdio},
     thread,
     time::Duration,
 };
 
+use crossterm::{
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    execute,
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+};
 use oberon4_auth::AccountRegistry;
 use oberon4_core::{
     AppConfig, ChatMessage, ChatProvider, ChatRole, InMemoryConfigStore, InMemorySessionStore,
@@ -12,6 +18,13 @@ use oberon4_core::{
 };
 use oberon4_daemon::{DaemonIpcClient, DaemonRuntime, LifecycleState};
 use oberon4_provider_openai::{FakeTransport, OpenAiCompatibleClient, RetryPolicy};
+use ratatui::{
+    Frame, Terminal,
+    backend::CrosstermBackend,
+    style::{Modifier, Style},
+    text::{Line, Text},
+    widgets::{Block, Borders, Paragraph, Wrap},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TuiCommand {
@@ -31,6 +44,20 @@ pub enum TuiCommand {
 pub struct TuiResponse {
     pub output: String,
     pub should_quit: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UiLine {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TuiShellState {
+    input: String,
+    status: String,
+    should_quit: bool,
+    transcript: Vec<UiLine>,
 }
 
 pub struct TuiApp {
@@ -63,6 +90,17 @@ impl Default for TuiApp {
 impl Default for DaemonBackedTuiApp {
     fn default() -> Self {
         Self::new(DaemonIpcClient::new(oberon4_daemon::default_socket_path()))
+    }
+}
+
+impl Default for TuiShellState {
+    fn default() -> Self {
+        Self {
+            input: String::new(),
+            status: "Connected to daemon".to_string(),
+            should_quit: false,
+            transcript: Vec::new(),
+        }
     }
 }
 
@@ -420,6 +458,196 @@ impl DaemonBackedTuiApp {
     }
 }
 
+impl TuiShellState {
+    pub fn input(&self) -> &str {
+        &self.input
+    }
+
+    pub fn status(&self) -> &str {
+        &self.status
+    }
+
+    pub fn transcript(&self) -> &[UiLine] {
+        &self.transcript
+    }
+
+    pub fn should_quit(&self) -> bool {
+        self.should_quit
+    }
+
+    pub fn push_input_char(&mut self, ch: char) {
+        self.input.push(ch);
+    }
+
+    pub fn backspace(&mut self) {
+        let _ = self.input.pop();
+    }
+
+    pub fn submit(&mut self, app: &mut DaemonBackedTuiApp) -> Result<(), OberonError> {
+        let input = std::mem::take(&mut self.input);
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            self.status = "Input was empty".to_string();
+            return Ok(());
+        }
+
+        if !trimmed.starts_with('/') {
+            self.transcript.push(UiLine {
+                role: "user".to_string(),
+                content: trimmed.to_string(),
+            });
+        }
+
+        let response = app.handle_input(trimmed)?;
+        self.status = response.output.clone();
+        self.should_quit = response.should_quit;
+
+        if trimmed.starts_with('/') {
+            self.transcript.push(UiLine {
+                role: "system".to_string(),
+                content: format!("command: {trimmed}"),
+            });
+            if !response.output.is_empty() {
+                self.transcript.push(UiLine {
+                    role: "status".to_string(),
+                    content: response.output,
+                });
+            }
+            return Ok(());
+        }
+
+        if let Some(last) = app.transcript().last() {
+            self.transcript.push(UiLine {
+                role: role_label(last.role).to_string(),
+                content: last.content.clone(),
+            });
+        }
+
+        Ok(())
+    }
+}
+
+pub fn run_terminal_ui() -> Result<(), OberonError> {
+    let mut app = DaemonBackedTuiApp::default();
+    let mut shell = TuiShellState::default();
+    let mut terminal = init_terminal()?;
+
+    let result = run_terminal_loop(&mut terminal, &mut app, &mut shell);
+    restore_terminal(&mut terminal)?;
+    result
+}
+
+fn run_terminal_loop(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut DaemonBackedTuiApp,
+    shell: &mut TuiShellState,
+) -> Result<(), OberonError> {
+    loop {
+        terminal
+            .draw(|frame| render_terminal(frame, shell))
+            .map_err(|err| OberonError::Storage(format!("tui draw failed: {err}")))?;
+
+        if shell.should_quit() {
+            return Ok(());
+        }
+
+        if !event::poll(Duration::from_millis(100))
+            .map_err(|err| OberonError::Storage(format!("tui event poll failed: {err}")))?
+        {
+            continue;
+        }
+
+        let Event::Key(key) = event::read()
+            .map_err(|err| OberonError::Storage(format!("tui event read failed: {err}")))?
+        else {
+            continue;
+        };
+
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
+
+        match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                shell.should_quit = true;
+                shell.status = "quitting".to_string();
+            }
+            KeyCode::Char(ch) => shell.push_input_char(ch),
+            KeyCode::Backspace => shell.backspace(),
+            KeyCode::Enter => shell.submit(app)?,
+            KeyCode::Esc => {
+                shell.should_quit = true;
+                shell.status = "quitting".to_string();
+            }
+            _ => {}
+        }
+    }
+}
+
+fn render_terminal(frame: &mut Frame, shell: &TuiShellState) {
+    let area = frame.size();
+    let [header, body, footer] = ratatui::layout::Layout::vertical([
+        ratatui::layout::Constraint::Length(3),
+        ratatui::layout::Constraint::Min(5),
+        ratatui::layout::Constraint::Length(3),
+    ])
+    .areas(area);
+
+    let header_text = Paragraph::new(Text::from(vec![
+        Line::styled("Oberon4 TUI", Style::default().add_modifier(Modifier::BOLD)),
+        Line::raw(shell.status()),
+    ]))
+    .block(Block::default().borders(Borders::ALL).title("Status"));
+
+    let transcript_lines: Vec<Line<'static>> = if shell.transcript().is_empty() {
+        vec![Line::raw(
+            "No messages yet. Type text to chat or /help for commands.",
+        )]
+    } else {
+        shell
+            .transcript()
+            .iter()
+            .map(|line| Line::raw(format!("[{}] {}", line.role, line.content)))
+            .collect()
+    };
+
+    let transcript = Paragraph::new(Text::from(transcript_lines))
+        .block(Block::default().borders(Borders::ALL).title("Transcript"))
+        .wrap(Wrap { trim: false });
+
+    let input = Paragraph::new(shell.input())
+        .block(Block::default().borders(Borders::ALL).title("Input"))
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(header_text, header);
+    frame.render_widget(transcript, body);
+    frame.render_widget(input, footer);
+    frame.set_cursor(
+        footer.x.saturating_add(shell.input().len() as u16 + 1),
+        footer.y.saturating_add(1),
+    );
+}
+
+fn init_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>, OberonError> {
+    enable_raw_mode()
+        .map_err(|err| OberonError::Storage(format!("raw mode enable failed: {err}")))?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)
+        .map_err(|err| OberonError::Storage(format!("enter alt screen failed: {err}")))?;
+    Terminal::new(CrosstermBackend::new(stdout))
+        .map_err(|err| OberonError::Storage(format!("terminal init failed: {err}")))
+}
+
+fn restore_terminal(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) -> Result<(), OberonError> {
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)
+        .map_err(|err| OberonError::Storage(format!("leave alt screen failed: {err}")))?;
+    disable_raw_mode()
+        .map_err(|err| OberonError::Storage(format!("raw mode disable failed: {err}")))?;
+    Ok(())
+}
+
 pub fn parse_tui_command(input: &str) -> Result<TuiCommand, OberonError> {
     let trimmed = input.trim();
     if !trimmed.starts_with('/') {
@@ -528,6 +756,14 @@ fn daemon_binary_path() -> Result<PathBuf, OberonError> {
     ))
 }
 
+fn role_label(role: ChatRole) -> &'static str {
+    match role {
+        ChatRole::System => "system",
+        ChatRole::User => "user",
+        ChatRole::Assistant => "assistant",
+    }
+}
+
 fn default_provider_client() -> OpenAiCompatibleClient<FakeTransport> {
     OpenAiCompatibleClient::new(
         "https://api.openai.com",
@@ -551,7 +787,9 @@ fn ok_response(content: &str) -> String {
 mod tests {
     use std::{thread, time::Duration};
 
-    use super::{DaemonBackedTuiApp, TuiApp, TuiCommand, parse_tui_command, status_line};
+    use super::{
+        DaemonBackedTuiApp, TuiApp, TuiCommand, TuiShellState, parse_tui_command, status_line,
+    };
     use oberon4_auth::AccountRegistry;
     use oberon4_core::{
         AppConfig, ChatRole, FakeChatProvider, FakeOAuthProvider, InMemorySecretStore,
@@ -672,10 +910,8 @@ mod tests {
 
     #[test]
     fn daemon_backed_tui_uses_socket_server_and_persists_session() {
-        let socket_path = std::env::temp_dir().join(format!(
-            "oberon4-tui-test-{}.sock",
-            std::process::id()
-        ));
+        let socket_path =
+            std::env::temp_dir().join(format!("oberon4-tui-test-{}.sock", std::process::id()));
         let thread_socket = socket_path.clone();
 
         let handle = thread::spawn(move || {
@@ -716,6 +952,59 @@ mod tests {
         assert_eq!(clear.output, "transcript cleared");
         assert_eq!(load.output, "loaded session daemon-demo");
         assert_eq!(app.transcript().len(), 2);
+
+        let client = DaemonIpcClient::new(&socket_path);
+        let _ = client.send(&oberon4_core::DaemonCommand::Shutdown).unwrap();
+        handle.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn shell_state_edits_input_and_tracks_quit() {
+        let mut shell = TuiShellState::default();
+        shell.push_input_char('h');
+        shell.push_input_char('i');
+        shell.backspace();
+        assert_eq!(shell.input(), "h");
+        assert!(!shell.should_quit());
+    }
+
+    #[test]
+    fn shell_submit_records_command_output() {
+        let socket_path = std::env::temp_dir().join(format!(
+            "oberon4-tui-shell-test-{}.sock",
+            std::process::id()
+        ));
+        let thread_socket = socket_path.clone();
+        let handle = thread::spawn(move || {
+            let app = DaemonApp::new(
+                DaemonRuntime::default(),
+                FakeChatProvider {
+                    reply: "daemon reply".to_string(),
+                },
+                FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
+                FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+                AccountRegistry::default(),
+                InMemorySecretStore::default(),
+            );
+            serve_unix_socket(&thread_socket, app)
+        });
+
+        for _ in 0..20 {
+            if socket_path.exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+
+        let mut app = DaemonBackedTuiApp::new(DaemonIpcClient::new(&socket_path));
+        let mut shell = TuiShellState::default();
+        for ch in "/help".chars() {
+            shell.push_input_char(ch);
+        }
+        shell.submit(&mut app).unwrap();
+
+        assert!(shell.status().contains("/help"));
+        assert_eq!(shell.transcript()[0].role, "system");
 
         let client = DaemonIpcClient::new(&socket_path);
         let _ = client.send(&oberon4_core::DaemonCommand::Shutdown).unwrap();

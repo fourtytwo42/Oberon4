@@ -106,7 +106,11 @@ where
 {
     pub fn start(&mut self) -> Result<DaemonStatus, OberonError> {
         self.lifecycle = LifecycleState::Running;
-        Ok(status_snapshot(&self.config_store.load()?, self.lifecycle, None))
+        Ok(status_snapshot(
+            &self.config_store.load()?,
+            self.lifecycle,
+            None,
+        ))
     }
 
     pub fn stop(&mut self) {
@@ -118,7 +122,11 @@ where
     }
 
     pub fn status(&self) -> Result<DaemonStatus, OberonError> {
-        Ok(status_snapshot(&self.config_store.load()?, self.lifecycle, None))
+        Ok(status_snapshot(
+            &self.config_store.load()?,
+            self.lifecycle,
+            None,
+        ))
     }
 
     pub fn health(&self) -> Result<HealthReport, OberonError> {
@@ -368,11 +376,7 @@ where
                 self.accounts.disconnect(provider, &account_id)?;
                 Ok(CommandOutcome {
                     event: DaemonEvent::Ack {
-                        message: format!(
-                            "disconnected {} {}",
-                            provider_name(provider),
-                            account_id
-                        ),
+                        message: format!("disconnected {} {}", provider_name(provider), account_id),
                     },
                     should_shutdown: false,
                 })
@@ -380,7 +384,10 @@ where
         }
     }
 
-    fn oauth_provider(&self, provider: OAuthProviderKind) -> Result<&dyn OAuthProvider, OberonError> {
+    fn oauth_provider(
+        &self,
+        provider: OAuthProviderKind,
+    ) -> Result<&dyn OAuthProvider, OberonError> {
         match provider {
             OAuthProviderKind::OpenAi => Ok(&self.openai_oauth),
             OAuthProviderKind::Anthropic => Ok(&self.anthropic_oauth),
@@ -390,7 +397,11 @@ where
     fn active_account(&self) -> Option<String> {
         [OAuthProviderKind::OpenAi, OAuthProviderKind::Anthropic]
             .into_iter()
-            .find_map(|provider| self.accounts.active_account_id(provider).map(str::to_string))
+            .find_map(|provider| {
+                self.accounts
+                    .active_account_id(provider)
+                    .map(str::to_string)
+            })
     }
 }
 
@@ -455,8 +466,9 @@ where
 {
     let socket_path = socket_path.as_ref();
     if let Some(parent) = socket_path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|err| OberonError::Storage(format!("socket directory create failed: {err}")))?;
+        fs::create_dir_all(parent).map_err(|err| {
+            OberonError::Storage(format!("socket directory create failed: {err}"))
+        })?;
     }
     if socket_path.exists() {
         fs::remove_file(socket_path)
@@ -499,7 +511,12 @@ where
     let response = match serde_json::from_slice::<DaemonCommand>(&input) {
         Ok(command) => match app.handle_command(command) {
             Ok(outcome) => (outcome.event, outcome.should_shutdown),
-            Err(err) => (DaemonEvent::Error { message: err.to_string() }, false),
+            Err(err) => (
+                DaemonEvent::Error {
+                    message: err.to_string(),
+                },
+                false,
+            ),
         },
         Err(err) => (
             DaemonEvent::Error {
@@ -537,7 +554,7 @@ mod tests {
 
     use super::{
         DaemonApp, DaemonIpcClient, DaemonRuntime, LifecycleState, LogEntry, LogLevel,
-        default_socket_path, daemon_status, log_entry, serve_unix_socket,
+        daemon_status, default_socket_path, log_entry, serve_unix_socket,
     };
     use oberon4_auth::AccountRegistry;
     use oberon4_core::{
@@ -651,7 +668,10 @@ mod tests {
             other => panic!("unexpected event: {other:?}"),
         }
 
-        let accounts = app.handle_command(DaemonCommand::ListAccounts).unwrap().event;
+        let accounts = app
+            .handle_command(DaemonCommand::ListAccounts)
+            .unwrap()
+            .event;
         match accounts {
             DaemonEvent::AccountsListed { accounts } => {
                 assert_eq!(accounts.len(), 1);
@@ -689,10 +709,8 @@ mod tests {
 
     #[test]
     fn socket_server_round_trips_status_and_shutdown() {
-        let socket_path = default_socket_path().with_file_name(format!(
-            "oberon4-daemon-test-{}.sock",
-            std::process::id()
-        ));
+        let socket_path = default_socket_path()
+            .with_file_name(format!("oberon4-daemon-test-{}.sock", std::process::id()));
         let thread_socket = socket_path.clone();
         let handle = thread::spawn(move || {
             let app = DaemonApp::new(

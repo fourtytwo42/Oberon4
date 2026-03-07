@@ -332,19 +332,20 @@ fn execute_via_daemon(command: CliCommand) -> Result<CliOutput, OberonError> {
                 event => return daemon_protocol_error(event),
             }
             match client.send(&oberon4_core::DaemonCommand::EndpointHealth)? {
-                oberon4_core::DaemonEvent::Ack { message } => Ok(CliOutput::success(
-                    if message == "endpoint test passed" {
+                oberon4_core::DaemonEvent::Ack { message } => {
+                    Ok(CliOutput::success(if message == "endpoint test passed" {
                         "doctor passed".to_string()
                     } else {
                         message
-                    },
-                )),
+                    }))
+                }
                 event => daemon_protocol_error(event),
             }
         }
         CliCommand::AccountConnect { provider } => {
             ensure_daemon_running()?;
-            match daemon_client()?.send(&oberon4_core::DaemonCommand::ConnectAccount { provider })?
+            match daemon_client()?
+                .send(&oberon4_core::DaemonCommand::ConnectAccount { provider })?
             {
                 oberon4_core::DaemonEvent::OAuthStarted { url, .. } => Ok(CliOutput::success(url)),
                 event => daemon_protocol_error(event),

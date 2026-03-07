@@ -6,8 +6,10 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+crossterm = "0.27"
 oberon4-auth = { path = "../oberon4-auth" }
 oberon4-daemon = { path = "../oberon4-daemon" }
 oberon4-core = { path = "../oberon4-core" }
 oberon4-provider-openai = { path = "../oberon4-provider-openai" }
+ratatui = { version = "0.26.3", default-features = false, features = ["crossterm"] }
 serde_json.workspace = true

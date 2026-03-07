@@ -3,9 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::{
-    AppConfig, ConfigStore, OberonError, SavedSession, SessionStore,
-};
+use crate::{AppConfig, ConfigStore, OberonError, SavedSession, SessionStore};
 
 #[derive(Debug, Clone)]
 pub struct FileConfigStore {
@@ -84,8 +82,8 @@ impl SessionStore for FileSessionStore {
 
     fn load_session(&self, session_id: &str) -> Result<SavedSession, OberonError> {
         let path = self.session_path(session_id);
-        let raw = fs::read(&path)
-            .map_err(|_| OberonError::NotFound(format!("session:{session_id}")))?;
+        let raw =
+            fs::read(&path).map_err(|_| OberonError::NotFound(format!("session:{session_id}")))?;
         serde_json::from_slice(&raw)
             .map_err(|err| OberonError::Validation(format!("session decode failed: {err}")))
     }
@@ -137,11 +135,14 @@ fn ensure_parent_dir(path: &Path) -> Result<(), OberonError> {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, time::{SystemTime, UNIX_EPOCH}};
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     use crate::{
-        ChatMessage, ChatProviderKind, ChatRole, SavedSession, SessionId, SessionSummary,
-        ConfigStore, SessionStore,
+        ChatMessage, ChatProviderKind, ChatRole, ConfigStore, SavedSession, SessionId,
+        SessionStore, SessionSummary,
     };
 
     use super::{FileConfigStore, FileSessionStore};
