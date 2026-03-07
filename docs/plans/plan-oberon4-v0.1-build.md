@@ -93,12 +93,12 @@ Verification gate `EG-P1`:
 - schema/contract tests for IPC request and event envelopes
 
 ### Phase 2: Daemon Runtime
-- [ ] `P2.1` Implement daemon lifecycle abstraction (`start`, `stop`, `status`).
-- [ ] `P2.2` Implement local IPC server and request dispatch.
-- [ ] `P2.3` Implement config load/save path in daemon.
-- [ ] `P2.4` Implement structured logging with request IDs.
-- [ ] `P2.5` Implement health/status reporting contract.
-- [ ] `P2.6` Add integration tests for daemon startup, shutdown, and status flow.
+- [x] `P2.1` Implement daemon lifecycle abstraction (`start`, `stop`, `status`).
+- [x] `P2.2` Implement local IPC server and request dispatch.
+- [x] `P2.3` Implement config load/save path in daemon.
+- [x] `P2.4` Implement structured logging with request IDs.
+- [x] `P2.5` Implement health/status reporting contract.
+- [x] `P2.6` Add integration tests for daemon startup, shutdown, and status flow.
 
 Dependencies:
 - depends on `EG-P1`
