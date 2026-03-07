@@ -73,16 +73,16 @@ Verification gate `EG-P0`:
 - `cargo test --workspace`
 
 ### Phase 1: Core Domain and IPC
-- [ ] `P1.1` Define domain models for sessions, messages, accounts, providers, daemon status, and saved chats.
-- [ ] `P1.2` Define service traits:
+- [x] `P1.1` Define domain models for sessions, messages, accounts, providers, daemon status, and saved chats.
+- [x] `P1.2` Define service traits:
   - `ChatProvider`
   - `OAuthProvider`
   - `ConfigStore`
   - `SecretStore`
   - `SessionStore`
-- [ ] `P1.3` Define local IPC command and event contracts shared by daemon, CLI, and TUI.
-- [ ] `P1.4` Implement mock/fake providers and stores for deterministic tests.
-- [ ] `P1.5` Add unit and contract tests for domain types and IPC schema.
+- [x] `P1.3` Define local IPC command and event contracts shared by daemon, CLI, and TUI.
+- [x] `P1.4` Implement mock/fake providers and stores for deterministic tests.
+- [x] `P1.5` Add unit and contract tests for domain types and IPC schema.
 
 Dependencies:
 - depends on `EG-P0`
