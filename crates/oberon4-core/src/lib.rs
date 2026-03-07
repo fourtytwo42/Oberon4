@@ -21,4 +21,6 @@ pub use mock::{FakeChatProvider, FakeOAuthProvider, InMemoryConfigStore, InMemor
 pub use persistence::{FileConfigStore, FileSessionStore, default_data_dir};
 pub use result::ServiceEnvelope;
 pub use service::{ChatProvider, ConfigStore, OAuthProvider, SessionStore};
-pub use state::{InMemorySecretStore, InMemoryStateStore, SecretStore, StateStore};
+pub use state::{
+    FileSecretStore, InMemorySecretStore, InMemoryStateStore, SecretStore, StateStore,
+};

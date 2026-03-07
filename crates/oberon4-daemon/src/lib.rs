@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use oberon4_auth::{AccountRegistry, TokenBundle};
 use oberon4_core::{
     AppConfig, ChatMessage, ChatProvider, ChatProviderKind, ConfigStore, DaemonCommand,
-    DaemonEvent, DaemonStatus, FileConfigStore, FileSessionStore, InMemoryConfigStore,
-    InMemorySecretStore, InMemorySessionStore, OAuthProvider, OAuthProviderKind, OberonError,
+    DaemonEvent, DaemonStatus, FileConfigStore, FileSecretStore, FileSessionStore,
+    InMemoryConfigStore, InMemorySessionStore, OAuthProvider, OAuthProviderKind, OberonError,
     RequestId, SecretStore, ServiceEnvelope, SessionStore,
 };
 
@@ -164,7 +164,7 @@ impl Default
         oberon4_provider_openai::OpenAiCompatibleClient<oberon4_provider_openai::ReqwestTransport>,
         oberon4_auth::OpenAiOAuthAdapter,
         oberon4_auth::AnthropicOAuthAdapter,
-        InMemorySecretStore,
+        FileSecretStore,
     >
 {
     fn default() -> Self {
@@ -183,7 +183,7 @@ impl Default
             oberon4_auth::OpenAiOAuthAdapter::default(),
             oberon4_auth::AnthropicOAuthAdapter::default(),
             AccountRegistry::default(),
-            InMemorySecretStore::default(),
+            FileSecretStore::default(),
         )
     }
 }
