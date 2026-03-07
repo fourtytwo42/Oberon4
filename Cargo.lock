@@ -160,6 +160,7 @@ dependencies = [
  "oberon4-core",
  "oberon4-daemon",
  "oberon4-provider-openai",
+ "oberon4-tui",
  "serde_json",
 ]
 

@@ -11,3 +11,6 @@ oberon4-core = { path = "../oberon4-core" }
 oberon4-daemon = { path = "../oberon4-daemon" }
 oberon4-provider-openai = { path = "../oberon4-provider-openai" }
 serde_json.workspace = true
+
+[dev-dependencies]
+oberon4-tui = { path = "../oberon4-tui" }

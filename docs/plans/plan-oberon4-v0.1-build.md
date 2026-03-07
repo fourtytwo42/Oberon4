@@ -5,7 +5,7 @@ Status: active
 Owner: Oberon4
 WorkflowType: feature-development
 WorkflowMode: incremental-gates
-TaskState: in-progress
+TaskState: done
 Stack: rust
 Risk: high-risk
 
@@ -227,13 +227,13 @@ Verification gate `EG-P7`:
 - unsupported-platform path returns explicit status
 
 ### Phase 8: End-to-End and Human-Test Readiness
-- [ ] `P8.1` Add workspace-wide integration harness for daemon + provider + CLI.
-- [ ] `P8.2` Add end-to-end test for endpoint configuration and connectivity.
-- [ ] `P8.3` Add end-to-end test for OAuth account connect and account switching.
-- [ ] `P8.4` Add end-to-end test for one-shot chat and TUI chat path.
-- [ ] `P8.5` Add end-to-end test for session save and load.
-- [ ] `P8.6` Add release-readiness checklist and human test script.
-- [ ] `P8.7` Run full workspace verification and capture evidence.
+- [x] `P8.1` Add workspace-wide integration harness for daemon + provider + CLI.
+- [x] `P8.2` Add end-to-end test for endpoint configuration and connectivity.
+- [x] `P8.3` Add end-to-end test for OAuth account connect and account switching.
+- [x] `P8.4` Add end-to-end test for one-shot chat and TUI chat path.
+- [x] `P8.5` Add end-to-end test for session save and load.
+- [x] `P8.6` Add release-readiness checklist and human test script.
+- [x] `P8.7` Run full workspace verification and capture evidence.
 
 Dependencies:
 - depends on `EG-P3`
@@ -251,10 +251,10 @@ Verification gate `EG-P8`:
 
 ## 6. Human Testing Entry Criteria
 Human testing may begin only when:
-- [ ] all phase gates through `EG-P8` are green
-- [ ] all PRD acceptance criteria are mapped to implemented work
-- [ ] no open stop-ship defects remain
-- [ ] operator test script exists for daemon, CLI, TUI, and OAuth flows
+- [x] all phase gates through `EG-P8` are green
+- [x] all PRD acceptance criteria are mapped to implemented work
+- [x] no open stop-ship defects remain
+- [x] operator test script exists for daemon, CLI, TUI, and OAuth flows
 
 ## 7. Requirement Mapping
 - `FR-001`: `P1`, `P2`, `P8`
