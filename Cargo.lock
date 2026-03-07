@@ -107,6 +107,8 @@ name = "oberon4-daemon"
 version = "0.1.0"
 dependencies = [
  "oberon4-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
