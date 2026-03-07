@@ -13,6 +13,27 @@ Required scopes:
 - focused crate: `cargo test -p <crate-name>`
 - lint gate (when enabled): `cargo clippy --all-targets -- -D warnings`
 
+## 2.1 Optional Live Hotspot Smoke
+Use this when a real LLM Hotspot universal endpoint is available and you want live-provider evidence in addition to deterministic tests.
+
+Required env:
+- `OBERON4_LIVE_BASE_URL`
+
+Optional env:
+- `OBERON4_LIVE_OPENAI_MODEL` default `gpt-5.1-codex-mini`
+- `OBERON4_LIVE_ANTHROPIC_MODEL` default `claude-sonnet-4-6`
+- `OBERON4_LIVE_TIMEOUT_SECS` default `90`
+
+Commands:
+- shell smoke: `scripts/live-hotspot-smoke.sh`
+- Rust live provider test only:
+  - `OBERON4_LIVE_HOTSPOT=1 OBERON4_LIVE_BASE_URL=<base> cargo test -p oberon4-provider-openai --test live_hotspot -- --ignored --nocapture`
+
+Rules:
+- keep live tests non-destructive
+- do not use account/key revoke/delete operations in automated live smoke
+- confirm success by both HTTP response and Rust live integration test
+
 ## 3. Coverage Expectations by Requirement
 - `FR-001`: lifecycle tests (start, health, graceful stop)
 - `FR-002`: command parsing + render output tests
