@@ -125,20 +125,20 @@ Verification gate `EG-P3`:
 - timeout/retry behavior covered by automated tests
 
 ### Phase 4: OAuth and Account System
-- [ ] `P4.1` Extract and adapt llmhotspot OAuth primitives into `oberon4-auth`.
-- [ ] `P4.2` Implement OpenAI OAuth provider adapter.
-- [ ] `P4.3` Implement Anthropic OAuth provider adapter.
-- [ ] `P4.4` Implement local callback handling with state/PKCE validation.
-- [ ] `P4.5` Implement secure token persistence through secret storage abstraction.
-- [ ] `P4.6` Implement account lifecycle operations:
+- [x] `P4.1` Extract and adapt llmhotspot OAuth primitives into `oberon4-auth`.
+- [x] `P4.2` Implement OpenAI OAuth provider adapter.
+- [x] `P4.3` Implement Anthropic OAuth provider adapter.
+- [x] `P4.4` Implement local callback handling with state/PKCE validation.
+- [x] `P4.5` Implement secure token persistence through secret storage abstraction.
+- [x] `P4.6` Implement account lifecycle operations:
   - connect
   - list
   - activate
   - disable
   - disconnect
-- [ ] `P4.7` Add integration tests for OpenAI OAuth flow.
-- [ ] `P4.8` Add integration tests for Anthropic OAuth flow.
-- [ ] `P4.9` Add security tests for callback mismatch, expired state, and secret redaction.
+- [x] `P4.7` Add integration tests for OpenAI OAuth flow.
+- [x] `P4.8` Add integration tests for Anthropic OAuth flow.
+- [x] `P4.9` Add security tests for callback mismatch, expired state, and secret redaction.
 
 Dependencies:
 - depends on `EG-P2`
