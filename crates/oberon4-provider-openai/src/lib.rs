@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::VecDeque};
+use std::{cell::RefCell, collections::VecDeque, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
@@ -50,6 +50,40 @@ pub struct OpenAiChatResponseMessage {
 
 pub trait OpenAiTransport {
     fn post_json(&self, url: &str, body: &str, timeout_ms: u64) -> Result<String, OberonError>;
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ReqwestTransport;
+
+impl OpenAiTransport for ReqwestTransport {
+    fn post_json(&self, url: &str, body: &str, timeout_ms: u64) -> Result<String, OberonError> {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_millis(timeout_ms))
+            .build()
+            .map_err(|err| OberonError::Storage(format!("transport client build failed: {err}")))?;
+
+        let response = client
+            .post(url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(reqwest::header::CONNECTION, "close")
+            .body(body.to_string())
+            .send()
+            .map_err(|err| OberonError::Storage(format!("transport request failed: {err}")))?;
+
+        let status = response.status();
+        let text = response.text().map_err(|err| {
+            OberonError::Storage(format!("transport response read failed: {err}"))
+        })?;
+
+        if !status.is_success() {
+            return Err(OberonError::Validation(format!(
+                "provider returned HTTP {}",
+                status.as_u16()
+            )));
+        }
+
+        Ok(text)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -243,8 +277,15 @@ impl OpenAiTransport for FakeTransport {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        thread,
+    };
+
     use super::{
-        FakeTransport, OpenAiChatRequest, OpenAiCompatibleClient, RetryPolicy, endpoint_summary,
+        FakeTransport, OpenAiChatRequest, OpenAiCompatibleClient, ReqwestTransport, RetryPolicy,
+        endpoint_summary,
     };
     use oberon4_core::{AppConfig, ChatMessage, ChatProvider, ChatRole, OberonError};
 
@@ -485,5 +526,52 @@ mod tests {
 
         let requests = client.transport.recorded_requests();
         assert_eq!(requests[0].2, 12_345);
+    }
+
+    #[test]
+    fn reqwest_transport_posts_to_local_server() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let addr = listener.local_addr().expect("local addr");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept should succeed");
+            let mut buffer = [0_u8; 4096];
+            let bytes_read = stream.read(&mut buffer).expect("request should read");
+            let request = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
+            assert!(request.starts_with("POST /v1/chat/completions HTTP/1.1"));
+            assert!(request.contains("\"model\":\"gpt-4.1-mini\""));
+
+            let body = ok_response("from server");
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("response should write");
+        });
+
+        let client = OpenAiCompatibleClient::new(
+            format!("http://{}", addr),
+            RetryPolicy {
+                timeout_ms: 5_000,
+                max_retries: 0,
+            },
+            ReqwestTransport,
+        );
+
+        let reply = client
+            .send_message(
+                "",
+                "gpt-4.1-mini",
+                &[ChatMessage {
+                    role: ChatRole::User,
+                    content: "hello".to_string(),
+                }],
+            )
+            .expect("real transport request should succeed");
+
+        server.join().expect("server thread should finish");
+        assert_eq!(reply.content, "from server");
     }
 }
