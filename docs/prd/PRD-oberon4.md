@@ -19,6 +19,9 @@ Build a local-first, modular agent host with:
 - `FR-004`: modular crate boundaries so subsystems can evolve independently.
 - `FR-005`: tray/notification-bar integration contract with platform adapters.
 - `FR-006`: deterministic test coverage for every subsystem before merge.
+- `FR-007`: OpenAI OAuth account connect flow implemented in Rust, aligned with llmhotspot behavior.
+- `FR-008`: CLI command surface for daemon control, configuration, diagnostics, and one-shot chat.
+- `FR-009`: TUI command surface for interactive session control and operator actions.
 
 ## 3. Non-Goals (v0.1)
 - full plugin marketplace
@@ -58,12 +61,40 @@ Build a local-first, modular agent host with:
   - `AC-006.2`: CI test command and local test command are documented.
   - `AC-006.3`: regressions require an added failing-before/passing-after test.
 
+- `FR-007` OpenAI OAuth (Rust transplant parity)
+  - `AC-007.1`: supports browser-start OAuth with PKCE and state validation.
+  - `AC-007.2`: supports local callback handling with sanitized `return_to` target policy.
+  - `AC-007.3`: supports polling/status path for browser flow completion.
+  - `AC-007.4`: stores refresh/access credentials through secure storage path (keyring/secret store), never logs raw secrets.
+  - `AC-007.5`: exposes account lifecycle operations (`connect`, `list`, `activate`, `disable`, `disconnect`) through daemon CLI/API surface.
+  - `AC-007.6`: OAuth flow behavior is backed by Rust integration and contract tests before merge.
+
+- `FR-008` CLI command surface
+  - `AC-008.1`: CLI exposes `daemon start`, `daemon stop`, and `daemon status`.
+  - `AC-008.2`: CLI exposes `tui` to launch the interactive terminal UI.
+  - `AC-008.3`: CLI exposes `config show` and `config set <key> <value>` for endpoint/model/runtime configuration.
+  - `AC-008.4`: CLI exposes `endpoint test` to validate the configured OpenAI-compatible endpoint.
+  - `AC-008.5`: CLI exposes one-shot `chat --message <text>` execution for scripting and smoke checks.
+  - `AC-008.6`: CLI exposes `logs tail` and `doctor` for diagnostics.
+  - `AC-008.7`: all CLI commands return deterministic exit codes and sanitized errors.
+
+- `FR-009` TUI command surface
+  - `AC-009.1`: TUI supports `/help`, `/quit`, and `/status`.
+  - `AC-009.2`: TUI supports `/config` to show effective runtime configuration.
+  - `AC-009.3`: TUI supports `/model <name>` to switch active model for the session.
+  - `AC-009.4`: TUI supports `/endpoint <url>` to override endpoint for the session.
+  - `AC-009.5`: TUI supports `/system <text>` to set or replace the session system prompt.
+  - `AC-009.6`: TUI supports `/clear` to clear the visible transcript buffer.
+  - `AC-009.7`: TUI supports `/save <name>` and `/load <name>` for session persistence.
+  - `AC-009.8`: invalid or unsupported TUI commands fail with explicit help text and no state corruption.
+
 ## 5. Non-Functional Requirements
 - `NFR-001` Reliability: no panics on malformed endpoint responses.
 - `NFR-002` Security: no plaintext secret logging.
 - `NFR-003` Observability: structured logs include request IDs.
 - `NFR-004` Maintainability: crate-level boundaries enforced by API contracts.
 - `NFR-005` Performance: interactive TUI latency target <250ms local render path.
+- `NFR-006` Auth security: OAuth callback/state handling must fail closed on mismatch/expiry.
 
 ## 6. Risks and Mitigations
 - endpoint variance risk -> adapter tests + strict schema validation
@@ -71,6 +102,6 @@ Build a local-first, modular agent host with:
 - coupling risk -> crate boundaries + contract tests
 
 ## 7. Release Gate (v0.1)
-- all `AC-001.*` through `AC-006.*` are `met`
+- all `AC-001.*` through `AC-009.*` are `met`
 - required test suite green
 - docs + implementation + tests synchronized
