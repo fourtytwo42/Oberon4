@@ -1,6 +1,6 @@
 use std::{
     io,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::mpsc::{self, Receiver, TryRecvError},
     thread,
@@ -888,8 +888,8 @@ fn protocol_error_inner(event: oberon4_core::DaemonEvent) -> OberonError {
 }
 
 fn spawn_daemon_process(socket_path: PathBuf) -> Result<(), OberonError> {
-    let daemon_binary = daemon_binary_path()?;
-    Command::new(daemon_binary)
+    let mut command = daemon_launch_command()?;
+    command
         .env("OBERON4_SOCKET_PATH", socket_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -899,29 +899,90 @@ fn spawn_daemon_process(socket_path: PathBuf) -> Result<(), OberonError> {
     Ok(())
 }
 
-fn daemon_binary_path() -> Result<PathBuf, OberonError> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BinaryLaunchTarget {
+    Direct(PathBuf),
+    CargoRun {
+        cargo_bin: PathBuf,
+        manifest_path: PathBuf,
+        package: String,
+    },
+}
+
+fn daemon_launch_command() -> Result<Command, OberonError> {
+    Ok(match resolve_daemon_launch_target()? {
+        BinaryLaunchTarget::Direct(path) => Command::new(path),
+        BinaryLaunchTarget::CargoRun {
+            cargo_bin,
+            manifest_path,
+            package,
+        } => {
+            let mut command = Command::new(cargo_bin);
+            command
+                .arg("run")
+                .arg("-p")
+                .arg(package)
+                .arg("--manifest-path")
+                .arg(manifest_path)
+                .arg("--quiet");
+            command
+        }
+    })
+}
+
+fn resolve_daemon_launch_target() -> Result<BinaryLaunchTarget, OberonError> {
+    if let Some(path) = std::env::var_os("OBERON4_DAEMON_BIN") {
+        return Ok(BinaryLaunchTarget::Direct(PathBuf::from(path)));
+    }
+
     let current = std::env::current_exe()
         .map_err(|err| OberonError::Storage(format!("current executable lookup failed: {err}")))?;
-    let direct = current
-        .parent()
-        .map(|dir| dir.join("oberon4-daemon"))
-        .ok_or_else(|| {
-            OberonError::Storage("current executable has no parent directory".to_string())
-        })?;
-    if direct.exists() {
-        return Ok(direct);
+
+    resolve_binary_launch_target(&current, "oberon4-daemon").ok_or_else(|| {
+        OberonError::Storage(
+            "oberon4-daemon binary not found and no cargo workspace fallback was available"
+                .to_string(),
+        )
+    })
+}
+
+fn resolve_binary_launch_target(current_exe: &Path, binary_name: &str) -> Option<BinaryLaunchTarget> {
+    for candidate in binary_path_candidates(current_exe, binary_name) {
+        if candidate.exists() {
+            return Some(BinaryLaunchTarget::Direct(candidate));
+        }
     }
-    let sibling = current
-        .parent()
-        .and_then(|dir| dir.parent())
-        .map(|dir| dir.join("oberon4-daemon"))
-        .ok_or_else(|| OberonError::Storage("daemon binary path resolution failed".to_string()))?;
-    if sibling.exists() {
-        return Ok(sibling);
+
+    workspace_manifest_path(current_exe).map(|manifest_path| BinaryLaunchTarget::CargoRun {
+        cargo_bin: std::env::var_os("CARGO")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("cargo")),
+        manifest_path,
+        package: binary_name.to_string(),
+    })
+}
+
+fn binary_path_candidates(current_exe: &Path, binary_name: &str) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(parent) = current_exe.parent() {
+        candidates.push(parent.join(binary_name));
+        if let Some(parent_parent) = parent.parent() {
+            candidates.push(parent_parent.join(binary_name));
+        }
     }
-    Err(OberonError::Storage(
-        "oberon4-daemon binary not found next to current executable".to_string(),
-    ))
+    candidates
+}
+
+fn workspace_manifest_path(current_exe: &Path) -> Option<PathBuf> {
+    let mut cursor = current_exe.parent();
+    while let Some(dir) = cursor {
+        let manifest = dir.join("Cargo.toml");
+        if manifest.exists() {
+            return Some(manifest);
+        }
+        cursor = dir.parent();
+    }
+    None
 }
 
 fn role_label(role: ChatRole) -> &'static str {
@@ -958,9 +1019,9 @@ mod tests {
     use std::sync::mpsc;
 
     use super::{
-        DaemonBackedTuiApp, PendingSubmission, TuiApp, TuiCommand, TuiShellState,
-        handle_pending_local_command, handle_pending_timeout, parse_tui_command,
-        start_async_submit, status_line,
+        BinaryLaunchTarget, DaemonBackedTuiApp, PendingSubmission, TuiApp, TuiCommand,
+        TuiShellState, handle_pending_local_command, handle_pending_timeout, parse_tui_command,
+        resolve_binary_launch_target, start_async_submit, status_line,
     };
     use oberon4_auth::{AccountRegistry, InMemoryAccountMetadataStore};
     use oberon4_core::{
@@ -1332,5 +1393,33 @@ mod tests {
         assert!(pending.is_none());
         assert_eq!(shell.status(), "request timed out");
         assert_eq!(shell.transcript()[0].role, "error");
+    }
+
+    #[test]
+    fn resolves_workspace_cargo_fallback_when_daemon_binary_is_missing() {
+        let root = std::env::temp_dir().join(format!(
+            "oberon4-tui-launcher-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("target/debug")).unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
+        let current = root.join("target/debug/oberon4-tui");
+        let target = resolve_binary_launch_target(&current, "oberon4-daemon")
+            .expect("workspace fallback should resolve");
+
+        match target {
+            BinaryLaunchTarget::CargoRun {
+                manifest_path,
+                package,
+                ..
+            } => {
+                assert_eq!(manifest_path, root.join("Cargo.toml"));
+                assert_eq!(package, "oberon4-daemon");
+            }
+            other => panic!("expected cargo fallback, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

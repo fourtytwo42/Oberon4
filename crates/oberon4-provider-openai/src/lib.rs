@@ -370,8 +370,10 @@ fn normalize_assistant_content(role: ChatRole, content: String) -> String {
 #[derive(Debug)]
 pub struct FakeTransport {
     responses: RefCell<VecDeque<Result<String, OberonError>>>,
-    requests: RefCell<Vec<(String, String, String, u64, Option<String>)>>,
+    requests: RefCell<Vec<FakeRequestRecord>>,
 }
+
+type FakeRequestRecord = (String, String, String, u64, Option<String>);
 
 impl FakeTransport {
     pub fn new(responses: Vec<Result<String, OberonError>>) -> Self {
@@ -385,7 +387,7 @@ impl FakeTransport {
         self.requests.borrow().len()
     }
 
-    pub fn recorded_requests(&self) -> Vec<(String, String, String, u64, Option<String>)> {
+    pub fn recorded_requests(&self) -> Vec<FakeRequestRecord> {
         self.requests.borrow().clone()
     }
 }
