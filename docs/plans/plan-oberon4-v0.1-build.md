@@ -181,23 +181,23 @@ Verification gate `EG-P5`:
 - CLI integration smoke tests pass
 
 ### Phase 6: TUI Surface
-- [ ] `P6.1` Implement TUI shell and daemon client connection.
-- [ ] `P6.2` Implement transcript rendering and prompt submission flow.
-- [ ] `P6.3` Implement TUI commands:
+- [x] `P6.1` Implement TUI shell and daemon client connection.
+- [x] `P6.2` Implement transcript rendering and prompt submission flow.
+- [x] `P6.3` Implement TUI commands:
   - `/help`
   - `/quit`
   - `/status`
   - `/config`
-- [ ] `P6.4` Implement TUI commands:
+- [x] `P6.4` Implement TUI commands:
   - `/model <name>`
   - `/endpoint <url>`
   - `/system <text>`
-- [ ] `P6.5` Implement TUI commands:
+- [x] `P6.5` Implement TUI commands:
   - `/clear`
   - `/save <name>`
   - `/load <name>`
-- [ ] `P6.6` Add command parsing, state transition, and chat loop tests.
-- [ ] `P6.7` Add sanitized error rendering tests.
+- [x] `P6.6` Add command parsing, state transition, and chat loop tests.
+- [x] `P6.7` Add sanitized error rendering tests.
 
 Dependencies:
 - depends on `EG-P2`
