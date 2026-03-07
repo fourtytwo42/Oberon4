@@ -211,13 +211,13 @@ Verification gate `EG-P6`:
 - transcript/chat loop integration tests pass
 
 ### Phase 7: Tray Contract
-- [ ] `P7.1` Implement tray abstraction and unsupported-platform fallback.
-- [ ] `P7.2` Implement tray actions:
+- [x] `P7.1` Implement tray abstraction and unsupported-platform fallback.
+- [x] `P7.2` Implement tray actions:
   - open UI
   - show status
   - restart
   - quit
-- [ ] `P7.3` Add adapter tests and unsupported-platform behavior tests.
+- [x] `P7.3` Add adapter tests and unsupported-platform behavior tests.
 
 Dependencies:
 - depends on `EG-P2`
