@@ -149,26 +149,26 @@ Verification gate `EG-P4`:
 - security-focused callback/state tests pass
 
 ### Phase 5: CLI Surface
-- [ ] `P5.1` Implement CLI parser and command routing.
-- [ ] `P5.2` Implement:
+- [x] `P5.1` Implement CLI parser and command routing.
+- [x] `P5.2` Implement:
   - `daemon start`
   - `daemon stop`
   - `daemon status`
-- [ ] `P5.3` Implement:
+- [x] `P5.3` Implement:
   - `config show`
   - `config set <key> <value>`
   - `endpoint test`
-- [ ] `P5.4` Implement:
+- [x] `P5.4` Implement:
   - `chat --message <text>`
   - `logs tail`
   - `doctor`
-- [ ] `P5.5` Implement account commands:
+- [x] `P5.5` Implement account commands:
   - `account connect --provider <openai|anthropic>`
   - `account list`
   - `account activate --provider <openai|anthropic> --account <id>`
   - `account disable --provider <openai|anthropic> --account <id>`
   - `account disconnect --provider <openai|anthropic> --account <id>`
-- [ ] `P5.6` Add parser, exit-code, and daemon-client integration tests.
+- [x] `P5.6` Add parser, exit-code, and daemon-client integration tests.
 
 Dependencies:
 - depends on `EG-P2`

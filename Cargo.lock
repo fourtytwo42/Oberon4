@@ -156,8 +156,11 @@ dependencies = [
 name = "oberon4-cli"
 version = "0.1.0"
 dependencies = [
+ "oberon4-auth",
  "oberon4-core",
  "oberon4-daemon",
+ "oberon4-provider-openai",
+ "serde_json",
 ]
 
 [[package]]

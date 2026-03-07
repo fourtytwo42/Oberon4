@@ -1,9 +1,11 @@
 fn main() {
-    let status = oberon4_daemon::daemon_status(&oberon4_core::AppConfig::default());
-    println!(
-        "{}",
-        status
-            .data
-            .unwrap_or_else(|| "daemon unavailable".to_string())
-    );
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let output = oberon4_cli::run_cli(&args);
+    if !output.stdout.is_empty() {
+        println!("{}", output.stdout);
+    }
+    if !output.stderr.is_empty() {
+        eprintln!("{}", output.stderr);
+    }
+    std::process::exit(output.exit_code);
 }
