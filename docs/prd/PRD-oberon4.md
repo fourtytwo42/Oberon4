@@ -19,7 +19,7 @@ Build a local-first, modular agent host with:
 - `FR-004`: modular crate boundaries so subsystems can evolve independently.
 - `FR-005`: tray/notification-bar integration contract with platform adapters.
 - `FR-006`: deterministic test coverage for every subsystem before merge.
-- `FR-007`: OpenAI OAuth account connect flow implemented in Rust, aligned with llmhotspot behavior.
+- `FR-007`: provider OAuth account connect flows for OpenAI and Anthropic implemented in Rust, aligned with llmhotspot behavior.
 - `FR-008`: CLI command surface for daemon control, configuration, diagnostics, and one-shot chat.
 - `FR-009`: TUI command surface for interactive session control and operator actions.
 
@@ -61,13 +61,15 @@ Build a local-first, modular agent host with:
   - `AC-006.2`: CI test command and local test command are documented.
   - `AC-006.3`: regressions require an added failing-before/passing-after test.
 
-- `FR-007` OpenAI OAuth (Rust transplant parity)
-  - `AC-007.1`: supports browser-start OAuth with PKCE and state validation.
-  - `AC-007.2`: supports local callback handling with sanitized `return_to` target policy.
-  - `AC-007.3`: supports polling/status path for browser flow completion.
-  - `AC-007.4`: stores refresh/access credentials through secure storage path (keyring/secret store), never logs raw secrets.
-  - `AC-007.5`: exposes account lifecycle operations (`connect`, `list`, `activate`, `disable`, `disconnect`) through daemon CLI/API surface.
-  - `AC-007.6`: OAuth flow behavior is backed by Rust integration and contract tests before merge.
+- `FR-007` Provider OAuth parity (Rust transplant parity)
+  - `AC-007.1`: supports browser-start OAuth with PKCE and state validation for OpenAI accounts.
+  - `AC-007.2`: supports browser-start OAuth with PKCE and state validation for Anthropic accounts.
+  - `AC-007.3`: supports local callback handling with sanitized `return_to` target policy for all OAuth providers.
+  - `AC-007.4`: supports polling/status path for browser flow completion for all OAuth providers.
+  - `AC-007.5`: stores refresh/access credentials through secure storage path (keyring/secret store), never logs raw secrets.
+  - `AC-007.6`: exposes account lifecycle operations (`connect`, `list`, `activate`, `disable`, `disconnect`) through daemon CLI/API surface with provider selection.
+  - `AC-007.7`: provider abstraction keeps OpenAI and Anthropic OAuth implementations modular so additional providers can be added without changing TUI core behavior.
+  - `AC-007.8`: OAuth flow behavior is backed by Rust integration and contract tests for OpenAI and Anthropic before merge.
 
 - `FR-008` CLI command surface
   - `AC-008.1`: CLI exposes `daemon start`, `daemon stop`, and `daemon status`.
