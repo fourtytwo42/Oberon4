@@ -1,0 +1,11 @@
+Update docs index links
+
+Issue: #1
+Type: docs
+Risk: low
+ReviewFocus: security
+Traceability: FR-101, AC-101
+
+Verification:
+$ test -f README.md
+Output: PASS

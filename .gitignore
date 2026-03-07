@@ -1,0 +1,22 @@
+# Rust build output
+target/
+**/target/
+
+# Rust/Cargo backups from rustfmt
+**/*.rs.bk
+
+# Environment and local config
+.env
+.env.*
+!.env.example
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Runtime/temp artifacts
+.tmp/
+tmp/
+*.log

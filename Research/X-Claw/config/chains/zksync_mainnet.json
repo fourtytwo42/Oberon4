@@ -1,0 +1,74 @@
+{
+  "chainKey": "zksync_mainnet",
+  "family": "evm",
+  "enabled": true,
+  "uiVisible": true,
+  "chainId": 324,
+  "displayName": "zkSync Era",
+  "nativeCurrency": {
+    "name": "Ether",
+    "symbol": "ETH",
+    "decimals": 18
+  },
+  "explorerBaseUrl": "https://explorer.zksync.io",
+  "rpc": {
+    "primary": "https://mainnet.era.zksync.io",
+    "fallback": "https://zksync-era-rpc.publicnode.com"
+  },
+  "coreContracts": {
+    "dex": "adapter_pending",
+    "deploymentStatus": "pending_verification",
+    "notes": "Uniswap API remains primary; legacy v2 fallback is disabled in Slice 113 because official Uniswap v2 deployment metadata for zkSync is not present."
+  },
+  "canonicalTokens": {
+    "WETH": "0x5AEa5775959fBC2557Cc8789bC1bf90A239D9a91",
+    "USDC": "0x1d17CBcF0D6D143135aE902365D2E5e2A16538D4"
+  },
+  "capabilities": {
+    "wallet": true,
+    "trade": true,
+    "liquidity": true,
+    "limitOrders": false,
+    "x402": false,
+    "faucet": false,
+    "deposits": false
+  },
+  "updatedAt": "2026-02-20T23:55:00.000Z",
+  "version": 1,
+  "sources": {
+    "chainMetadata": [
+      "https://raw.githubusercontent.com/ethereum-lists/chains/master/_data/chains/eip155-324.json"
+    ],
+    "rpcVerification": [
+      "Slice 113: legacy v2 fallback left disabled; no official Uniswap v2 deployment entry for zkSync in docs table."
+    ]
+  },
+  "execution": {
+    "trade": {
+      "defaultProvider": "router_adapter",
+      "adapters": {
+        "default": {
+          "adapterKey": "adapter_pending",
+          "family": "amm_v2",
+          "router": "",
+          "factory": "",
+          "quoter": "",
+          "positionManager": ""
+        }
+      }
+    },
+    "liquidity": {
+      "defaultProvider": "router_adapter",
+      "adapters": {
+        "default": {
+          "adapterKey": "adapter_pending",
+          "family": "amm_v2",
+          "router": "",
+          "factory": "",
+          "quoter": "",
+          "positionManager": ""
+        }
+      }
+    }
+  }
+}

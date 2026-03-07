@@ -1,0 +1,31 @@
+Implement verifier artifact validation
+
+Issue: #1
+Type: chore
+Risk: medium
+Assumptions: Verification surface remains policy-only.
+Rollback: Revert commit.
+ResearchInputs: AGENTS.md#3.4, docs/policy/local-enforcement.md, scripts/validate-commit-message.sh
+EvidenceScope: in=policy metadata requirements; out=application behavior
+SelfEval: pass
+PolicyDelta: none
+WorkflowType: collaboration
+WorkflowMode: plan-build
+TaskState: verify
+FR-101: met, AC-101: met
+QualitySignals: churn: targeted script updates
+ReviewPasses: pass1-logic-security,pass2-maintainability
+ReviewFocus: security
+AgentRole: verifier
+StackProfile: polyglot
+AgentDepth: 1
+Delegation: none
+SpawnedAgents: 0
+Invocation: run-agent.sh
+Observability: logs=unchanged,metrics=unchanged,alerts=unchanged
+NoNewFacts: yes
+Traceability: FR-101, AC-101
+
+Verification:
+$ bash scripts/check-policy-stack.sh
+Output: PASS - policy stack health check passed

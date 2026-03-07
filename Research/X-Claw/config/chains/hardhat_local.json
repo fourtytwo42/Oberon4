@@ -1,0 +1,141 @@
+{
+  "chainKey": "hardhat_local",
+  "family": "evm",
+  "enabled": true,
+  "uiVisible": false,
+  "chainId": 31337,
+  "displayName": "Hardhat Local",
+  "nativeCurrency": {
+    "name": "Ether",
+    "symbol": "ETH",
+    "decimals": 18
+  },
+  "explorerBaseUrl": null,
+  "rpc": {
+    "primary": "http://127.0.0.1:8545",
+    "fallback": null
+  },
+  "coreContracts": {
+    "dex": "uniswap_fork",
+    "deploymentStatus": "local_deployed",
+    "factory": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+    "dexRouter": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
+    "router": "0x8A791620dd6260079BF849Dc5567aDC3F2FdC318",
+    "quoter": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
+    "escrow": "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9",
+    "escrowAbiVersion": "xclaw_escrow_v1",
+    "notes": "Hardhat local deploy evidence captured in infrastructure/seed-data/hardhat-local-deploy.json and hardhat-local-verify.json. As of Slice 22, coreContracts.router is the XClaw fee-router proxy and coreContracts.dexRouter is the underlying mock router."
+  },
+  "canonicalTokens": {
+    "WETH": "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9",
+    "USDC": "0x5FC8d32690cc91D4c39d9d3abcBD16989F875707"
+  },
+  "capabilities": {
+    "wallet": true,
+    "trade": true,
+    "liquidity": true,
+    "limitOrders": true,
+    "x402": false,
+    "faucet": false,
+    "deposits": true
+  },
+  "liquidityProtocols": {
+    "uniswap_v2": {
+      "family": "amm_v2",
+      "enabled": true
+    },
+    "uniswap_v3": {
+      "family": "amm_v3",
+      "enabled": false
+    }
+  },
+  "updatedAt": "2026-02-13T16:38:14.748Z",
+  "version": 1,
+  "sources": {
+    "network": "hardhat_local",
+    "mvpTestDexStrategy": "deploy_uniswap_compatible_fork_on_hardhat_before_base_sepolia",
+    "escrowAbiMetadata": "xclaw_escrow_v1",
+    "deploymentArtifact": "infrastructure/seed-data/hardhat-local-deploy.json",
+    "verificationArtifact": "infrastructure/seed-data/hardhat-local-verify.json"
+  },
+  "verification": {
+    "verifiedAt": "2026-02-13T16:38:14.748Z",
+    "verifiedViaRpc": true,
+    "verifiedChainIdHex": "0x7a69",
+    "verifiedContractCodePresent": {
+      "WETH": true,
+      "USDC": true,
+      "factory": true,
+      "dexRouter": true,
+      "router": true,
+      "quoter": true,
+      "escrow": true
+    }
+  },
+  "execution": {
+    "trade": {
+      "defaultProvider": "router_adapter",
+      "adapters": {
+        "default": {
+          "adapterKey": "uniswap_fork",
+          "family": "amm_v2",
+          "router": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
+          "factory": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+          "quoter": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
+          "positionManager": ""
+        }
+      }
+    },
+    "liquidity": {
+      "defaultProvider": "router_adapter",
+      "adapters": {
+        "uniswap_v2": {
+          "adapterKey": "uniswap_v2",
+          "family": "amm_v2",
+          "router": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
+          "factory": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+          "quoter": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
+          "positionManager": ""
+        },
+        "uniswap_v3": {
+          "adapterKey": "uniswap_v3",
+          "family": "position_manager_v3",
+          "router": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
+          "factory": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+          "quoter": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
+          "positionManager": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
+          "capabilities": {
+            "add": true,
+            "remove": true,
+            "increase": true,
+            "claimFees": true,
+            "claimRewards": false,
+            "migrate": true
+          },
+          "operations": {
+            "add": {
+              "method": "mint"
+            },
+            "increase": {
+              "method": "increaseLiquidity"
+            },
+            "decrease": {
+              "method": "decreaseLiquidity"
+            },
+            "claimFees": {
+              "method": "collect"
+            },
+            "claimRewards": {
+              "method": "claimRewards(uint256,address[])",
+              "rewardContracts": []
+            },
+            "migrate": {
+              "method": "multicall",
+              "targetAdapterKey": "uniswap_v3"
+            }
+          }
+        }
+      }
+    }
+  }
+}

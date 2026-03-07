@@ -1,0 +1,1965 @@
+#!/usr/bin/env python3
+"""Python-first OpenClaw skill wrapper for xclaw-agent CLI.
+
+This wrapper standardizes command invocation and error formatting for skill usage.
+It does not perform wallet signing itself; it delegates to the local xclaw-agent binary.
+"""
+
+from __future__ import annotations
+
+import json
+import hashlib
+import os
+import re
+import signal
+import shutil
+import subprocess
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from pathlib import Path
+from typing import Iterable, List, Optional
+
+
+def _maybe_patch_openclaw_gateway() -> None:
+    if os.environ.get("XCLAW_OPENCLAW_AUTO_PATCH", "1").strip().lower() in {"0", "false", "no"}:
+        return
+    script_dir = Path(__file__).resolve().parent
+    patcher = script_dir / "openclaw_gateway_patch.py"
+    if not patcher.exists():
+        return
+    # Best-effort, quiet. Restart is guarded by cooldown+lock inside the patcher.
+    try:
+        subprocess.run(["python3", str(patcher), "--json", "--restart"], text=True, capture_output=True, timeout=20)
+    except Exception:
+        return
+
+
+def _print_json(data: dict) -> None:
+    print(json.dumps(data, separators=(",", ":")))
+
+
+def _err(code: str, message: str, action_hint: Optional[str] = None, details: Optional[dict] = None, exit_code: int = 1) -> int:
+    payload = {
+        "ok": False,
+        "code": code,
+        "message": message,
+    }
+    if action_hint:
+        payload["actionHint"] = action_hint
+    if details:
+        payload["details"] = details
+    _print_json(payload)
+    return exit_code
+
+
+def _resolve_agent_binary() -> Optional[str]:
+    configured = (os.environ.get("XCLAW_AGENT_RUNTIME_BIN") or "").strip()
+    if configured:
+        configured_path = Path(configured).expanduser()
+        if configured_path.exists() and os.access(configured_path, os.X_OK):
+            return str(configured_path)
+
+    script_dir = Path(__file__).resolve().parent
+    repo_binary = script_dir.parent.parent.parent / "apps" / "agent-runtime" / "bin" / "xclaw-agent"
+    if repo_binary.exists() and os.access(repo_binary, os.X_OK):
+        return str(repo_binary)
+
+    path_binary = shutil.which("xclaw-agent")
+    if path_binary:
+        return path_binary
+
+    return None
+
+
+def _show_sensitive() -> bool:
+    # Default: redact sensitive fields because stdout is often logged/transcribed.
+    return os.environ.get("XCLAW_SHOW_SENSITIVE", "").strip() == "1"
+
+
+def _should_redact_sensitive(command_args: Iterable[str]) -> bool:
+    # Owner-link handoff is explicit product behavior: return managementUrl directly for chat delivery.
+    args = list(command_args)
+    if args and args[0] == "management-link":
+        return False
+    return True
+
+
+def _redact_sensitive_payload(payload: dict) -> dict:
+    sensitive = payload.get("sensitive") is True
+    fields = payload.get("sensitiveFields")
+    if not sensitive or not isinstance(fields, list) or not fields:
+        return payload
+    redacted = dict(payload)
+    for field in fields:
+        if isinstance(field, str) and field in redacted:
+            redacted[field] = "<REDACTED:SENSITIVE>"
+    return redacted
+
+
+def _redact_sensitive_stdout(stdout: str) -> str:
+    # Support multi-JSON stdout (one JSON per line) used by some commands.
+    lines = (stdout or "").splitlines()
+    out_lines: list[str] = []
+    for line in lines:
+        trimmed = line.strip()
+        if not trimmed:
+            out_lines.append(line)
+            continue
+        try:
+            parsed = json.loads(trimmed)
+        except json.JSONDecodeError:
+            out_lines.append(line)
+            continue
+        if isinstance(parsed, dict):
+            parsed = _redact_sensitive_payload(parsed)
+            out_lines.append(json.dumps(parsed, separators=(",", ":")))
+        else:
+            out_lines.append(line)
+    return "\n".join(out_lines)
+
+
+def _extract_json_payload(stdout: str) -> Optional[dict]:
+    trimmed = (stdout or "").strip()
+    if not trimmed:
+        return None
+    try:
+        payload = json.loads(trimmed)
+    except json.JSONDecodeError:
+        payload = None
+    if isinstance(payload, dict) and "ok" in payload and "code" in payload:
+        return payload
+    # Some runtimes/loggers prepend lines; fall back to scanning trailing JSON lines.
+    for line in reversed(trimmed.splitlines()):
+        candidate = line.strip()
+        if not candidate:
+            continue
+        try:
+            payload = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and "ok" in payload and "code" in payload:
+            return payload
+    return None
+
+
+def _last_delivery_is_telegram() -> bool:
+    agent_id = (os.environ.get("XCLAW_OPENCLAW_AGENT_ID", "main") or "main").strip().lower()
+    if not re.fullmatch(r"[a-z0-9_-]{1,64}", agent_id):
+        agent_id = "main"
+    state_dir = (os.environ.get("OPENCLAW_STATE_DIR") or "").strip() or str(Path.home() / ".openclaw")
+    sessions_path = Path(state_dir) / "agents" / agent_id / "sessions" / "sessions.json"
+    if not sessions_path.exists():
+        return False
+    try:
+        payload = json.loads(sessions_path.read_text(encoding="utf-8") or "{}")
+    except Exception:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    best_updated = -1
+    best_channel = ""
+    for value in payload.values():
+        if not isinstance(value, dict):
+            continue
+        channel = str(value.get("lastChannel") or "").strip().lower()
+        target = str(value.get("lastTo") or "").strip()
+        if not channel or not target:
+            continue
+        try:
+            updated = int(value.get("updatedAt")) if value.get("updatedAt") is not None else 0
+        except Exception:
+            updated = 0
+        if updated >= best_updated:
+            best_updated = updated
+            best_channel = channel
+    return best_channel == "telegram"
+
+
+def _env_truthy(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on", "enabled"}
+
+
+def _normalize_faucet_asset(value: str) -> str:
+    token = str(value or "").strip().lower()
+    if token in {"native", "eth", "hbar", "kite"}:
+        return "native"
+    if token in {"wrapped", "weth", "whbar", "wkite"}:
+        return "wrapped"
+    if token in {"stable", "usdc", "usdt"}:
+        return "stable"
+    return token
+
+
+def _normalize_non_terminal_approval(runtime_json: dict) -> Optional[dict]:
+    code = str(runtime_json.get("code") or "").strip().lower()
+    if code in {"approval_sync_failed", "transfer_mirror_unavailable"}:
+        return None
+    if code != "approval_required":
+        return None
+    details = runtime_json.get("details")
+    if not isinstance(details, dict):
+        return None
+    status = str(details.get("status") or details.get("lastStatus") or "").strip().lower()
+    if status != "approval_pending":
+        return None
+    normalized = dict(runtime_json)
+    normalized["ok"] = True
+    normalized["code"] = "approval_pending"
+    normalized["message"] = str(runtime_json.get("message") or "Approval is pending.")
+    approval_id = str(details.get("approvalId") or "").strip().lower()
+    if approval_id.startswith("xfr_"):
+        sanitized_details = dict(details)
+        sanitized_details.pop("queuedMessage", None)
+        sanitized_details["nextAction"] = "Approval is queued in X-Claw management. Wait for owner decision."
+        force_management = _env_truthy("XCLAW_TELEGRAM_APPROVALS_FORCE_MANAGEMENT", default=False)
+        should_include_management_link = force_management or not _last_delivery_is_telegram()
+        if should_include_management_link:
+            owner_link = _fetch_owner_link_payload()
+            if isinstance(owner_link, dict):
+                management_url = str(owner_link.get("managementUrl") or "").strip()
+                if management_url:
+                    sanitized_details["managementUrl"] = management_url
+                elif owner_link.get("managementUrlOmitted") is True:
+                    sanitized_details["managementUrlOmitted"] = True
+                    delivery = owner_link.get("delivery")
+                    if isinstance(delivery, dict):
+                        sanitized_details["managementDelivery"] = delivery
+        normalized["details"] = sanitized_details
+        normalized["message"] = "Transfer queued for management approval."
+        if str(sanitized_details.get("managementUrl") or "").strip():
+            normalized["actionHint"] = "Share managementUrl with the owner and wait for approve/deny in X-Claw."
+        elif force_management:
+            normalized["actionHint"] = (
+                "Telegram inline approvals are disabled for this install context. "
+                "Use management link approval flow and wait for owner approve/deny in X-Claw."
+            )
+        else:
+            normalized["actionHint"] = "Acknowledge the queued transfer briefly and wait for owner approve/deny in X-Claw."
+    elif "actionHint" not in normalized and runtime_json.get("actionHint"):
+        normalized["actionHint"] = runtime_json.get("actionHint")
+    return normalized
+
+
+def _normalize_pending_policy_request(runtime_json: dict) -> Optional[dict]:
+    if runtime_json.get("ok") is not True:
+        return None
+    code = str(runtime_json.get("code") or "").strip().lower()
+    if code not in {"ok", "approval_pending"}:
+        return None
+    status = str(runtime_json.get("status") or "").strip().lower()
+    approval_id = str(runtime_json.get("policyApprovalId") or "").strip().lower()
+    if status != "approval_pending" or not approval_id.startswith("ppr_"):
+        return None
+
+    normalized = dict(runtime_json)
+    normalized.pop("queuedMessage", None)
+    normalized["message"] = "Policy change queued for approval."
+    prompt_sent = bool(runtime_json.get("promptSent"))
+    if prompt_sent:
+        normalized["actionHint"] = "Approve or deny in Telegram/management to apply this policy change."
+    else:
+        normalized["actionHint"] = "Approve or deny in management (or active Telegram session) to apply this policy change."
+    return normalized
+
+
+def _normalize_known_nonfatal_error(runtime_json: dict, command_args: Iterable[str]) -> Optional[dict]:
+    code = str(runtime_json.get("code") or "").strip().lower()
+    message = str(runtime_json.get("message") or "")
+    args = [str(v) for v in command_args]
+    if code == "invalid_input" and "amount is too small for symbol-based transfer" in message.lower():
+        if len(args) >= 2 and args[0] == "wallet" and args[1] == "send-token":
+            details = runtime_json.get("details")
+            if not isinstance(details, dict):
+                details = {}
+            normalized = dict(runtime_json)
+            normalized["ok"] = True
+            normalized["code"] = "input_guarded"
+            normalized["message"] = "Transfer input was safely rejected before execution due to token unit mismatch."
+            normalized["actionHint"] = (
+                "No transaction was sent. Ask user to confirm token units and continue via approval flow; "
+                "do not retry immediate wallet-send-token with the same raw amount."
+            )
+            normalized["details"] = details
+            return normalized
+    return None
+
+
+def _fetch_owner_link_payload() -> Optional[dict]:
+    binary = _resolve_agent_binary()
+    if not binary:
+        return None
+    cmd: list[str] = [binary, "management-link", "--json"]
+    ttl = os.environ.get("XCLAW_OWNER_LINK_TTL_SECONDS", "").strip()
+    if ttl:
+        cmd.extend(["--ttl-seconds", ttl])
+    try:
+        proc = subprocess.run(cmd, text=True, capture_output=True, timeout=20)
+    except Exception:
+        return None
+    payload = _extract_json_payload(proc.stdout or "")
+    if isinstance(payload, dict) and payload.get("ok") is True:
+        return payload
+    return None
+
+
+def _require_env(*keys: str) -> Optional[int]:
+    missing = [k for k in keys if not os.environ.get(k)]
+    if not missing:
+        return None
+    return _err(
+        "missing_env",
+        f"Missing required environment variable(s): {', '.join(missing)}",
+        "Set required env vars in skills.entries.xclaw-agent.env in ~/.openclaw/openclaw.json and restart session.",
+        {"missing": missing},
+        exit_code=2,
+    )
+
+
+def _runtime_state_api_key_present() -> bool:
+    app_dir = Path(os.environ.get("XCLAW_AGENT_HOME", str(Path.home() / ".xclaw-agent"))).expanduser()
+    state_path = app_dir / "state.json"
+    if not state_path.exists():
+        return False
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8") or "{}")
+    except Exception:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return bool(str(payload.get("agentApiKey") or "").strip())
+
+
+def _require_api_context() -> Optional[int]:
+    missing = [k for k in ("XCLAW_API_BASE_URL", "XCLAW_DEFAULT_CHAIN") if not os.environ.get(k)]
+    if missing:
+        return _err(
+            "missing_env",
+            f"Missing required environment variable(s): {', '.join(missing)}",
+            "Set required env vars in skills.entries.xclaw-agent.env in ~/.openclaw/openclaw.json and restart session.",
+            {"missing": missing},
+            exit_code=2,
+        )
+    if os.environ.get("XCLAW_AGENT_API_KEY"):
+        return None
+    if _runtime_state_api_key_present():
+        return None
+    return _err(
+        "missing_env",
+        "Missing agent auth context: XCLAW_AGENT_API_KEY is unset and no recovered key exists in runtime state.",
+        "Run auth-recover first or set XCLAW_AGENT_API_KEY in the environment.",
+        {"missing": ["XCLAW_AGENT_API_KEY"]},
+        exit_code=2,
+    )
+
+
+def _build_hosted_x402_receive_args(
+    resource_description: Optional[str] = None, overrides: Optional[dict[str, str]] = None
+) -> list[str]:
+    values = overrides or {}
+    network = values.get("network", os.environ.get("XCLAW_X402_DEFAULT_NETWORK", os.environ.get("XCLAW_DEFAULT_CHAIN", "base_sepolia"))).strip()
+    facilitator = values.get("facilitator", os.environ.get("XCLAW_X402_DEFAULT_FACILITATOR", "cdp")).strip()
+    amount = values.get("amount_atomic", os.environ.get("XCLAW_X402_DEFAULT_AMOUNT_ATOMIC", "0.01")).strip()
+    asset_kind = values.get("asset_kind", os.environ.get("XCLAW_X402_DEFAULT_ASSET_KIND", "native")).strip().lower()
+    if asset_kind not in {"native", "token", "erc20"}:
+        asset_kind = "native"
+    if asset_kind == "erc20":
+        asset_kind = "token"
+    args = [
+        "x402",
+        "receive-request",
+        "--network",
+        network,
+        "--facilitator",
+        facilitator,
+        "--amount-atomic",
+        amount,
+        "--asset-kind",
+        asset_kind,
+        "--json",
+    ]
+    asset_symbol = values.get("asset_symbol", os.environ.get("XCLAW_X402_DEFAULT_ASSET_SYMBOL", "")).strip()
+    if asset_symbol:
+        args.extend(["--asset-symbol", asset_symbol])
+    asset_address = values.get("asset_address", os.environ.get("XCLAW_X402_DEFAULT_ASSET_ADDRESS", "")).strip()
+    if asset_address:
+        args.extend(["--asset-address", asset_address])
+    resolved_description = (resource_description or "").strip() or values.get(
+        "resource_description", os.environ.get("XCLAW_X402_DEFAULT_RESOURCE_DESCRIPTION", "")
+    ).strip()
+    if resolved_description:
+        args.extend(["--resource-description", resolved_description])
+    return args
+
+
+def _parse_request_x402_payment_args(raw_args: list[str]) -> tuple[Optional[dict[str, str]], Optional[int], Optional[dict]]:
+    if not raw_args:
+        return {}, None, None
+
+    idx = 0
+    overrides: dict[str, str] = {}
+    allowed = {
+        "--network",
+        "--facilitator",
+        "--amount-atomic",
+        "--asset-kind",
+        "--asset-symbol",
+        "--asset-address",
+        "--resource-description",
+    }
+    while idx < len(raw_args):
+        key = raw_args[idx].strip()
+        if not key.startswith("--"):
+            return (
+                None,
+                2,
+                {
+                    "code": "invalid_input",
+                    "message": "request-x402-payment rejects positional text; use explicit --resource-description and other flags.",
+                    "action_hint": (
+                        "usage: request-x402-payment [--network <key>] [--facilitator <key>] [--amount-atomic <value>] "
+                        "[--asset-kind <native|token>] [--asset-symbol <symbol>] [--asset-address <token-address>] "
+                        "[--resource-description <text>]"
+                    ),
+                },
+            )
+        if key not in allowed:
+            return (
+                None,
+                2,
+                {
+                    "code": "invalid_input",
+                    "message": f"request-x402-payment does not support flag: {key}",
+                    "action_hint": (
+                        "usage: request-x402-payment [--network <key>] [--facilitator <key>] [--amount-atomic <value>] "
+                        "[--asset-kind <native|token>] [--asset-symbol <symbol>] [--asset-address <token-address>] "
+                        "[--resource-description <text>]"
+                    ),
+                },
+            )
+        if idx + 1 >= len(raw_args):
+            return (
+                None,
+                2,
+                {
+                    "code": "invalid_input",
+                    "message": f"request-x402-payment missing value for {key}",
+                    "action_hint": "All request-x402-payment flags require a value.",
+                },
+            )
+        value = str(raw_args[idx + 1]).strip()
+        if not value:
+            return (
+                None,
+                2,
+                {
+                    "code": "invalid_input",
+                    "message": f"request-x402-payment received empty value for {key}",
+                    "action_hint": "Provide a non-empty value for each request-x402-payment flag.",
+                },
+            )
+        if key == "--resource-description":
+            overrides["resource_description"] = value
+        elif key == "--asset-kind" and value.lower() not in {"native", "token", "erc20"}:
+            return (
+                None,
+                2,
+                {
+                    "code": "invalid_input",
+                    "message": "request-x402-payment --asset-kind must be native or token.",
+                    "action_hint": "usage: request-x402-payment --asset-kind <native|token>",
+                },
+            )
+        mapped_key = key[2:].replace("-", "_")
+        overrides[mapped_key] = value
+        idx += 2
+    return overrides, None, None
+
+
+def _run_agent(args: Iterable[str]) -> int:
+    binary = _resolve_agent_binary()
+    if not binary:
+        return _err(
+            "missing_binary",
+            "xclaw-agent is not installed or not discoverable.",
+            "Install xclaw-agent/xclaw-agentd or ensure apps/agent-runtime/bin/xclaw-agent exists and is executable.",
+            exit_code=127,
+        )
+
+    cmd: List[str] = [binary, *args]
+    raw_timeout = os.environ.get("XCLAW_SKILL_TIMEOUT_SEC", "").strip()
+    timeout_sec = 240
+    if raw_timeout:
+        if not re.fullmatch(r"[0-9]+", raw_timeout):
+            return _err("invalid_env", "XCLAW_SKILL_TIMEOUT_SEC must be an integer number of seconds.", exit_code=2)
+        timeout_sec = int(raw_timeout)
+        if timeout_sec < 1:
+            return _err("invalid_env", "XCLAW_SKILL_TIMEOUT_SEC must be >= 1.", exit_code=2)
+
+    try:
+        _maybe_patch_openclaw_gateway()
+        child = subprocess.Popen(
+            cmd,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        try:
+            stdout, stderr = child.communicate(timeout=timeout_sec)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except Exception:
+                try:
+                    child.kill()
+                except Exception:
+                    pass
+            try:
+                child.communicate(timeout=5)
+            except Exception:
+                pass
+            return _err(
+                "timeout",
+                "Command timed out.",
+                "Increase XCLAW_SKILL_TIMEOUT_SEC or investigate RPC/cast health, then retry.",
+                {"command": cmd, "timeoutSec": timeout_sec},
+                exit_code=124,
+            )
+        proc = subprocess.CompletedProcess(cmd, child.returncode, stdout, stderr)
+    except OSError as exc:
+        return _err(
+            "agent_command_failed",
+            f"Failed to start xclaw-agent command: {exc}",
+            "Verify xclaw-agent runtime install and permissions, then retry.",
+            {"command": cmd},
+        )
+
+    if proc.returncode == 0:
+        # Preserve native CLI JSON output when available.
+        out = proc.stdout.strip()
+        runtime_json = _extract_json_payload(out)
+        if runtime_json is not None:
+            normalized_policy_pending = _normalize_pending_policy_request(runtime_json)
+            if normalized_policy_pending is not None:
+                _print_json(normalized_policy_pending)
+                return 0
+            normalized_non_terminal = _normalize_non_terminal_approval(runtime_json)
+            if normalized_non_terminal is not None:
+                _print_json(normalized_non_terminal)
+                return 0
+        if out and not _show_sensitive() and _should_redact_sensitive(args):
+            out = _redact_sensitive_stdout(out)
+        if out:
+            print(out)
+        else:
+            _print_json({"ok": True, "code": "ok", "message": "Command completed successfully."})
+        return 0
+
+    stderr = (proc.stderr or "").strip()
+    stdout = (proc.stdout or "").strip()
+    runtime_json = _extract_json_payload(stdout)
+    if runtime_json is not None:
+        normalized_known_nonfatal = _normalize_known_nonfatal_error(runtime_json, args)
+        if normalized_known_nonfatal is not None:
+            _print_json(normalized_known_nonfatal)
+            return 0
+        normalized_non_terminal = _normalize_non_terminal_approval(runtime_json)
+        if normalized_non_terminal is not None:
+            _print_json(normalized_non_terminal)
+            return 0
+        _print_json(runtime_json)
+        return proc.returncode
+
+    return _err(
+        "agent_command_failed",
+        stderr or "xclaw-agent command failed.",
+        "Review command args and agent runtime status, then retry.",
+        {
+            "returnCode": proc.returncode,
+            "stdout": stdout[:2000],
+            "stderr": stderr[:2000],
+            "command": cmd,
+        },
+        exit_code=proc.returncode,
+    )
+
+
+def _chain_from_env() -> str:
+    return os.environ.get("XCLAW_DEFAULT_CHAIN", "base_sepolia")
+
+
+def _resolve_active_chain() -> str:
+    fallback_chain = _chain_from_env()
+    if not os.environ.get("XCLAW_API_BASE_URL"):
+        return fallback_chain
+    binary = _resolve_agent_binary()
+    if not binary:
+        return fallback_chain
+    try:
+        proc = subprocess.run(
+            [binary, "default-chain", "get", "--json"],
+            text=True,
+            capture_output=True,
+            timeout=5,
+        )
+    except Exception:
+        return fallback_chain
+    if proc.returncode != 0:
+        return fallback_chain
+    payload = _extract_json_payload(proc.stdout or "")
+    if isinstance(payload, dict) and payload.get("ok") is True:
+        candidate = str(payload.get("chainKey") or "").strip()
+        if candidate:
+            return candidate
+    return fallback_chain
+
+
+def _is_hex_address(value: str) -> bool:
+    return bool(re.fullmatch(r"0x[a-fA-F0-9]{40}", value))
+
+
+def _is_solana_chain_key(value: str) -> bool:
+    return str(value or "").strip().lower().startswith("solana_")
+
+
+def _is_solana_address(value: str) -> bool:
+    candidate = str(value or "").strip()
+    return bool(re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", candidate))
+
+
+def _is_chain_address(value: str, chain_key: str) -> bool:
+    if _is_solana_chain_key(chain_key):
+        return _is_solana_address(value)
+    return _is_hex_address(value)
+
+
+def _address_hint_for_chain(chain_key: str) -> str:
+    if _is_solana_chain_key(chain_key):
+        return "Use a valid Solana base58 address."
+    return "Use 0x-prefixed 20-byte hex address."
+
+
+def _is_uint_string(value: str) -> bool:
+    return bool(re.fullmatch(r"[0-9]+", value))
+
+
+def _parse_limit(raw: str, default: int = 10, minimum: int = 1, maximum: int = 20) -> Optional[int]:
+    value = (raw or "").strip()
+    if not value:
+        return default
+    if not _is_uint_string(value):
+        return None
+    parsed = int(value)
+    if parsed < minimum or parsed > maximum:
+        return None
+    return parsed
+
+
+def _parse_timeout(raw: str, default: int = 12, minimum: int = 1, maximum: int = 60) -> Optional[int]:
+    value = (raw or "").strip()
+    if not value:
+        return default
+    if not _is_uint_string(value):
+        return None
+    parsed = int(value)
+    if parsed < minimum or parsed > maximum:
+        return None
+    return parsed
+
+
+def _normalize_dexscreener_pair(row: dict) -> dict:
+    base = row.get("baseToken") if isinstance(row.get("baseToken"), dict) else {}
+    quote = row.get("quoteToken") if isinstance(row.get("quoteToken"), dict) else {}
+    liquidity = row.get("liquidity") if isinstance(row.get("liquidity"), dict) else {}
+    volume = row.get("volume") if isinstance(row.get("volume"), dict) else {}
+    txns = row.get("txns") if isinstance(row.get("txns"), dict) else {}
+    return {
+        "chainId": row.get("chainId"),
+        "dexId": row.get("dexId"),
+        "pairAddress": row.get("pairAddress"),
+        "url": row.get("url"),
+        "labels": row.get("labels") if isinstance(row.get("labels"), list) else [],
+        "baseToken": {
+            "symbol": base.get("symbol"),
+            "name": base.get("name"),
+            "address": base.get("address"),
+        },
+        "quoteToken": {
+            "symbol": quote.get("symbol"),
+            "name": quote.get("name"),
+            "address": quote.get("address"),
+        },
+        "priceUsd": row.get("priceUsd"),
+        "priceNative": row.get("priceNative"),
+        "liquidityUsd": liquidity.get("usd"),
+        "fdv": row.get("fdv"),
+        "marketCap": row.get("marketCap"),
+        "volumeH24": volume.get("h24"),
+        "txnsH24": txns.get("h24"),
+    }
+
+
+def _decimal_or_none(value: object) -> Optional[Decimal]:
+    if value is None:
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _format_decimal(value: object, places: int) -> Optional[str]:
+    dec = _decimal_or_none(value)
+    if dec is None:
+        return None
+    quant = Decimal(1).scaleb(-places)
+    return str(dec.quantize(quant, rounding=ROUND_HALF_UP))
+
+
+def _build_dexscreener_top_rows(pairs: list[dict], limit: int) -> list[dict]:
+    ranked = sorted(
+        pairs,
+        key=lambda row: _decimal_or_none(row.get("liquidityUsd")) or Decimal(0),
+        reverse=True,
+    )
+    top: list[dict] = []
+    for idx, row in enumerate(ranked[:limit], start=1):
+        txns_h24 = row.get("txnsH24") if isinstance(row.get("txnsH24"), dict) else {}
+        top.append(
+            {
+                "rank": idx,
+                "chainId": row.get("chainId"),
+                "dexId": row.get("dexId"),
+                "pairAddress": row.get("pairAddress"),
+                "pairUrl": row.get("url"),
+                "pairSymbol": f"{((row.get('baseToken') or {}).get('symbol') or '?')}/{((row.get('quoteToken') or {}).get('symbol') or '?')}",
+                "priceUsd": _format_decimal(row.get("priceUsd"), 8),
+                "liquidityUsd": _format_decimal(row.get("liquidityUsd"), 2),
+                "volumeH24Usd": _format_decimal(row.get("volumeH24"), 2),
+                "marketCapUsd": _format_decimal(row.get("marketCap"), 2),
+                "fdvUsd": _format_decimal(row.get("fdv"), 2),
+                "txnsH24": {
+                    "buys": txns_h24.get("buys"),
+                    "sells": txns_h24.get("sells"),
+                },
+                "baseToken": row.get("baseToken"),
+                "quoteToken": row.get("quoteToken"),
+            }
+        )
+    return top
+
+
+def _fetch_dexscreener_json(url: str, timeout_sec: int) -> tuple[Optional[object], Optional[dict], int]:
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "xclaw-agent-skill/1.0",
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_sec) as response:
+            status = int(getattr(response, "status", 200))
+            raw = response.read(2_000_000).decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        status = int(getattr(exc, "code", 500))
+        if status == 429:
+            return None, {
+                "code": "dexscreener_rate_limited",
+                "message": "Dexscreener rate limit reached.",
+                "actionHint": "Retry shortly with lower polling frequency.",
+                "details": {"status": status},
+            }, 1
+        return None, {
+            "code": "dexscreener_http_error",
+            "message": f"Dexscreener request failed with HTTP {status}.",
+            "actionHint": "Retry later or adjust the query input.",
+            "details": {"status": status},
+        }, 1
+    except urllib.error.URLError as exc:
+        reason = str(getattr(exc, "reason", "") or str(exc))
+        return None, {
+            "code": "dexscreener_unreachable",
+            "message": "Dexscreener request failed to connect.",
+            "actionHint": "Check outbound network access and retry.",
+            "details": {"reason": reason[:300]},
+        }, 1
+    except TimeoutError:
+        return None, {
+            "code": "dexscreener_timeout",
+            "message": "Dexscreener request timed out.",
+            "actionHint": "Retry or increase XCLAW_DEXSCREENER_TIMEOUT_SEC.",
+            "details": {"timeoutSec": timeout_sec},
+        }, 1
+    except Exception as exc:
+        return None, {
+            "code": "dexscreener_request_failed",
+            "message": "Dexscreener request failed.",
+            "actionHint": "Retry and inspect local runtime networking.",
+            "details": {"error": str(exc)[:300]},
+        }, 1
+
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None, {
+            "code": "dexscreener_parse_failed",
+            "message": "Dexscreener returned non-JSON payload.",
+            "actionHint": "Retry and inspect endpoint response format.",
+            "details": {"status": status},
+        }, 1
+    return payload, None, 0
+
+
+def _sha256_file(path: Path) -> str:
+    try:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(65536), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except Exception:
+        return ""
+
+
+def _read_patch_state() -> dict:
+    state_path = Path.home() / ".openclaw" / "xclaw" / "openclaw_patch_state.json"
+    if not state_path.exists():
+        return {"present": False, "path": str(state_path)}
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8") or "{}")
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    return {
+        "present": True,
+        "path": str(state_path),
+        "schemaVersion": payload.get("schemaVersion"),
+        "lastPatchedAt": payload.get("lastPatchedAt"),
+        "lastError": payload.get("lastError"),
+        "openclawVersion": payload.get("openclawVersion"),
+        "openclawRoot": payload.get("openclawRoot"),
+        "bundleCount": len(payload.get("bundles") or {}) if isinstance(payload.get("bundles"), dict) else 0,
+    }
+
+
+def _skill_version_payload() -> dict:
+    script_dir = Path(__file__).resolve().parent
+    setup_script = script_dir / "setup_agent_skill.py"
+    patch_script = script_dir / "openclaw_gateway_patch.py"
+    runtime_bin = _resolve_agent_binary() or ""
+    return {
+        "ok": True,
+        "code": "skill_version",
+        "message": "Skill version metadata ready.",
+        "skillScriptPath": str(Path(__file__).resolve()),
+        "setupScriptPath": str(setup_script),
+        "gatewayPatchScriptPath": str(patch_script),
+        "skillScriptSha256": _sha256_file(Path(__file__).resolve()),
+        "setupScriptSha256": _sha256_file(setup_script),
+        "gatewayPatchScriptSha256": _sha256_file(patch_script),
+        "runtimeBinary": runtime_bin,
+        "defaultChain": _chain_from_env(),
+        "patchState": _read_patch_state(),
+    }
+
+
+def main(argv: List[str]) -> int:
+    if len(argv) < 2:
+        return _err(
+            "usage",
+            "Missing command.",
+            "Use one of: version, status, dashboard, intents-poll, approval-check, trade-exec, trade-spot, trade-resume, liquidity-add, liquidity-remove, liquidity-positions, liquidity-quote-add, liquidity-quote-remove, transfer-resume, transfer-decide, transfer-policy-get, transfer-policy-set, withdraws-list, report-send, chat-poll, chat-post, tracked-list, tracked-trades, username-set, agent-register, auth-recover, owner-link, faucet-request, faucet-networks, chains, dexscreener-search, dexscreener-top, dexscreener-token-pairs, token-research, default-chain-get, default-chain-set, x402-pay, x402-pay-resume, x402-pay-decide, x402-policy-get, x402-policy-set, x402-networks, request-x402-payment, wallet-health, wallet-rpc-health, wallet-address, wallet-sign-challenge, wallet-send, wallet-send-token, wallet-balance, wallet-token-balance, wallet-track-token, wallet-untrack-token, wallet-tracked-tokens, wallet-wrap-native, wallet-create",
+            exit_code=2,
+        )
+
+    cmd = argv[1]
+    if cmd == "version":
+        _print_json(_skill_version_payload())
+        return 0
+
+    api_commands = {
+        "status",
+        "dashboard",
+        "intents-poll",
+        "approval-check",
+        "policy-preapprove-token",
+        "policy-approve-all",
+        "policy-revoke-token",
+        "policy-revoke-all",
+        "trade-exec",
+        "trade-spot",
+        "trade-resume",
+        "liquidity-add",
+        "liquidity-remove",
+        "liquidity-positions",
+        "liquidity-quote-add",
+        "liquidity-quote-remove",
+        "transfer-resume",
+        "transfer-decide",
+        "transfer-policy-get",
+        "transfer-policy-set",
+        "withdraws-list",
+        "report-send",
+        "chat-poll",
+        "chat-post",
+        "tracked-list",
+        "tracked-trades",
+        "username-set",
+        "agent-register",
+        "owner-link",
+        "faucet-request",
+        "faucet-networks",
+        "chains",
+    }
+    default_chain_commands = {"default-chain-get", "default-chain-set"}
+    wallet_commands = {
+        "wallet-health",
+        "wallet-rpc-health",
+        "wallet-address",
+        "wallet-sign-challenge",
+        "wallet-send",
+        "wallet-send-token",
+        "wallet-balance",
+        "wallet-token-balance",
+        "wallet-track-token",
+        "wallet-untrack-token",
+        "wallet-tracked-tokens",
+        "wallet-wrap-native",
+        "wallet-create",
+    }
+    x402_commands = {
+        "x402-pay",
+        "x402-pay-resume",
+        "x402-pay-decide",
+        "x402-policy-get",
+        "x402-policy-set",
+        "x402-networks",
+        "request-x402-payment",
+    }
+    dexscreener_commands = {"dexscreener-search", "dexscreener-top", "dexscreener-token-pairs", "token-research"}
+
+    if cmd in api_commands:
+        env_required = _require_api_context()
+    elif cmd in wallet_commands:
+        env_required = _require_env("XCLAW_DEFAULT_CHAIN")
+    elif cmd in x402_commands:
+        env_required = None
+    elif cmd in dexscreener_commands:
+        env_required = None
+    elif cmd in default_chain_commands:
+        env_required = None
+    elif cmd == "auth-recover":
+        env_required = _require_env("XCLAW_API_BASE_URL", "XCLAW_DEFAULT_CHAIN", "XCLAW_AGENT_ID")
+    else:
+        env_required = None
+
+    if env_required is not None:
+        return env_required
+
+    chain = _resolve_active_chain()
+
+    if cmd == "status":
+        return _run_agent(["status", "--json"])
+
+    if cmd == "dashboard":
+        return _run_agent(["dashboard", "--chain", chain, "--json"])
+
+    if cmd == "intents-poll":
+        return _run_agent(["intents", "poll", "--chain", chain, "--json"])
+
+    if cmd == "approval-check":
+        if len(argv) < 3:
+            return _err("usage", "approval-check requires <intent_id>", "usage: approval-check <intent_id>", exit_code=2)
+        return _run_agent(["approvals", "check", "--intent", argv[2], "--chain", chain, "--json"])
+
+    if cmd == "policy-preapprove-token":
+        if len(argv) < 3:
+            return _err("usage", "policy-preapprove-token requires <token>", "usage: policy-preapprove-token <token>", exit_code=2)
+        token = argv[2]
+        if str(token).strip() == "":
+            return _err("invalid_input", "token must not be empty.", "usage: policy-preapprove-token USDC  (or 0x...)", exit_code=2)
+        return _run_agent(["approvals", "request-token", "--token", token, "--chain", chain, "--json"])
+
+    if cmd == "policy-approve-all":
+        return _run_agent(["approvals", "request-global", "--chain", chain, "--json"])
+
+    if cmd == "policy-revoke-token":
+        if len(argv) < 3:
+            return _err("usage", "policy-revoke-token requires <token>", "usage: policy-revoke-token <token>", exit_code=2)
+        token = argv[2]
+        if str(token).strip() == "":
+            return _err("invalid_input", "token must not be empty.", "usage: policy-revoke-token USDC  (or 0x...)", exit_code=2)
+        return _run_agent(["approvals", "revoke-token", "--token", token, "--chain", chain, "--json"])
+
+    if cmd == "policy-revoke-all":
+        return _run_agent(["approvals", "revoke-global", "--chain", chain, "--json"])
+
+    if cmd == "trade-exec":
+        if len(argv) < 3:
+            return _err("usage", "trade-exec requires <intent_id>", "usage: trade-exec <intent_id>", exit_code=2)
+        target_chain = str(argv[3]).strip() if len(argv) >= 4 and str(argv[3]).strip() else chain
+        return _run_agent(["trade", "execute", "--intent", argv[2], "--chain", target_chain, "--json"])
+
+    if cmd == "trade-spot":
+        if len(argv) < 6:
+            return _err(
+                "usage",
+                "trade-spot requires <token_in> <token_out> <amount_in> <slippage_bps>",
+                "usage: trade-spot <token_in> <token_out> <amount_in> <slippage_bps> [chain_key]",
+                exit_code=2,
+            )
+        token_in = argv[2]
+        token_out = argv[3]
+        amount_in = argv[4]
+        slippage_bps = argv[5]
+        # token values may be canonical symbols; validate only when they look like addresses.
+        if _is_hex_address(token_in) is False and token_in.strip() == "":
+            return _err("invalid_input", "token_in cannot be empty.", exit_code=2)
+        if _is_hex_address(token_out) is False and token_out.strip() == "":
+            return _err("invalid_input", "token_out cannot be empty.", exit_code=2)
+        if amount_in.strip() == "":
+            return _err("invalid_input", "amount_in cannot be empty.", exit_code=2)
+        if not re.fullmatch(r"([0-9]+(\.[0-9]+)?|(wei|base|units):[0-9]+)", amount_in.strip(), flags=re.IGNORECASE):
+            return _err(
+                "invalid_input",
+                "Invalid amount_in format.",
+                "Use a number like 500 or 0.25 (human token units). For base units, use wei:<uint>.",
+                {"amountIn": amount_in},
+                exit_code=2,
+            )
+        if not _is_uint_string(slippage_bps):
+            return _err("invalid_input", "Invalid slippage_bps format.", "Use an integer like 50 or 500.", {"slippageBps": slippage_bps}, exit_code=2)
+        target_chain = str(argv[6]).strip() if len(argv) >= 7 and str(argv[6]).strip() else chain
+        return _run_agent(
+            [
+                "trade",
+                "spot",
+                "--chain",
+                target_chain,
+                "--token-in",
+                token_in,
+                "--token-out",
+                token_out,
+                "--amount-in",
+                amount_in,
+                "--slippage-bps",
+                slippage_bps,
+                "--json",
+            ]
+        )
+
+    if cmd == "trade-resume":
+        if len(argv) < 3:
+            return _err("usage", "trade-resume requires <trade_id>", "usage: trade-resume <trade_id>", exit_code=2)
+        trade_id = argv[2].strip()
+        if not trade_id:
+            return _err("invalid_input", "trade_id cannot be empty.", "usage: trade-resume <trade_id>", exit_code=2)
+        target_chain = str(argv[3]).strip() if len(argv) >= 4 and str(argv[3]).strip() else chain
+        return _run_agent(["approvals", "resume-spot", "--trade-id", trade_id, "--chain", target_chain, "--json"])
+
+    if cmd == "liquidity-add":
+        if len(argv) < 8:
+            return _err(
+                "usage",
+                "liquidity-add requires <dex> <token_a> <token_b> <amount_a> <amount_b> <slippage_bps>",
+                "usage: liquidity-add <dex> <token_a> <token_b> <amount_a> <amount_b> <slippage_bps> [v2|v3] [v3_range]",
+                exit_code=2,
+            )
+        position_type = argv[8].strip().lower() if len(argv) >= 9 else "v2"
+        if position_type not in {"v2", "v3"}:
+            return _err("invalid_input", "position type must be v2 or v3.", exit_code=2)
+        args = [
+            "liquidity",
+            "add",
+            "--chain",
+            chain,
+            "--dex",
+            argv[2].strip().lower(),
+            "--token-a",
+            argv[3].strip(),
+            "--token-b",
+            argv[4].strip(),
+            "--amount-a",
+            argv[5].strip(),
+            "--amount-b",
+            argv[6].strip(),
+            "--slippage-bps",
+            argv[7].strip(),
+            "--position-type",
+            position_type,
+        ]
+        if len(argv) >= 10 and argv[9].strip():
+            args.extend(["--v3-range", argv[9].strip()])
+        args.append("--json")
+        return _run_agent(args)
+
+    if cmd == "liquidity-remove":
+        if len(argv) < 4:
+            return _err(
+                "usage",
+                "liquidity-remove requires <dex> <position_id>",
+                "usage: liquidity-remove <dex> <position_id> [percent] [slippage_bps] [v2|v3]",
+                exit_code=2,
+            )
+        percent = argv[4].strip() if len(argv) >= 5 else "100"
+        slippage = argv[5].strip() if len(argv) >= 6 else "100"
+        position_type = argv[6].strip().lower() if len(argv) >= 7 else "v2"
+        if not _is_uint_string(percent) or not _is_uint_string(slippage):
+            return _err("invalid_input", "percent and slippage_bps must be integers.", exit_code=2)
+        if position_type not in {"v2", "v3"}:
+            return _err("invalid_input", "position type must be v2 or v3.", exit_code=2)
+        return _run_agent(
+            [
+                "liquidity",
+                "remove",
+                "--chain",
+                chain,
+                "--dex",
+                argv[2].strip().lower(),
+                "--position-id",
+                argv[3].strip(),
+                "--percent",
+                percent,
+                "--slippage-bps",
+                slippage,
+                "--position-type",
+                position_type,
+                "--json",
+            ]
+        )
+
+    if cmd == "liquidity-positions":
+        args = ["liquidity", "positions", "--chain", chain]
+        status_terms = {"active", "inactive", "closed", "all", "pending", "approved", "rejected", "failed", "filled", "verifying", "executing", "open", "opened", "live"}
+        status_aliases = {"open": "active", "opened": "active", "live": "active"}
+        first_opt = argv[2].strip().lower() if len(argv) >= 3 else ""
+        second_opt = argv[3].strip().lower() if len(argv) >= 4 else ""
+        if first_opt and first_opt != "all":
+            if first_opt in status_terms and not second_opt:
+                args.extend(["--status", status_aliases.get(first_opt, first_opt)])
+            else:
+                args.extend(["--dex", first_opt])
+        if second_opt:
+            args.extend(["--status", status_aliases.get(second_opt, second_opt)])
+        args.append("--json")
+        return _run_agent(args)
+
+    if cmd == "liquidity-quote-add":
+        if len(argv) < 8:
+            return _err(
+                "usage",
+                "liquidity-quote-add requires <dex> <token_a> <token_b> <amount_a> <amount_b> <slippage_bps>",
+                "usage: liquidity-quote-add <dex> <token_a> <token_b> <amount_a> <amount_b> <slippage_bps> [v2|v3]",
+                exit_code=2,
+            )
+        position_type = argv[8].strip().lower() if len(argv) >= 9 else "v2"
+        if position_type not in {"v2", "v3"}:
+            return _err("invalid_input", "position type must be v2 or v3.", exit_code=2)
+        return _run_agent(
+            [
+                "liquidity",
+                "quote-add",
+                "--chain",
+                chain,
+                "--dex",
+                argv[2].strip().lower(),
+                "--token-a",
+                argv[3].strip(),
+                "--token-b",
+                argv[4].strip(),
+                "--amount-a",
+                argv[5].strip(),
+                "--amount-b",
+                argv[6].strip(),
+                "--slippage-bps",
+                argv[7].strip(),
+                "--position-type",
+                position_type,
+                "--json",
+            ]
+        )
+
+    if cmd == "liquidity-quote-remove":
+        if len(argv) < 4:
+            return _err(
+                "usage",
+                "liquidity-quote-remove requires <dex> <position_id>",
+                "usage: liquidity-quote-remove <dex> <position_id> [percent]",
+                exit_code=2,
+            )
+        percent = argv[4].strip() if len(argv) >= 5 else "100"
+        if not _is_uint_string(percent):
+            return _err("invalid_input", "percent must be an integer.", exit_code=2)
+        return _run_agent(
+            [
+                "liquidity",
+                "quote-remove",
+                "--chain",
+                chain,
+                "--dex",
+                argv[2].strip().lower(),
+                "--position-id",
+                argv[3].strip(),
+                "--percent",
+                percent,
+                "--json",
+            ]
+        )
+
+    if cmd == "limit-orders-create":
+        if len(argv) < 8:
+            return _err(
+                "usage",
+                "limit-orders-create requires <buy|sell> <token_in> <token_out> <amount_in> <limit_price> <slippage_bps>.",
+                "usage: limit-orders-create <buy|sell> <token_in> <token_out> <amount_in> <limit_price> <slippage_bps> [chain_key]",
+                exit_code=2,
+            )
+        side = str(argv[2] or "").strip().lower()
+        if side not in {"buy", "sell"}:
+            return _err("invalid_input", "side must be buy or sell.", exit_code=2)
+        target_chain = str(argv[8]).strip() if len(argv) >= 9 and str(argv[8]).strip() else chain
+        if not _is_uint_string(str(argv[7]).strip()):
+            return _err("invalid_input", "slippage_bps must be an integer.", exit_code=2)
+        return _run_agent(
+            [
+                "limit-orders",
+                "create",
+                "--chain",
+                target_chain,
+                "--mode",
+                "real",
+                "--side",
+                side,
+                "--token-in",
+                str(argv[3]).strip(),
+                "--token-out",
+                str(argv[4]).strip(),
+                "--amount-in",
+                str(argv[5]).strip(),
+                "--limit-price",
+                str(argv[6]).strip(),
+                "--slippage-bps",
+                str(argv[7]).strip(),
+                "--json",
+            ]
+        )
+
+    if cmd == "limit-orders-list":
+        args = ["limit-orders", "list", "--chain", chain]
+        if len(argv) >= 3 and str(argv[2]).strip():
+            status = str(argv[2]).strip().lower()
+            if status in {"open", "triggered", "filled", "failed", "cancelled", "expired"}:
+                args.extend(["--status", status])
+            elif _is_uint_string(status):
+                args.extend(["--limit", status])
+            else:
+                args = ["limit-orders", "list", "--chain", status]
+        if len(argv) >= 4 and str(argv[3]).strip():
+            candidate = str(argv[3]).strip()
+            if _is_uint_string(candidate):
+                args.extend(["--limit", candidate])
+            else:
+                args = ["limit-orders", "list", "--chain", candidate]
+        args.append("--json")
+        return _run_agent(args)
+
+    if cmd == "limit-orders-cancel":
+        if len(argv) < 3:
+            return _err("usage", "limit-orders-cancel requires <order_id>.", "usage: limit-orders-cancel <order_id> [chain_key]", exit_code=2)
+        target_chain = str(argv[3]).strip() if len(argv) >= 4 and str(argv[3]).strip() else chain
+        return _run_agent(["limit-orders", "cancel", "--order-id", str(argv[2]).strip(), "--chain", target_chain, "--json"])
+
+    if cmd == "limit-orders-sync":
+        target_chain = str(argv[2]).strip() if len(argv) >= 3 and str(argv[2]).strip() else chain
+        return _run_agent(["limit-orders", "sync", "--chain", target_chain, "--json"])
+
+    if cmd == "limit-orders-run-once":
+        target_chain = str(argv[2]).strip() if len(argv) >= 3 and str(argv[2]).strip() else chain
+        args = ["limit-orders", "run-once", "--chain", target_chain]
+        if len(argv) >= 4 and str(argv[3]).strip().lower() in {"sync", "--sync", "1", "true"}:
+            args.append("--sync")
+        args.append("--json")
+        return _run_agent(args)
+
+    if cmd == "limit-orders-run-loop":
+        if len(argv) < 5:
+            return _err(
+                "usage",
+                "limit-orders-run-loop requires <chain_key> <iterations> <interval_sec>.",
+                "usage: limit-orders-run-loop <chain_key> <iterations> <interval_sec> [sync]",
+                exit_code=2,
+            )
+        target_chain = str(argv[2]).strip()
+        iterations = str(argv[3]).strip()
+        interval_sec = str(argv[4]).strip()
+        if not _is_uint_string(iterations) or not _is_uint_string(interval_sec):
+            return _err("invalid_input", "iterations and interval_sec must be integers.", exit_code=2)
+        args = [
+            "limit-orders",
+            "run-loop",
+            "--chain",
+            target_chain,
+            "--iterations",
+            iterations,
+            "--interval-sec",
+            interval_sec,
+        ]
+        if len(argv) >= 6 and str(argv[5]).strip().lower() in {"sync", "--sync", "1", "true"}:
+            args.append("--sync")
+        args.append("--json")
+        return _run_agent(args)
+
+    if cmd == "transfer-resume":
+        if len(argv) < 3:
+            return _err("usage", "transfer-resume requires <approval_id>", "usage: transfer-resume <approval_id>", exit_code=2)
+        approval_id = argv[2].strip()
+        if not approval_id:
+            return _err("invalid_input", "approval_id cannot be empty.", "usage: transfer-resume <approval_id>", exit_code=2)
+        return _run_agent(["approvals", "resume-transfer", "--approval-id", approval_id, "--chain", chain, "--json"])
+
+    if cmd == "transfer-decide":
+        if len(argv) < 4:
+            return _err(
+                "usage",
+                "transfer-decide requires <approval_id> <approve|deny>",
+                "usage: transfer-decide <approval_id> <approve|deny>",
+                exit_code=2,
+            )
+        approval_id = argv[2].strip()
+        decision = argv[3].strip().lower()
+        if not approval_id:
+            return _err("invalid_input", "approval_id cannot be empty.", "usage: transfer-decide <approval_id> <approve|deny>", exit_code=2)
+        if decision not in {"approve", "deny"}:
+            return _err("invalid_input", "decision must be approve or deny.", "usage: transfer-decide <approval_id> <approve|deny>", exit_code=2)
+        return _run_agent(["approvals", "decide-transfer", "--approval-id", approval_id, "--decision", decision, "--chain", chain, "--json"])
+
+    if cmd == "transfer-policy-get":
+        return _run_agent(["transfers", "policy-get", "--chain", chain, "--json"])
+
+    if cmd == "transfer-policy-set":
+        if len(argv) < 4:
+            return _err(
+                "usage",
+                "transfer-policy-set requires <auto|per_transfer> <native_preapproved:0|1> [allowed_token ...]",
+                "usage: transfer-policy-set <auto|per_transfer> <native_preapproved:0|1> [allowed_token ...]",
+                exit_code=2,
+            )
+        mode = argv[2].strip().lower()
+        native_preapproved = argv[3].strip()
+        if mode not in {"auto", "per_transfer"}:
+            return _err("invalid_input", "mode must be auto or per_transfer.", exit_code=2)
+        if native_preapproved not in {"0", "1"}:
+            return _err("invalid_input", "native_preapproved must be 0 or 1.", exit_code=2)
+        args = ["transfers", "policy-set", "--chain", chain, "--global", mode, "--native-preapproved", native_preapproved]
+        for token in argv[4:]:
+            args.extend(["--allowed-token", token])
+        args.append("--json")
+        return _run_agent(args)
+
+    if cmd == "withdraws-list":
+        target_chain = str(argv[2]).strip() if len(argv) >= 3 and str(argv[2]).strip() else chain
+        return _run_agent(["withdraws", "list", "--chain", target_chain, "--json"])
+
+    if cmd == "report-send":
+        if len(argv) < 3:
+            return _err("usage", "report-send requires <trade_id>", "usage: report-send <trade_id>", exit_code=2)
+        return _run_agent(["report", "send", "--trade", argv[2], "--json"])
+
+    if cmd == "chat-poll":
+        return _run_agent(["chat", "poll", "--chain", chain, "--json"])
+
+    if cmd == "chat-post":
+        if len(argv) < 3:
+            return _err("usage", "chat-post requires <message>", "usage: chat-post <message>", exit_code=2)
+        return _run_agent(["chat", "post", "--message", argv[2], "--chain", chain, "--json"])
+
+    if cmd == "tracked-list":
+        return _run_agent(["tracked", "list", "--chain", chain, "--json"])
+
+    if cmd == "tracked-trades":
+        args = ["tracked", "trades", "--chain", chain, "--json"]
+        if len(argv) >= 3 and str(argv[2]).strip():
+            args.extend(["--agent", str(argv[2]).strip()])
+        if len(argv) >= 4 and str(argv[3]).strip():
+            if not _is_uint_string(str(argv[3]).strip()):
+                return _err("invalid_input", "limit must be an integer.", "usage: tracked-trades [tracked_agent_id] [limit]", exit_code=2)
+            args.extend(["--limit", str(argv[3]).strip()])
+        return _run_agent(args)
+
+    if cmd == "username-set":
+        if len(argv) < 3:
+            return _err("usage", "username-set requires <name>", "usage: username-set <name>", exit_code=2)
+        return _run_agent(["profile", "set-name", "--name", argv[2], "--chain", chain, "--json"])
+
+    if cmd == "agent-register":
+        if len(argv) < 3:
+            return _err("usage", "agent-register requires <name>", "usage: agent-register <name>", exit_code=2)
+        return _run_agent(["profile", "set-name", "--name", argv[2], "--chain", chain, "--json"])
+
+    if cmd == "auth-recover":
+        return _run_agent(["auth", "recover", "--chain", chain, "--json"])
+
+    if cmd == "owner-link":
+        args = ["management-link", "--json"]
+        ttl = os.environ.get("XCLAW_OWNER_LINK_TTL_SECONDS")
+        if ttl:
+            args.extend(["--ttl-seconds", ttl])
+        return _run_agent(args)
+
+    if cmd == "faucet-request":
+        request_chain = chain
+        assets = argv[2:]
+        if assets:
+            first = str(assets[0] or "").strip().lower()
+            if first in {"base_sepolia", "kite_ai_testnet", "solana_localnet", "solana_devnet", "solana_testnet", "solana_mainnet_beta"}:
+                request_chain = first
+                assets = assets[1:]
+        args = ["faucet-request", "--chain", request_chain]
+        normalized_assets: list[str] = []
+        for asset in assets:
+            normalized = _normalize_faucet_asset(asset)
+            if normalized not in {"native", "wrapped", "stable"}:
+                return _err(
+                    "invalid_input",
+                    "faucet-request asset must be native|wrapped|stable.",
+                    "usage: faucet-request [chain] [native] [wrapped] [stable]",
+                    exit_code=2,
+                )
+            if normalized not in normalized_assets:
+                normalized_assets.append(normalized)
+        # Operational default: if user requests only native (for example "hbar"),
+        # keep assets omitted so server dispenses native+wrapped+stable together.
+        if not (len(normalized_assets) == 1 and normalized_assets[0] == "native" and not _env_truthy("XCLAW_FAUCET_NATIVE_ONLY")):
+            for normalized in normalized_assets:
+                args.extend(["--asset", normalized])
+        args.append("--json")
+        return _run_agent(args)
+
+    if cmd == "faucet-networks":
+        return _run_agent(["faucet-networks", "--json"])
+
+    if cmd == "chains":
+        args = ["chains"]
+        if argv and str(argv[0]).strip().lower() in {"--include-disabled", "include-disabled", "all"}:
+            args.append("--include-disabled")
+        args.append("--json")
+        return _run_agent(args)
+
+    if cmd == "dexscreener-search":
+        if len(argv) < 3:
+            return _err(
+                "usage",
+                "dexscreener-search requires <query> [limit].",
+                "usage: dexscreener-search <query> [limit 1-20]",
+                exit_code=2,
+            )
+        query = argv[2].strip()
+        if not query:
+            return _err("invalid_input", "query must not be empty.", "usage: dexscreener-search <query> [limit 1-20]", exit_code=2)
+        limit = _parse_limit(argv[3] if len(argv) >= 4 else "", default=10, minimum=1, maximum=20)
+        if limit is None:
+            return _err("invalid_input", "limit must be an integer between 1 and 20.", "usage: dexscreener-search <query> [limit 1-20]", exit_code=2)
+        timeout_sec = _parse_timeout(os.environ.get("XCLAW_DEXSCREENER_TIMEOUT_SEC", ""), default=12, minimum=1, maximum=60)
+        if timeout_sec is None:
+            return _err(
+                "invalid_env",
+                "XCLAW_DEXSCREENER_TIMEOUT_SEC must be an integer between 1 and 60.",
+                "Unset XCLAW_DEXSCREENER_TIMEOUT_SEC or set it to a valid integer value.",
+                exit_code=2,
+            )
+        encoded_query = urllib.parse.quote_plus(query)
+        url = f"https://api.dexscreener.com/latest/dex/search?q={encoded_query}"
+        payload, fetch_error, fetch_code = _fetch_dexscreener_json(url, timeout_sec=timeout_sec)
+        if fetch_error is not None:
+            return _err(fetch_error["code"], fetch_error["message"], fetch_error.get("actionHint"), fetch_error.get("details"), exit_code=fetch_code)
+        rows = payload.get("pairs") if isinstance(payload, dict) else None
+        if not isinstance(rows, list):
+            return _err("dexscreener_schema_invalid", "Dexscreener response did not contain pairs[].", "Retry with a different query.", exit_code=1)
+        pairs = [_normalize_dexscreener_pair(row) for row in rows if isinstance(row, dict)][:limit]
+        _print_json(
+            {
+                "ok": True,
+                "code": "ok",
+                "message": "Dexscreener search results fetched.",
+                "source": "dexscreener",
+                "endpoint": "search",
+                "query": query,
+                "pairCount": len(pairs),
+                "pairs": pairs,
+            }
+        )
+        return 0
+
+    if cmd == "dexscreener-top":
+        if len(argv) < 3:
+            return _err(
+                "usage",
+                "dexscreener-top requires <query> [limit].",
+                "usage: dexscreener-top <query> [limit 1-20]",
+                exit_code=2,
+            )
+        query = argv[2].strip()
+        if not query:
+            return _err("invalid_input", "query must not be empty.", "usage: dexscreener-top <query> [limit 1-20]", exit_code=2)
+        limit = _parse_limit(argv[3] if len(argv) >= 4 else "", default=10, minimum=1, maximum=20)
+        if limit is None:
+            return _err("invalid_input", "limit must be an integer between 1 and 20.", "usage: dexscreener-top <query> [limit 1-20]", exit_code=2)
+        timeout_sec = _parse_timeout(os.environ.get("XCLAW_DEXSCREENER_TIMEOUT_SEC", ""), default=12, minimum=1, maximum=60)
+        if timeout_sec is None:
+            return _err(
+                "invalid_env",
+                "XCLAW_DEXSCREENER_TIMEOUT_SEC must be an integer between 1 and 60.",
+                "Unset XCLAW_DEXSCREENER_TIMEOUT_SEC or set it to a valid integer value.",
+                exit_code=2,
+            )
+        encoded_query = urllib.parse.quote_plus(query)
+        url = f"https://api.dexscreener.com/latest/dex/search?q={encoded_query}"
+        payload, fetch_error, fetch_code = _fetch_dexscreener_json(url, timeout_sec=timeout_sec)
+        if fetch_error is not None:
+            return _err(fetch_error["code"], fetch_error["message"], fetch_error.get("actionHint"), fetch_error.get("details"), exit_code=fetch_code)
+        rows = payload.get("pairs") if isinstance(payload, dict) else None
+        if not isinstance(rows, list):
+            return _err("dexscreener_schema_invalid", "Dexscreener response did not contain pairs[].", "Retry with a different query.", exit_code=1)
+        pairs = [_normalize_dexscreener_pair(row) for row in rows if isinstance(row, dict)]
+        top = _build_dexscreener_top_rows(pairs, limit=limit)
+        _print_json(
+            {
+                "ok": True,
+                "code": "ok",
+                "message": "Dexscreener top pairs fetched.",
+                "source": "dexscreener",
+                "endpoint": "top",
+                "query": query,
+                "sortBy": "liquidityUsd_desc",
+                "pairCount": len(top),
+                "pairs": top,
+            }
+        )
+        return 0
+
+    if cmd == "dexscreener-token-pairs":
+        if len(argv) < 4:
+            return _err(
+                "usage",
+                "dexscreener-token-pairs requires <chain_id> <token_address> [limit].",
+                "usage: dexscreener-token-pairs <chain_id> <token_address> [limit 1-20]",
+                exit_code=2,
+            )
+        chain_id = argv[2].strip()
+        token_address = argv[3].strip()
+        if not re.fullmatch(r"[a-z0-9_-]{2,64}", chain_id):
+            return _err(
+                "invalid_input",
+                "chain_id format is invalid.",
+                "Use a Dexscreener chain id such as base, ethereum, or solana.",
+                {"chainId": chain_id},
+                exit_code=2,
+            )
+        if not re.fullmatch(r"[A-Za-z0-9._-]{2,128}", token_address):
+            return _err(
+                "invalid_input",
+                "token_address format is invalid.",
+                "Use a token address format accepted by Dexscreener for the target chain.",
+                {"tokenAddress": token_address},
+                exit_code=2,
+            )
+        limit = _parse_limit(argv[4] if len(argv) >= 5 else "", default=10, minimum=1, maximum=20)
+        if limit is None:
+            return _err(
+                "invalid_input",
+                "limit must be an integer between 1 and 20.",
+                "usage: dexscreener-token-pairs <chain_id> <token_address> [limit 1-20]",
+                exit_code=2,
+            )
+        timeout_sec = _parse_timeout(os.environ.get("XCLAW_DEXSCREENER_TIMEOUT_SEC", ""), default=12, minimum=1, maximum=60)
+        if timeout_sec is None:
+            return _err(
+                "invalid_env",
+                "XCLAW_DEXSCREENER_TIMEOUT_SEC must be an integer between 1 and 60.",
+                "Unset XCLAW_DEXSCREENER_TIMEOUT_SEC or set it to a valid integer value.",
+                exit_code=2,
+            )
+        encoded_chain = urllib.parse.quote(chain_id, safe="")
+        encoded_token = urllib.parse.quote(token_address, safe="")
+        url = f"https://api.dexscreener.com/token-pairs/v1/{encoded_chain}/{encoded_token}"
+        payload, fetch_error, fetch_code = _fetch_dexscreener_json(url, timeout_sec=timeout_sec)
+        if fetch_error is not None:
+            return _err(fetch_error["code"], fetch_error["message"], fetch_error.get("actionHint"), fetch_error.get("details"), exit_code=fetch_code)
+        rows = payload if isinstance(payload, list) else None
+        if rows is None and isinstance(payload, dict):
+            candidate = payload.get("pairs")
+            if isinstance(candidate, list):
+                rows = candidate
+        if not isinstance(rows, list):
+            return _err("dexscreener_schema_invalid", "Dexscreener response did not contain a pair list.", "Retry with a valid chain/token combination.", exit_code=1)
+        pairs = [_normalize_dexscreener_pair(row) for row in rows if isinstance(row, dict)][:limit]
+        _print_json(
+            {
+                "ok": True,
+                "code": "ok",
+                "message": "Dexscreener token pairs fetched.",
+                "source": "dexscreener",
+                "endpoint": "token-pairs",
+                "chainId": chain_id,
+                "tokenAddress": token_address,
+                "pairCount": len(pairs),
+                "pairs": pairs,
+            }
+        )
+        return 0
+
+    if cmd == "token-research":
+        if len(argv) < 3:
+            return _err(
+                "usage",
+                "token-research requires <query> [limit].",
+                "usage: token-research <query> [limit 1-20]",
+                exit_code=2,
+            )
+        query = argv[2].strip()
+        if not query:
+            return _err("invalid_input", "query must not be empty.", "usage: token-research <query> [limit 1-20]", exit_code=2)
+        limit = _parse_limit(argv[3] if len(argv) >= 4 else "", default=5, minimum=1, maximum=20)
+        if limit is None:
+            return _err("invalid_input", "limit must be an integer between 1 and 20.", "usage: token-research <query> [limit 1-20]", exit_code=2)
+        timeout_sec = _parse_timeout(os.environ.get("XCLAW_DEXSCREENER_TIMEOUT_SEC", ""), default=12, minimum=1, maximum=60)
+        if timeout_sec is None:
+            return _err(
+                "invalid_env",
+                "XCLAW_DEXSCREENER_TIMEOUT_SEC must be an integer between 1 and 60.",
+                "Unset XCLAW_DEXSCREENER_TIMEOUT_SEC or set it to a valid integer value.",
+                exit_code=2,
+            )
+
+        encoded_query = urllib.parse.quote_plus(query)
+        search_url = f"https://api.dexscreener.com/latest/dex/search?q={encoded_query}"
+        search_payload, search_error, search_code = _fetch_dexscreener_json(search_url, timeout_sec=timeout_sec)
+        if search_error is not None:
+            return _err(search_error["code"], search_error["message"], search_error.get("actionHint"), search_error.get("details"), exit_code=search_code)
+        rows = search_payload.get("pairs") if isinstance(search_payload, dict) else None
+        if not isinstance(rows, list):
+            return _err("dexscreener_schema_invalid", "Dexscreener response did not contain pairs[].", "Retry with a different query.", exit_code=1)
+        normalized_rows = [_normalize_dexscreener_pair(row) for row in rows if isinstance(row, dict)]
+        top = _build_dexscreener_top_rows(normalized_rows, limit=limit)
+        if not top:
+            return _err(
+                "dexscreener_no_results",
+                "No Dexscreener pairs matched the query.",
+                "Try a more specific ticker, token name, or chain-prefixed query.",
+                {"query": query},
+                exit_code=1,
+            )
+
+        primary = top[0]
+        primary_chain = str(primary.get("chainId") or "").strip().lower()
+        primary_token_address = str((primary.get("baseToken") or {}).get("address") or "").strip()
+        drilldown = []
+        drilldown_error = None
+        if re.fullmatch(r"[a-z0-9_-]{2,64}", primary_chain) and primary_token_address:
+            token_url = (
+                "https://api.dexscreener.com/token-pairs/v1/"
+                f"{urllib.parse.quote(primary_chain, safe='')}/"
+                f"{urllib.parse.quote(primary_token_address, safe='')}"
+            )
+            token_payload, token_error, _token_code = _fetch_dexscreener_json(token_url, timeout_sec=timeout_sec)
+            if token_error is None:
+                token_rows = token_payload if isinstance(token_payload, list) else None
+                if token_rows is None and isinstance(token_payload, dict):
+                    candidate = token_payload.get("pairs")
+                    if isinstance(candidate, list):
+                        token_rows = candidate
+                if isinstance(token_rows, list):
+                    drill_norm = [_normalize_dexscreener_pair(row) for row in token_rows if isinstance(row, dict)]
+                    drilldown = _build_dexscreener_top_rows(drill_norm, limit=limit)
+            else:
+                drilldown_error = {
+                    "code": token_error.get("code"),
+                    "message": token_error.get("message"),
+                }
+
+        _print_json(
+            {
+                "ok": True,
+                "code": "ok",
+                "message": "Token research completed.",
+                "source": "dexscreener",
+                "endpoint": "token-research",
+                "query": query,
+                "sortBy": "liquidityUsd_desc",
+                "topPairs": top,
+                "primaryToken": {
+                    "chainId": primary_chain,
+                    "address": primary_token_address,
+                    "symbol": (primary.get("baseToken") or {}).get("symbol"),
+                    "name": (primary.get("baseToken") or {}).get("name"),
+                },
+                "drilldownPairs": drilldown,
+                "drilldownError": drilldown_error,
+                "actionHint": "Use dexscreener-token-pairs <chain_id> <token_address> [limit] for alternate chain or quote-token drilldown.",
+            }
+        )
+        return 0
+
+    if cmd == "default-chain-get":
+        return _run_agent(["default-chain", "get", "--json"])
+
+    if cmd == "default-chain-set":
+        if len(argv) < 3 or not str(argv[2]).strip():
+            return _err("usage", "default-chain-set requires <chain_key>", "usage: default-chain-set <chain_key>", exit_code=2)
+        return _run_agent(["default-chain", "set", "--chain", str(argv[2]).strip(), "--json"])
+
+    if cmd == "request-x402-payment":
+        overrides, parse_exit_code, parse_error = _parse_request_x402_payment_args(argv[2:])
+        if parse_exit_code is not None and parse_error is not None:
+            return _err(parse_error["code"], parse_error["message"], parse_error.get("action_hint"), exit_code=parse_exit_code)
+        return _run_agent(_build_hosted_x402_receive_args((overrides or {}).get("resource_description"), overrides))
+
+    if cmd == "x402-pay":
+        if len(argv) < 6:
+            return _err(
+                "usage",
+                "x402-pay requires <url> <network> <facilitator> <amount_atomic>",
+                "usage: x402-pay <url> <network> <facilitator> <amount_atomic>",
+                exit_code=2,
+            )
+        return _run_agent(
+            [
+                "x402",
+                "pay",
+                "--url",
+                argv[2],
+                "--network",
+                argv[3],
+                "--facilitator",
+                argv[4],
+                "--amount-atomic",
+                argv[5],
+                "--json",
+            ]
+        )
+
+    if cmd == "x402-pay-resume":
+        if len(argv) < 3:
+            return _err("usage", "x402-pay-resume requires <approval_id>", "usage: x402-pay-resume <approval_id>", exit_code=2)
+        return _run_agent(["x402", "pay-resume", "--approval-id", argv[2], "--json"])
+
+    if cmd == "x402-pay-decide":
+        if len(argv) < 4:
+            return _err(
+                "usage",
+                "x402-pay-decide requires <approval_id> <approve|deny>",
+                "usage: x402-pay-decide <approval_id> <approve|deny>",
+                exit_code=2,
+            )
+        decision = argv[3].strip().lower()
+        if decision not in {"approve", "deny"}:
+            return _err("invalid_input", "decision must be approve or deny.", "usage: x402-pay-decide <approval_id> <approve|deny>", exit_code=2)
+        return _run_agent(["x402", "pay-decide", "--approval-id", argv[2], "--decision", decision, "--json"])
+
+    if cmd == "x402-policy-get":
+        if len(argv) < 3:
+            return _err("usage", "x402-policy-get requires <network>", "usage: x402-policy-get <network>", exit_code=2)
+        return _run_agent(["x402", "policy-get", "--network", argv[2], "--json"])
+
+    if cmd == "x402-policy-set":
+        if len(argv) < 4:
+            return _err(
+                "usage",
+                "x402-policy-set requires <network> <auto|per_payment> [max_amount_atomic] [allowed_host ...]",
+                "usage: x402-policy-set <network> <auto|per_payment> [max_amount_atomic] [allowed_host ...]",
+                exit_code=2,
+            )
+        mode = argv[3].strip().lower()
+        if mode not in {"auto", "per_payment"}:
+            return _err("invalid_input", "mode must be auto or per_payment.", exit_code=2)
+        args = ["x402", "policy-set", "--network", argv[2], "--mode", mode]
+        if len(argv) >= 5 and argv[4].strip():
+            args.extend(["--max-amount-atomic", argv[4].strip()])
+        for host in argv[5:]:
+            args.extend(["--allowed-host", host])
+        args.append("--json")
+        return _run_agent(args)
+
+    if cmd == "x402-networks":
+        return _run_agent(["x402", "networks", "--json"])
+
+    if cmd == "wallet-health":
+        target_chain = str(argv[2]).strip() if len(argv) >= 3 and str(argv[2]).strip() else chain
+        return _run_agent(["wallet", "health", "--chain", target_chain, "--json"])
+
+    if cmd == "wallet-rpc-health":
+        target_chain = str(argv[2]).strip() if len(argv) >= 3 and str(argv[2]).strip() else chain
+        return _run_agent(["wallet", "rpc-health", "--chain", target_chain, "--json"])
+
+    if cmd == "wallet-address":
+        target_chain = str(argv[2]).strip() if len(argv) >= 3 and str(argv[2]).strip() else chain
+        return _run_agent(["wallet", "address", "--chain", target_chain, "--json"])
+
+    if cmd == "wallet-sign-challenge":
+        if len(argv) < 3:
+            return _err(
+                "usage",
+                "wallet-sign-challenge requires <message>",
+                "usage: wallet-sign-challenge <message>",
+                exit_code=2,
+            )
+        message = argv[2].strip()
+        if not message:
+            return _err("invalid_input", "Challenge message cannot be empty.", exit_code=2)
+        target_chain = str(argv[3]).strip() if len(argv) >= 4 and str(argv[3]).strip() else chain
+        return _run_agent(["wallet", "sign-challenge", "--message", message, "--chain", target_chain, "--json"])
+
+    if cmd == "wallet-send":
+        if len(argv) < 4:
+            return _err("usage", "wallet-send requires <to> <amount_wei>", "usage: wallet-send <to> <amount_wei>", exit_code=2)
+        to_addr = argv[2]
+        amount_wei = argv[3]
+        target_chain = str(argv[4]).strip() if len(argv) >= 5 and str(argv[4]).strip() else chain
+        if not _is_chain_address(to_addr, target_chain):
+            return _err(
+                "invalid_input",
+                "Invalid recipient address format.",
+                _address_hint_for_chain(target_chain),
+                {"to": to_addr, "chain": target_chain},
+                exit_code=2,
+            )
+        if not _is_uint_string(amount_wei):
+            return _err("invalid_input", "Invalid amount_wei format.", "Use base-unit integer string, for example 10000000000000000.", {"amountWei": amount_wei}, exit_code=2)
+        return _run_agent(["wallet", "send", "--to", to_addr, "--amount-wei", amount_wei, "--chain", target_chain, "--json"])
+
+    if cmd == "wallet-send-token":
+        if len(argv) < 5:
+            return _err(
+                "usage",
+                "wallet-send-token requires <token_or_symbol> <to> <amount_wei>",
+                "usage: wallet-send-token <token_or_symbol> <to> <amount_wei>",
+                exit_code=2,
+            )
+        token_or_symbol = argv[2].strip()
+        to_addr = argv[3]
+        amount_wei = argv[4]
+        target_chain = str(argv[5]).strip() if len(argv) >= 6 and str(argv[5]).strip() else chain
+        if not token_or_symbol:
+            return _err(
+                "invalid_input",
+                "Token must not be empty.",
+                "Use a canonical token symbol (for example USDC) or 0x token address.",
+                {"token": token_or_symbol},
+                exit_code=2,
+            )
+        if not _is_chain_address(to_addr, target_chain):
+            return _err(
+                "invalid_input",
+                "Invalid recipient address format.",
+                _address_hint_for_chain(target_chain),
+                {"to": to_addr, "chain": target_chain},
+                exit_code=2,
+            )
+        if not _is_uint_string(amount_wei):
+            return _err("invalid_input", "Invalid amount_wei format.", "Use base-unit integer string.", {"amountWei": amount_wei}, exit_code=2)
+        return _run_agent(
+            [
+                "wallet",
+                "send-token",
+                "--token",
+                token_or_symbol,
+                "--to",
+                to_addr,
+                "--amount-wei",
+                amount_wei,
+                "--chain",
+                target_chain,
+                "--json",
+            ]
+        )
+
+    if cmd == "wallet-balance":
+        target_chain = str(argv[2]).strip() if len(argv) >= 3 and str(argv[2]).strip() else chain
+        return _run_agent(["wallet", "balance", "--chain", target_chain, "--json"])
+
+    if cmd == "wallet-token-balance":
+        if len(argv) < 3:
+            return _err("usage", "wallet-token-balance requires <token_address>", "usage: wallet-token-balance <token_address>", exit_code=2)
+        token_addr = argv[2]
+        target_chain = str(argv[3]).strip() if len(argv) >= 4 and str(argv[3]).strip() else chain
+        if not _is_chain_address(token_addr, target_chain):
+            return _err(
+                "invalid_input",
+                "Invalid token address format.",
+                _address_hint_for_chain(target_chain),
+                {"token": token_addr, "chain": target_chain},
+                exit_code=2,
+            )
+        return _run_agent(["wallet", "token-balance", "--token", token_addr, "--chain", target_chain, "--json"])
+
+    if cmd == "wallet-track-token":
+        if len(argv) < 3:
+            return _err("usage", "wallet-track-token requires <token_address>", "usage: wallet-track-token <token_address>", exit_code=2)
+        token_addr = argv[2].strip()
+        target_chain = str(argv[3]).strip() if len(argv) >= 4 and str(argv[3]).strip() else chain
+        if not _is_chain_address(token_addr, target_chain):
+            return _err(
+                "invalid_input",
+                "Invalid token address format.",
+                _address_hint_for_chain(target_chain),
+                {"token": token_addr, "chain": target_chain},
+                exit_code=2,
+            )
+        return _run_agent(["wallet", "track-token", "--token", token_addr, "--chain", target_chain, "--json"])
+
+    if cmd == "wallet-untrack-token":
+        if len(argv) < 3:
+            return _err("usage", "wallet-untrack-token requires <token_address>", "usage: wallet-untrack-token <token_address>", exit_code=2)
+        token_addr = argv[2].strip()
+        target_chain = str(argv[3]).strip() if len(argv) >= 4 and str(argv[3]).strip() else chain
+        if not _is_chain_address(token_addr, target_chain):
+            return _err(
+                "invalid_input",
+                "Invalid token address format.",
+                _address_hint_for_chain(target_chain),
+                {"token": token_addr, "chain": target_chain},
+                exit_code=2,
+            )
+        return _run_agent(["wallet", "untrack-token", "--token", token_addr, "--chain", target_chain, "--json"])
+
+    if cmd == "wallet-tracked-tokens":
+        target_chain = str(argv[2]).strip() if len(argv) >= 3 and str(argv[2]).strip() else chain
+        return _run_agent(["wallet", "tracked-tokens", "--chain", target_chain, "--json"])
+
+    if cmd == "wallet-wrap-native":
+        if len(argv) < 3:
+            return _err(
+                "usage",
+                "wallet-wrap-native requires <amount>",
+                "usage: wallet-wrap-native <amount>",
+                exit_code=2,
+            )
+        amount = argv[2].strip()
+        if not amount:
+            return _err("invalid_input", "Amount must not be empty.", "usage: wallet-wrap-native <amount>", exit_code=2)
+        target_chain = str(argv[3]).strip() if len(argv) >= 4 and str(argv[3]).strip() else chain
+        return _run_agent(["wallet", "wrap-native", "--amount", amount, "--chain", target_chain, "--json"])
+
+    if cmd == "wallet-create":
+        target_chain = str(argv[2]).strip() if len(argv) >= 3 and str(argv[2]).strip() else chain
+        return _run_agent(["wallet", "create", "--chain", target_chain, "--json"])
+
+    return _err(
+        "unknown_command",
+        f"Unknown command: {cmd}",
+        "Use one of: version, status, dashboard, intents-poll, approval-check, trade-exec, trade-spot, trade-resume, liquidity-add, liquidity-remove, liquidity-positions, liquidity-quote-add, liquidity-quote-remove, transfer-resume, transfer-decide, transfer-policy-get, transfer-policy-set, withdraws-list, report-send, chat-poll, chat-post, tracked-list, tracked-trades, username-set, agent-register, auth-recover, owner-link, faucet-request, faucet-networks, chains, dexscreener-search, dexscreener-top, dexscreener-token-pairs, token-research, x402-pay, x402-pay-resume, x402-pay-decide, x402-policy-get, x402-policy-set, x402-networks, request-x402-payment, wallet-health, wallet-rpc-health, wallet-address, wallet-sign-challenge, wallet-send, wallet-send-token, wallet-balance, wallet-token-balance, wallet-track-token, wallet-untrack-token, wallet-tracked-tokens, wallet-wrap-native, wallet-create",
+        exit_code=2,
+    )
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

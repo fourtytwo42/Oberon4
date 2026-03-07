@@ -1,0 +1,178 @@
+{
+  "chainKey": "base_sepolia",
+  "family": "evm",
+  "enabled": true,
+  "uiVisible": true,
+  "chainId": 84532,
+  "displayName": "Base Sepolia",
+  "nativeCurrency": {
+    "name": "Ether",
+    "symbol": "ETH",
+    "decimals": 18
+  },
+  "explorerBaseUrl": "https://sepolia.basescan.org",
+  "rpc": {
+    "primary": "https://sepolia.base.org",
+    "fallback": "https://base-sepolia-rpc.publicnode.com"
+  },
+  "coreContracts": {
+    "dex": "uniswap_fork",
+    "deploymentStatus": "deployed",
+    "factory": "0xf5C44221f5dDc473dE38bfE2490259D2987030F8",
+    "dexRouter": "0xA55c52512d02bA2BAfF5e6DD89be8Cf991C9E918",
+    "router": "0x6dA4720De207105e4Ce1fDD48Dc845798AE2153F",
+    "quoter": "0x8c78091AD62C71Ede974460d0Ee2125A917105F3",
+    "escrow": "0x6D7B9878F56a91fFd7203835c7b158DBA41805Ed",
+    "escrowAbiVersion": "xclaw_escrow_v1",
+    "notes": "Slice-22 redeploy. coreContracts.router is the XClaw fee-router proxy (50 bps fee on output, net semantics). coreContracts.dexRouter is the underlying mock router. Evidence artifacts: infrastructure/seed-data/base-sepolia-deploy.json and base-sepolia-verify.json. Deployment tx hashes: factory=0x34aef05818d74aeee11477ee492ca0ac33c66d49f1f78f07aa9b404f2ed0bc65, dexRouter=0x2494e10f249d96b0539d151b1034a0a592803451daf3724f9fe200e2a9038643, router=0x6c7071108dfc22205eda69a78543daeb682dd4fe2ff05f579778d5cc21d1120b, quoter=0x00c40ca1df4ca7bdfef9f1d71b56c4bf334872faf9454548155d431c0c174a3c, escrow=0x66872eb08f80cb1ca8a26ece5f2a133709a1e177bb9e422a5bdc716b75f2798f. Token deployments recorded in same artifact."
+  },
+  "canonicalTokens": {
+    "WETH": "0xC97e903056f679ea1Db80893008A92578aDfE609",
+    "USDC": "0x39A0C0D1b3dDcE1B49fAa5c6e1D300C14012F4E2"
+  },
+  "capabilities": {
+    "wallet": true,
+    "trade": true,
+    "liquidity": true,
+    "limitOrders": true,
+    "x402": true,
+    "faucet": true,
+    "deposits": true
+  },
+  "liquidityProtocols": {
+    "uniswap_v2": {
+      "family": "amm_v2",
+      "enabled": true
+    },
+    "uniswap_v3": {
+      "family": "amm_v3",
+      "enabled": true
+    },
+    "aerodrome": {
+      "family": "amm_v2",
+      "enabled": true
+    }
+  },
+  "updatedAt": "2026-02-14T07:55:51.788Z",
+  "version": 1,
+  "sources": {
+    "rpcEndpoints": [
+      "https://docs.base.org/chain/run-a-base-node"
+    ],
+    "wethAddress": "slice21_mock_token_deploy",
+    "usdcAddress": [
+      "slice21_mock_token_deploy"
+    ],
+    "aerodromeDeployments": [
+      "https://aerodrome.finance/security",
+      "https://github.com/aerodrome-finance/contracts",
+      "https://github.com/aerodrome-finance/slipstream",
+      "https://basescan.org/address/0x420dd381b31aef6683db6b902084cb0ffece40da",
+      "https://basescan.org/address/0xcf77a3ba9a5ca399b7c97c74d54e5b1beb874e43"
+    ],
+    "mvpTestDexStrategy": "deploy_uniswap_compatible_fork_on_base_sepolia",
+    "escrowAbiMetadata": "xclaw_escrow_v1",
+    "deploymentArtifacts": [
+      "infrastructure/seed-data/base-sepolia-deploy.json",
+      "infrastructure/seed-data/base-sepolia-verify.json"
+    ],
+    "deploymentEvidence": [
+      "https://sepolia.basescan.org/tx/0x34aef05818d74aeee11477ee492ca0ac33c66d49f1f78f07aa9b404f2ed0bc65",
+      "https://sepolia.basescan.org/tx/0x2494e10f249d96b0539d151b1034a0a592803451daf3724f9fe200e2a9038643",
+      "https://sepolia.basescan.org/tx/0x6c7071108dfc22205eda69a78543daeb682dd4fe2ff05f579778d5cc21d1120b",
+      "https://sepolia.basescan.org/tx/0x00c40ca1df4ca7bdfef9f1d71b56c4bf334872faf9454548155d431c0c174a3c",
+      "https://sepolia.basescan.org/tx/0x66872eb08f80cb1ca8a26ece5f2a133709a1e177bb9e422a5bdc716b75f2798f"
+    ]
+  },
+  "verification": {
+    "verifiedAt": "2026-02-14T07:55:57.807Z",
+    "verifiedViaRpc": true,
+    "verifiedChainIdHex": "0x14a34",
+    "verifiedContractCodePresent": {
+      "WETH": true,
+      "USDC": true,
+      "factory": true,
+      "dexRouter": true,
+      "router": true,
+      "quoter": true,
+      "escrow": true
+    }
+  },
+  "marketData": {
+    "dexscreenerChainId": "base"
+  },
+  "execution": {
+    "trade": {
+      "defaultProvider": "router_adapter",
+      "adapters": {
+        "default": {
+          "adapterKey": "uniswap_fork",
+          "family": "amm_v2",
+          "router": "0xA55c52512d02bA2BAfF5e6DD89be8Cf991C9E918",
+          "factory": "0xf5C44221f5dDc473dE38bfE2490259D2987030F8",
+          "quoter": "0x8c78091AD62C71Ede974460d0Ee2125A917105F3",
+          "positionManager": ""
+        }
+      }
+    },
+    "liquidity": {
+      "defaultProvider": "router_adapter",
+      "adapters": {
+        "uniswap_v2": {
+          "adapterKey": "uniswap_v2",
+          "family": "amm_v2",
+          "router": "0xA55c52512d02bA2BAfF5e6DD89be8Cf991C9E918",
+          "factory": "0xf5C44221f5dDc473dE38bfE2490259D2987030F8",
+          "quoter": "0x8c78091AD62C71Ede974460d0Ee2125A917105F3",
+          "positionManager": ""
+        },
+        "uniswap_v3": {
+          "adapterKey": "uniswap_v3",
+          "family": "position_manager_v3",
+          "router": "0xA55c52512d02bA2BAfF5e6DD89be8Cf991C9E918",
+          "factory": "0xf5C44221f5dDc473dE38bfE2490259D2987030F8",
+          "quoter": "0x8c78091AD62C71Ede974460d0Ee2125A917105F3",
+          "positionManager": "0xA55c52512d02bA2BAfF5e6DD89be8Cf991C9E918",
+          "capabilities": {
+            "add": true,
+            "remove": true,
+            "increase": true,
+            "claimFees": true,
+            "claimRewards": false,
+            "migrate": true
+          },
+          "operations": {
+            "add": {
+              "method": "mint"
+            },
+            "increase": {
+              "method": "increaseLiquidity"
+            },
+            "decrease": {
+              "method": "decreaseLiquidity"
+            },
+            "claimFees": {
+              "method": "collect"
+            },
+            "claimRewards": {
+              "method": "claimRewards(uint256,address[])",
+              "rewardContracts": []
+            },
+            "migrate": {
+              "method": "multicall",
+              "targetAdapterKey": "uniswap_v3"
+            }
+          }
+        },
+        "aerodrome": {
+          "adapterKey": "aerodrome",
+          "family": "amm_v2",
+          "router": "0xA55c52512d02bA2BAfF5e6DD89be8Cf991C9E918",
+          "factory": "0xf5C44221f5dDc473dE38bfE2490259D2987030F8",
+          "quoter": "0x8c78091AD62C71Ede974460d0Ee2125A917105F3",
+          "positionManager": ""
+        }
+      }
+    }
+  }
+}

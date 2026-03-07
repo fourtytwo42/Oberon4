@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "approvalId",
+    "agentId",
+    "chainKey",
+    "status",
+    "transferType",
+    "toAddress",
+    "amountWei",
+    "createdAt",
+    "updatedAt"
+  ],
+  "properties": {
+    "approvalId": { "type": "string", "minLength": 1 },
+    "agentId": { "type": "string", "minLength": 1 },
+    "chainKey": { "type": "string", "minLength": 1 },
+    "approvalSource": { "type": "string", "enum": ["transfer", "x402"] },
+    "status": {
+      "type": "string",
+      "enum": ["proposed", "approval_pending", "approved", "rejected", "executing", "filled", "failed"]
+    },
+    "transferType": { "type": "string", "enum": ["native", "token"] },
+    "tokenAddress": {
+      "type": ["string", "null"],
+      "anyOf": [
+        { "type": "null" },
+        { "pattern": "^0x[a-fA-F0-9]{40}$" },
+        { "pattern": "^[1-9A-HJ-NP-Za-km-z]{32,64}$" }
+      ]
+    },
+    "tokenSymbol": { "type": ["string", "null"] },
+    "toAddress": {
+      "type": "string",
+      "anyOf": [
+        { "pattern": "^0x[a-fA-F0-9]{40}$" },
+        { "pattern": "^[1-9A-HJ-NP-Za-km-z]{32,64}$" }
+      ]
+    },
+    "amountWei": { "type": "string", "pattern": "^[0-9]+$" },
+    "txHash": {
+      "type": ["string", "null"],
+      "anyOf": [
+        { "type": "null" },
+        { "pattern": "^0x[a-fA-F0-9]{64}$" },
+        { "pattern": "^[1-9A-HJ-NP-Za-km-z]{64,128}$" }
+      ]
+    },
+    "reasonCode": { "type": ["string", "null"] },
+    "reasonMessage": { "type": ["string", "null"] },
+    "policyBlockedAtCreate": { "type": "boolean" },
+    "policyBlockReasonCode": {
+      "type": ["string", "null"],
+      "enum": ["outbound_disabled", "destination_not_whitelisted", null]
+    },
+    "policyBlockReasonMessage": { "type": ["string", "null"] },
+    "executionMode": {
+      "type": ["string", "null"],
+      "enum": ["normal", "policy_override", null]
+    },
+    "x402Url": { "type": ["string", "null"], "format": "uri" },
+    "x402NetworkKey": { "type": ["string", "null"] },
+    "x402FacilitatorKey": { "type": ["string", "null"] },
+    "x402AssetKind": { "type": ["string", "null"], "enum": ["native", "token", "erc20", null] },
+    "x402AssetAddress": {
+      "type": ["string", "null"],
+      "anyOf": [
+        { "type": "null" },
+        { "pattern": "^0x[a-fA-F0-9]{40}$" },
+        { "pattern": "^[1-9A-HJ-NP-Za-km-z]{32,64}$" }
+      ]
+    },
+    "x402AmountAtomic": { "type": ["string", "null"], "pattern": "^[0-9]+(\\.[0-9]+)?$" },
+    "x402PaymentId": { "type": ["string", "null"] },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "updatedAt": { "type": "string", "format": "date-time" },
+    "decidedAt": { "type": ["string", "null"], "format": "date-time" },
+    "terminalAt": { "type": ["string", "null"], "format": "date-time" }
+  }
+}

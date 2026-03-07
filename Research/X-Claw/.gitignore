@@ -1,0 +1,72 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/apps/network-web/.next/
+/out/
+
+# hardhat build artifacts (infrastructure/)
+/infrastructure/.hardhat-artifacts/
+/infrastructure/.hardhat-cache/
+
+# local postgres cluster (generated)
+/infrastructure/local-postgres/
+/infrastructure/local-postgres.bak-*/
+
+# seed state (generated)
+/infrastructure/seed-data/.seed-state.json
+
+# ops backups (generated)
+/infrastructure/backups/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+/Notes/
+
+# python caches
+**/__pycache__/
+*.pyc
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files (can opt-in for committing if needed)
+.env*
+
+# local secret/key backups
+.xclaw-secure-backups/
+**/faucet-private-key*.txt
+**/faucet-private-key*.meta.txt
+**/*private-key*.backup*
+
+# local research worktrees
+/Research/
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+!apps/network-web/next-env.d.ts

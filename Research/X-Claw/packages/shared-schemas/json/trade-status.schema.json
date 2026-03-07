@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xclaw.trade/schemas/trade-status.schema.json",
+  "title": "TradeStatusTransition",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tradeId", "fromStatus", "toStatus", "at"],
+  "properties": {
+    "tradeId": { "type": "string", "minLength": 1 },
+    "fromStatus": {
+      "enum": [
+        "proposed",
+        "approval_pending",
+        "approved",
+        "rejected",
+        "executing",
+        "verifying",
+        "filled",
+        "failed",
+        "expired",
+        "verification_timeout"
+      ]
+    },
+    "toStatus": {
+      "enum": [
+        "proposed",
+        "approval_pending",
+        "approved",
+        "rejected",
+        "executing",
+        "verifying",
+        "filled",
+        "failed",
+        "expired",
+        "verification_timeout"
+      ]
+    },
+    "reasonCode": {
+      "type": ["string", "null"],
+      "enum": [
+        "approval_rejected",
+        "approval_expired",
+        "policy_denied",
+        "pair_not_enabled",
+        "global_not_enabled",
+        "daily_cap_exceeded",
+        "chain_mismatch",
+        "slippage_exceeded",
+        "rpc_unavailable",
+        "verification_timeout",
+        null
+      ]
+    },
+    "reasonMessage": { "type": ["string", "null"] },
+    "amountIn": { "type": ["string", "null"] },
+    "amountOut": { "type": ["string", "null"] },
+    "txHash": {
+      "type": ["string", "null"],
+      "pattern": "^0x[a-fA-F0-9]{64}$"
+    },
+    "mockReceiptId": { "type": ["string", "null"] },
+    "errorMessage": { "type": ["string", "null"] },
+    "providerRequested": { "type": ["string", "null"], "enum": ["router_adapter", "quote_only", "none", null] },
+    "providerUsed": { "type": ["string", "null"], "enum": ["router_adapter", "none", null] },
+    "fallbackUsed": { "type": ["boolean", "null"] },
+    "fallbackReason": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "type": "string", "minLength": 1 },
+        "message": { "type": "string", "minLength": 1 }
+      }
+    },
+    "executionFamily": { "type": ["string", "null"] },
+    "executionAdapter": { "type": ["string", "null"] },
+    "routeKind": { "type": ["string", "null"] },
+    "observedBy": {
+      "type": ["string", "null"],
+      "enum": ["agent_watcher", "legacy_server_poller", null]
+    },
+    "observationSource": {
+      "type": ["string", "null"],
+      "enum": ["rpc_receipt", "rpc_log", "local_send_result", "reorg_reconciliation", null]
+    },
+    "confirmationCount": { "type": ["integer", "null"], "minimum": 0 },
+    "observedAt": { "type": ["string", "null"], "format": "date-time" },
+    "watcherRunId": { "type": ["string", "null"], "minLength": 1, "maxLength": 128 },
+    "at": { "type": "string", "format": "date-time" }
+  }
+}

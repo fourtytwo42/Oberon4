@@ -1,0 +1,10 @@
+Broken commit metadata example
+
+Type: chore
+Risk: low
+ReviewFocus: security
+Traceability: FR-101, AC-101
+
+Verification:
+$ echo ok
+Output: ok

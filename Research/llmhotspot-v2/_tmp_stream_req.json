@@ -1,0 +1,1 @@
+{"model":"gemini-2.5-flash","messages":[{"role":"user","content":"Return exactly: GOOGLE_STREAM_OK"}],"stream":true}

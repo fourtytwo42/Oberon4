@@ -1,0 +1,23 @@
+Invalid subagent direct codex execution
+
+Issue: #1
+Type: chore
+Risk: medium
+Assumptions: test assumptions
+Rollback: revert
+FR-101: met, AC-101: met
+QualitySignals: churn: test
+ReviewPasses: pass1-logic-security,pass2-maintainability
+ReviewFocus: security
+AgentRole: implementer
+StackProfile: polyglot
+AgentDepth: 1
+Delegation: none
+SpawnedAgents: 0
+Observability: logs=unchanged,metrics=unchanged,alerts=unchanged
+NoNewFacts: yes
+Traceability: FR-101, AC-101
+
+Verification:
+$ codex exec "do work"
+Output: done

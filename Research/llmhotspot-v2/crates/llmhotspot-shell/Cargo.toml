@@ -1,0 +1,19 @@
+[package]
+name = "llmhotspot-shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+webbrowser.workspace = true
+image.workspace = true
+url.workspace = true
+rand.workspace = true
+ureq = { version = "2.10", default-features = false, features = ["json", "tls"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+tray-icon = "0.19"
+windows-sys = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader", "Win32_Graphics_Dwm", "Win32_System_Registry", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Foundation", "Win32_Security"] }

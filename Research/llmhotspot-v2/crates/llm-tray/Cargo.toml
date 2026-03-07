@@ -1,0 +1,21 @@
+[package]
+name = "llm-tray"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+native-tray = ["dep:tray-icon"]
+
+[dependencies]
+webbrowser.workspace = true
+image.workspace = true
+
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+tray-icon = { version = "0.19", optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_LibraryLoader", "Win32_System_Registry"] }
+
+[dev-dependencies]

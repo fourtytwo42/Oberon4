@@ -1,0 +1,2021 @@
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="light dark" />
+  <link rel="icon" id="favicon" type="image/png" href="/console-logo-dark.png" />
+  <link rel="icon" type="image/png" href="/console-logo-dark.png" media="(prefers-color-scheme: light)" />
+  <link rel="icon" type="image/png" href="/console-logo-light.png" media="(prefers-color-scheme: dark)" />
+  <title>LLM Hotspot Console</title>
+  <style>
+    :root{
+      --bg:#f7f3eb;--bg2:#f1efe7;--card:#ffffff;--surface:#fbfcfe;
+      --ink:#1f2937;--muted:#6b7280;--ok:#1f9d55;--warn:#b45309;--danger:#be123c;
+      --line:#e5e7eb;--accent:#0f766e;
+      --status-bg:#eef6f2;--status-border:#d2e9df;
+      --input-bg:#fff;--input-border:#d1d5db;
+      --chip-bg:#fff;--chip-border:#d1d5db;
+      --tog-bg:#d1d5db;--tog-knob:#fff;
+      --icon-hover-bg:#f3f4f6;--icon-hover-ink:#111;
+      --badge-ink:var(--accent);--badge-bg:#ecfeff;--badge-border:#a5f3fc;
+      --track-bg:#edf2f7;--meta-ink:#374151;
+      --copy-bg:#f9fafb;--copy-hover-bg:#f3f4f6;
+      --seg-border:#d1d5db;
+      --seg-shadow:inset 0 1px 0 rgba(255,255,255,.92), 0 1px 2px rgba(0,0,0,.06);
+      --seg-pill-shadow:0 1px 1px rgba(0,0,0,.08), inset 0 1px 0 rgba(255,255,255,.9);
+      --input-shadow:inset 0 1px 0 rgba(255,255,255,.92), 0 1px 1px rgba(0,0,0,.03);
+      --input-border-hover:#9ca3af;
+      --seg-bg1:#f8fafc;--seg-bg2:#edf2f7;--seg-pill:#fff;--seg-text:#6b7280;--seg-text-on:#111827;
+      --page-bg:radial-gradient(circle at 20% 0,#fff,var(--bg) 50%,var(--bg2));
+      --shadow:0 4px 14px rgba(0,0,0,.05);
+    }
+    @media (prefers-color-scheme: dark){
+      :root{
+        --bg:#0b0f14;--bg2:#070a0e;--card:#0f172a;--surface:#0b1220;
+        --ink:#e5e7eb;--muted:#9ca3af;
+        --line:#243041;--accent:#14b8a6;
+        --status-bg:rgba(20,184,166,.10);--status-border:rgba(20,184,166,.25);
+        --input-bg:#0b1220;--input-border:#2b3a52;
+        --chip-bg:#0b1220;--chip-border:#2b3a52;
+        --tog-bg:#2b3a52;--tog-knob:#e5e7eb;
+        --icon-hover-bg:rgba(148,163,184,.14);--icon-hover-ink:var(--ink);
+        --badge-ink:#5eead4;--badge-bg:rgba(20,184,166,.14);--badge-border:rgba(20,184,166,.28);
+        --track-bg:rgba(148,163,184,.22);--meta-ink:#cbd5e1;
+        --copy-bg:#0b1220;--copy-hover-bg:rgba(148,163,184,.14);
+        --seg-border:#2b3a52;
+        --seg-shadow:inset 0 1px 0 rgba(255,255,255,.06), 0 1px 2px rgba(0,0,0,.45);
+        --seg-pill-shadow:0 1px 1px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.05);
+        --input-shadow:inset 0 1px 0 rgba(255,255,255,.05), 0 1px 1px rgba(0,0,0,.35);
+        --input-border-hover:#3b4b68;
+        --seg-bg1:#0b1220;--seg-bg2:#0a1020;--seg-pill:#111c33;--seg-text:#9ca3af;--seg-text-on:#f9fafb;
+        --page-bg:radial-gradient(circle at 20% 0,#111827,#0b0f14 55%,#070a0e);
+        --shadow:0 10px 26px rgba(0,0,0,.35);
+      }
+    }
+    html[data-theme="light"]{
+      --bg:#f7f3eb;--bg2:#f1efe7;--card:#ffffff;--surface:#fbfcfe;
+      --ink:#1f2937;--muted:#6b7280;
+      --line:#e5e7eb;--accent:#0f766e;
+      --status-bg:#eef6f2;--status-border:#d2e9df;
+      --input-bg:#fff;--input-border:#d1d5db;
+      --chip-bg:#fff;--chip-border:#d1d5db;
+      --seg-bg1:#f8fafc;--seg-bg2:#edf2f7;--seg-pill:#fff;--seg-text:#6b7280;--seg-text-on:#111827;
+      --page-bg:radial-gradient(circle at 20% 0,#fff,var(--bg) 50%,var(--bg2));
+      --shadow:0 4px 14px rgba(0,0,0,.05);
+    }
+    html[data-theme="dark"]{
+      --bg:#0b0f14;--bg2:#070a0e;--card:#0f172a;--surface:#0b1220;
+      --ink:#e5e7eb;--muted:#9ca3af;
+      --line:#243041;--accent:#14b8a6;
+      --status-bg:rgba(20,184,166,.10);--status-border:rgba(20,184,166,.25);
+      --input-bg:#0b1220;--input-border:#2b3a52;
+      --chip-bg:#0b1220;--chip-border:#2b3a52;
+      --seg-bg1:#0b1220;--seg-bg2:#0a1020;--seg-pill:#111c33;--seg-text:#9ca3af;--seg-text-on:#f9fafb;
+      --page-bg:radial-gradient(circle at 20% 0,#111827,#0b0f14 55%,#070a0e);
+      --shadow:0 10px 26px rgba(0,0,0,.35);
+    }
+    *{box-sizing:border-box}
+    html{max-width:100%;overflow-x:hidden}
+    html{color-scheme:light dark}
+    body{margin:0;background:var(--page-bg);color:var(--ink);font-family:ui-sans-serif,system-ui;max-width:100%;overflow-x:hidden}
+    .wrap{max-width:1100px;margin:0 auto;padding:16px;max-width:min(1100px,100%);zoom:.8}
+    .grid{display:grid;gap:12px;min-width:0}
+    .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;box-shadow:var(--shadow);max-width:100%;overflow-x:hidden}
+    .card,.acct-card,.key-card,.endpoint-item{max-width:100%}
+    .head{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
+    .brandline{display:flex;align-items:center;gap:14px;min-width:0}
+    .console-title{margin:0;line-height:1.15;min-width:0}
+    .console-version{font-size:11px;font-weight:400;opacity:0.55;margin-left:10px}
+    .brand-logo{width:72px;height:72px;object-fit:contain}
+    .top-controls{display:flex;align-items:center;justify-content:flex-end;gap:10px;max-width:100%;min-width:0}
+    .top-controls .small{white-space:nowrap}
+    .status{display:inline-flex;align-items:center;gap:8px;padding:6px 10px;border-radius:999px;background:var(--status-bg);border:1px solid var(--status-border)}
+    .dot{width:9px;height:9px;border-radius:99px;background:var(--warn)}
+    .dot.ok{background:var(--ok)}
+    .row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+    .row > *{min-width:0}
+    .col{display:grid;gap:8px;min-width:0}
+    .mono{font-family:ui-monospace,Consolas,monospace;word-break:break-all}
+    .muted{color:var(--muted);font-size:13px}
+    .notice{padding:8px 10px;border-radius:10px;border:1px solid var(--line);font-size:13px}
+    .notice.ok{background:#ecfdf3;border-color:#bce7ce;color:#166534}
+    .notice.warn{background:#fffbeb;border-color:#fde68a;color:#92400e}
+    .notice.err{background:#fef2f2;border-color:#fecaca;color:#991b1b}
+    .pill{font-size:12px;border:1px solid var(--line);padding:3px 8px;border-radius:999px}
+    .pill.ok{color:var(--ok);border-color:#bce7ce;background:#f0fbf4}
+    .pill.off{color:var(--danger);border-color:#f4bdca;background:#fff2f5}
+    button{border:0;background:var(--accent);color:#fff;padding:8px 10px;border-radius:10px;cursor:pointer}
+    button.alt{background:#374151}
+    button.warn{background:var(--danger)}
+    button.small{padding:5px 8px;font-size:12px}
+    input{border:1px solid var(--input-border);border-radius:10px;padding:8px;background:var(--input-bg);color:var(--ink)}
+    .seg2,.seg3{
+      --seg-index:0;
+      position:relative;
+      display:grid;
+      align-items:center;
+      max-width:100%;
+      border:1px solid var(--seg-border);
+      background:linear-gradient(180deg,var(--seg-bg1) 0%,var(--seg-bg2) 100%);
+      border-radius:999px;
+      padding:3px;
+      box-shadow:var(--seg-shadow);
+    }
+    .seg2{grid-template-columns:repeat(2,minmax(56px,1fr))}
+    .seg3{grid-template-columns:repeat(3,minmax(56px,1fr))}
+    .seg2::before,.seg3::before{
+      content:"";
+      position:absolute;
+      top:3px;
+      bottom:3px;
+      left:3px;
+      border-radius:999px;
+      background:var(--seg-pill);
+      box-shadow:var(--seg-pill-shadow);
+      transform:translateX(calc(var(--seg-index) * 100%));
+      transition:transform .25s ease;
+      pointer-events:none;
+    }
+    .seg2::before{width:calc((100% - 6px)/2)}
+    .seg3::before{width:calc((100% - 6px)/3)}
+    .seg-btn{
+      position:relative;
+      z-index:1;
+      border:0;
+      background:transparent;
+      color:var(--seg-text);
+      padding:6px 10px;
+      border-radius:999px;
+      font-size:12px;
+      font-weight:600;
+      letter-spacing:.01em;
+      cursor:pointer;
+      transition:color .2s ease;
+    }
+    .seg-btn:hover{color:var(--seg-text-on)}
+    .seg-btn.on{color:var(--seg-text-on)}
+    .seg2.sm .seg-btn,.seg3.sm .seg-btn{padding:4px 9px;font-size:11px}
+    input[type=datetime-local]{
+      min-width:176px;
+      max-width:196px;
+      border:1px solid var(--input-border);
+      border-radius:999px;
+      padding:8px 12px;
+      background:var(--input-bg);
+      box-shadow:var(--input-shadow);
+      font-size:13px;
+      color:var(--ink);
+      letter-spacing:.01em;
+    }
+    input[type=datetime-local]:hover{border-color:var(--input-border-hover)}
+    input[type=datetime-local]:focus-visible{
+      outline:none;
+      border-color:#0f766e;
+      box-shadow:0 0 0 3px rgba(15,118,110,.14);
+    }
+    input[type=datetime-local]::-webkit-calendar-picker-indicator{
+      opacity:.75;
+      cursor:pointer;
+      filter:grayscale(.2);
+    }
+    input[type=datetime-local]::-webkit-datetime-edit-fields-wrapper{padding:0}
+    table{width:100%;border-collapse:collapse}
+    th,td{padding:8px;border-bottom:1px solid var(--line);text-align:left;font-size:13px;vertical-align:top}
+    .actions{display:flex;gap:6px;flex-wrap:wrap}
+    .diag-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+    .bar{height:8px;background:rgba(148,163,184,.25);border-radius:8px;overflow:hidden;min-width:120px}
+    .bar > i{display:block;height:100%;background:#0d9488}
+    .two{display:grid;gap:12px;grid-template-columns:1fr 1fr}
+    /* Supported models: render as aligned full-width rows (iPhone settings feel). */
+    .model-tags{display:grid;grid-template-columns:1fr;gap:8px}
+    .endpoint-list{display:grid;gap:8px}
+    .endpoint-item{display:grid;gap:6px;padding:10px 11px;border:1px solid var(--line);border-radius:12px;background:var(--surface)}
+    .endpoint-label{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:#6b7280}
+    .endpoint-copy{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;min-width:0;border:1px solid var(--chip-border);background:var(--chip-bg);border-radius:10px;padding:8px 10px;cursor:pointer;color:inherit;text-align:left}
+    .endpoint-copy .mono{flex:1;min-width:0;overflow-wrap:anywhere}
+    .endpoint-copy:hover{filter:brightness(1.03)}
+    .endpoint-empty{font-size:13px;color:var(--muted)}
+    .model-tags{display:grid;gap:4px;min-width:0}
+    .model-chip-hdr{display:grid;grid-template-columns:minmax(0,1fr) 54px 54px 54px;gap:0 6px;padding:2px 11px;font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;text-align:right}
+    .model-chip-hdr span:first-child{text-align:left}
+    .model-chip{position:relative;isolation:isolate;overflow:hidden;display:grid;grid-template-columns:minmax(0,1fr) 54px 54px 54px;align-items:center;gap:0 6px;width:100%;min-width:0;border:1px solid var(--chip-border);background:var(--chip-bg);border-radius:999px;padding:7px 11px;cursor:pointer;color:inherit;--usage-pct:0%;--usage-start:rgba(20,184,166,.14);--usage-end:rgba(15,118,110,.30);--flare:rgba(20,184,166,.42)}
+    .chip-name-col{display:flex;align-items:center;gap:5px;min-width:0;overflow:hidden;text-align:left}
+    .chip-name-col .mono{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .chip-name-col .copy-ico{flex-shrink:0;opacity:.5}
+    .chip-stat{font-size:10.5px;color:var(--muted);white-space:nowrap;text-align:right}.chip-stat strong{color:var(--ink);font-weight:600}
+    .model-chip::before{content:"";position:absolute;inset:0;width:var(--usage-pct);background:linear-gradient(90deg,var(--usage-start),var(--usage-end));z-index:0;transition:width .35s ease}
+    .model-chip::after{content:"";position:absolute;inset:0;transform:translateX(-140%);background:linear-gradient(100deg,transparent 18%,var(--flare) 45%,rgba(255,255,255,.08) 65%,transparent 82%);z-index:0;pointer-events:none;opacity:0}
+    .model-chip > *{position:relative;z-index:1}
+    .model-chip:hover{border-color:#9ca3af}
+    .model-chip .mono{font-size:13px;white-space:nowrap;min-width:0;overflow:hidden;text-overflow:ellipsis;word-break:normal}
+    .model-chip.active{border-color:#14b8a6;box-shadow:0 0 0 1px rgba(20,184,166,.18),0 4px 12px rgba(15,118,110,.14)}
+    .model-chip.active::after{opacity:1;animation:modelFlare 1.05s ease-out infinite}
+    @keyframes modelFlare{0%{transform:translateX(-140%)}100%{transform:translateX(140%)}}
+    .cards{display:grid;gap:10px;min-width:0}
+    .mini-card{border:1px solid var(--line);border-radius:12px;padding:10px;background:var(--chip-bg)}
+    .mini-head{display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap}
+    .key-card{border:1px solid var(--line);border-radius:16px;padding:12px;background:var(--chip-bg);display:grid;gap:8px}
+    .key-head{display:flex;justify-content:space-between;align-items:center;gap:10px}
+    .key-title{font-size:16px;line-height:1.2;letter-spacing:.01em}
+    .key-ctrls{display:flex;align-items:center;gap:8px}
+    .key-secret{width:100%;justify-content:space-between;border:1px solid var(--chip-border);background:var(--surface);border-radius:12px;padding:9px 10px}
+    .key-secret .mono{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .key-meta{
+      display:grid;
+      grid-template-columns:minmax(220px,1fr) auto;
+      align-items:start;
+      gap:10px;
+      background:var(--surface);
+      border:1px solid var(--line);
+      border-radius:10px;
+      padding:8px 10px;
+      max-width:100%;
+    }
+    .key-meta-left{display:grid;gap:4px}
+    .key-meta-item{display:grid;grid-template-columns:auto auto;align-items:center;justify-content:start;column-gap:8px}
+    .key-meta-label{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
+    .key-meta-value{font-size:13px;color:var(--ink);white-space:nowrap}
+    .key-meta-right{display:grid;align-content:start;gap:0;min-width:160px;border-left:1px solid var(--border);padding-left:10px}
+    .key-usage{margin-top:8px;padding-top:8px;border-top:1px solid var(--border)}
+    .key-usage-title{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600}
+    .key-usage-hd{display:flex;justify-content:space-between;align-items:center;margin-bottom:5px}
+    .usage-reset-btn{font-size:10px;padding:2px 7px;border-radius:6px;border:1px solid var(--line);background:transparent;color:var(--muted);cursor:pointer;line-height:1.4}
+    .usage-reset-btn:hover{background:var(--surface);color:var(--ink)}
+    .collapse-toggle{display:flex;align-items:center;gap:5px;cursor:pointer;padding:3px 0;user-select:none}
+    .collapse-toggle:hover .key-usage-title,.collapse-toggle:hover .collapse-chevron{color:var(--ink)}
+    .collapse-chevron{font-size:9px;color:var(--muted);flex-shrink:0;transition:transform .15s}
+    .key-details-toggle{display:flex;align-items:center;justify-content:center;gap:5px;width:100%;background:transparent;border:0;border-top:1px solid var(--line);margin-top:6px;padding:5px 0 1px;cursor:pointer;color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.05em;user-select:none}
+    .key-details-toggle:hover{color:var(--ink)}
+    .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:999;display:flex;align-items:center;justify-content:center}
+    .modal-box{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:24px;width:min(440px,92vw);box-shadow:0 20px 60px rgba(0,0,0,.5)}
+    .modal-title{margin:0 0 16px;font-size:16px;font-weight:600}
+    .modal-actions{display:flex;gap:8px;margin-top:16px;justify-content:flex-end}
+    .diag-req-list{margin-top:6px}
+    .diag-req-scroll{max-height:200px;overflow-y:auto;border:1px solid var(--line);border-radius:8px;padding:4px 6px}
+    .diag-req-row{display:flex;align-items:center;gap:8px;padding:3px 0;border-top:1px solid var(--border)}
+    .diag-req-row:first-child{border-top:none}
+    .key-usage-row{display:grid;grid-template-columns:minmax(0,1fr) 52px 52px 52px;align-items:baseline;column-gap:6px;row-gap:2px;font-size:11px;padding:1px 0}
+    .key-usage-stat{text-align:right}
+    .key-usage-model{color:var(--ink);font-family:monospace;font-size:10.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .key-usage-stat{color:var(--muted);white-space:nowrap;text-align:right}
+    .key-usage-stat strong{color:var(--ink);font-weight:600}
+    .key-usage-hdr{font-size:10px;color:var(--muted);text-align:right;font-weight:600;text-transform:uppercase;letter-spacing:.04em;padding-bottom:2px;border-bottom:1px solid var(--border);margin-bottom:2px}
+    .model-usage-table{margin-top:8px;display:grid;gap:3px}
+    .model-usage-row{display:grid;grid-template-columns:minmax(120px,1fr) auto auto auto auto auto;align-items:baseline;column-gap:10px;font-size:11px;padding:2px 0}
+    .model-usage-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10.5px}
+    .model-usage-stat{color:var(--muted);white-space:nowrap;text-align:right}
+    .model-usage-stat strong{color:var(--ink);font-weight:600}
+    .model-usage-hdr{border-bottom:1px solid var(--border);padding-bottom:3px;margin-bottom:2px}
+    .key-create-policy{
+      position:relative;
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      min-height:38px;
+      overflow:visible;
+    }
+    .key-create-policy .key-meta-label{
+      font-size:11px;
+      white-space:nowrap;
+      position:absolute;
+      top:-9px;
+      left:50%;
+      transform:translateX(-50%);
+      background:var(--card);
+      padding:0 6px;
+      line-height:1;
+      pointer-events:none;
+    }
+    .key-create-policy .seg3{min-width:124px}
+    .tog.key-tog{width:46px;height:26px}
+    .tog.key-tog .tog-sl{border-radius:999px}
+    .tog.key-tog .tog-sl:before{height:18px;width:18px;left:4px;bottom:4px}
+    .tog.key-tog input:checked+.tog-sl:before{transform:translateX(20px)}
+    .key-ctrl{min-width:40px;min-height:40px;padding:7px 8px;font-size:26px;border-radius:10px;display:inline-flex;align-items:center;justify-content:center}
+    .acct-card{position:relative;isolation:isolate;overflow:hidden;border:1px solid var(--line);border-radius:16px;padding:12px 12px 10px;background:var(--chip-bg);margin-top:10px}
+    .acct-card::after{content:"";position:absolute;inset:0;transform:translateX(-140%);background:linear-gradient(100deg,transparent 18%,rgba(20,184,166,.28) 45%,rgba(255,255,255,.07) 65%,transparent 82%);z-index:0;pointer-events:none;opacity:0}
+    .acct-card > *{position:relative;z-index:1}
+    .acct-card.active{border-color:#14b8a6;box-shadow:0 0 0 1px rgba(20,184,166,.18),0 6px 18px rgba(15,118,110,.12)}
+    .acct-card.active::after{opacity:1;animation:modelFlare 1.05s ease-out infinite}
+    .acct-head{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:nowrap}
+    .acct-title-wrap{min-width:0;display:grid;gap:3px}
+    .acct-title{font-size:16px;line-height:1.2;letter-spacing:.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .acct-sub{font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .acct-ctrls{display:flex;align-items:center;gap:8px;flex-wrap:nowrap}
+    .tog{position:relative;display:inline-block;width:34px;height:20px;flex-shrink:0}
+    .tog input{opacity:0;width:0;height:0;position:absolute}
+    .tog-sl{position:absolute;cursor:pointer;inset:0;background:var(--tog-bg);border-radius:20px;transition:.2s}
+    .tog-sl:before{position:absolute;content:"";height:14px;width:14px;left:3px;bottom:3px;background:var(--tog-knob);border-radius:50%;transition:.2s}
+    input:checked+.tog-sl{background:#0d9488}
+    input:checked+.tog-sl:before{transform:translateX(14px)}
+    .icon-btn{background:none;border:0;cursor:pointer;padding:3px 5px;font-size:15px;line-height:1;border-radius:6px;color:var(--muted)}
+    .icon-btn.key-ctrl{min-width:40px;min-height:40px;padding:7px 8px;font-size:26px;border-radius:10px;display:inline-flex;align-items:center;justify-content:center;line-height:1}
+    .icon-btn:hover{background:var(--icon-hover-bg);color:var(--icon-hover-ink)}
+    .icon-btn.del{color:var(--danger)}
+    .icon-btn.del:hover{background:#fee2e2;color:#9f1239}
+    .oauth-tog{width:46px;height:26px}
+    .oauth-tog .tog-sl{border-radius:999px}
+    .oauth-tog .tog-sl:before{height:18px;width:18px;left:4px;bottom:4px}
+    .oauth-tog input:checked+.tog-sl:before{transform:translateX(20px)}
+    .oauth-ctrl{min-width:40px;min-height:40px;padding:7px 8px;font-size:18px;border-radius:10px;display:inline-flex;align-items:center;justify-content:center}
+    .oauth-ctrl.move{font-size:20px;font-weight:800;line-height:1}
+    .oauth-ctrl.del{font-size:26px;line-height:1}
+    .acct-usage{margin-top:8px;display:grid;gap:7px;min-width:0}
+    .acct-usage-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:8px}
+    .acct-usage-badge{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--badge-ink);background:var(--badge-bg);border:1px solid var(--badge-border);border-radius:999px;padding:3px 7px}
+    .acct-plan-badge{display:inline-block;font-size:12px;font-weight:600;letter-spacing:.02em;color:var(--accent);background:color-mix(in srgb,var(--accent) 12%,transparent);border:1px solid color-mix(in srgb,var(--accent) 30%,transparent);border-radius:999px;padding:3px 10px;margin-bottom:6px}
+    .provider-logo{width:14px;height:14px;flex-shrink:0;fill:currentColor;display:block}
+    .acct-name-row{display:flex;align-items:center;gap:7px;min-width:0;overflow:hidden}
+    .provider-chip{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:500;letter-spacing:.03em;color:var(--muted);background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);border-radius:999px;padding:2px 8px 2px 5px;margin-top:5px;width:fit-content}
+    .provider-chip .provider-logo{width:11px;height:11px;opacity:.7}
+    .acct-usage-track{height:7px;background:var(--track-bg);border-radius:999px;overflow:hidden;min-width:0}
+    .acct-usage-fill{display:block;height:100%}
+    .acct-usage-fill.ok{background:linear-gradient(90deg,#22c55e,#15803d)}
+    .acct-usage-fill.warn{background:linear-gradient(90deg,#f59e0b,#b45309)}
+    .acct-usage-fill.crit{background:linear-gradient(90deg,#ef4444,#b91c1c)}
+    .acct-usage-meta{font-size:13px;color:var(--meta-ink);white-space:normal;overflow-wrap:anywhere;text-align:right}
+    .copy-box{display:flex;align-items:center;justify-content:space-between;gap:10px;width:min(100%,760px);border:1px solid var(--chip-border);background:var(--copy-bg);border-radius:10px;padding:8px 10px;cursor:pointer;color:inherit;text-align:left}
+    .copy-box:hover{background:var(--copy-hover-bg);filter:brightness(1.03)}
+    .copy-box .mono{flex:1;min-width:0}
+    .copy-pill{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--chip-border);background:var(--copy-bg);border-radius:999px;padding:4px 10px;cursor:pointer;color:inherit;min-width:0;max-width:100%}
+    .copy-pill:hover{background:var(--copy-hover-bg);filter:brightness(1.03)}
+    .copy-pill .mono{white-space:nowrap}
+    .copy-ico{font-size:14px;color:var(--muted);flex-shrink:0}
+    input:focus-visible,button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+    @media (max-width:900px){
+      .wrap{zoom:1}
+    }
+    @media (max-width:980px), (orientation: portrait){
+      #oauthConnectRow{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));align-items:stretch;gap:8px}
+      #oauthConnectRow > input{grid-column:1 / -1;width:100%;max-width:100%}
+      #oauthConnectRow > button{width:100%;max-width:100%;min-width:0;justify-content:center;overflow:hidden}
+    }
+    @media (max-width:680px){
+      .wrap{padding:12px}
+      .head{display:grid;grid-template-columns:minmax(0,1fr);align-items:stretch;gap:12px}
+      .brandline{gap:10px}
+      .brand-logo{width:56px;height:56px}
+      .console-title{font-size:22px}
+      .console-version{display:block;margin:4px 0 0 0}
+      .top-controls{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);align-items:stretch;gap:8px}
+      .top-controls > button{width:100%;min-width:0}
+      .top-controls #themeSeg{grid-column:1/-1;width:100%}
+      .two{grid-template-columns:1fr}
+      .hide-sm{display:none}
+      .model-chip .mono{max-width:100%}
+      .acct-card{padding:14px 14px 12px;border-radius:18px}
+      .acct-head{flex-wrap:wrap;align-items:flex-start}
+      .acct-ctrls{margin-left:auto}
+      .acct-title,.acct-sub{white-space:normal;overflow:visible;text-overflow:clip}
+      .endpoint-item{padding:11px 12px;border-radius:14px}
+      .endpoint-copy{padding:9px 11px}
+      .model-chip{padding:8px 12px}
+      .acct-title{font-size:17px}
+      .acct-sub{font-size:13px}
+      .acct-ctrls{gap:8px}
+      .oauth-ctrl{min-width:42px;min-height:42px;font-size:18px}
+      .oauth-ctrl.move{font-size:23px}
+      .oauth-ctrl.del{font-size:26px}
+      .oauth-tog{width:50px;height:28px}
+      .oauth-tog .tog-sl:before{height:20px;width:20px}
+      .oauth-tog input:checked+.tog-sl:before{transform:translateX(22px)}
+      .acct-usage-meta{font-size:12px;white-space:nowrap;text-align:right}
+      .acct-usage-row{grid-template-columns:auto minmax(0,1fr) auto;row-gap:0}
+      .key-card{border-radius:18px;padding:14px}
+      .key-title{font-size:17px}
+      .key-secret .mono{font-size:14px}
+      .copy-pill{max-width:100%}
+      .tog.key-tog{width:50px;height:28px}
+      .tog.key-tog .tog-sl:before{height:20px;width:20px}
+      .tog.key-tog input:checked+.tog-sl:before{transform:translateX(22px)}
+      .key-ctrl{min-width:42px;min-height:42px;font-size:26px}
+      .icon-btn.key-ctrl{min-width:42px;min-height:42px;font-size:26px}
+      .key-meta-item{grid-template-columns:auto minmax(0,1fr)}
+      .key-meta-value{white-space:normal;overflow-wrap:anywhere}
+      .key-meta{grid-template-columns:1fr;gap:8px}
+      .key-meta-right{border-left:none;border-top:1px solid var(--border);padding-left:0;padding-top:8px;min-width:0}
+      #oauthConnectRow{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));align-items:stretch;gap:8px}
+      #oauthConnectRow > input{grid-column:1 / -1;width:100%;max-width:100%}
+      #oauthConnectRow > button{width:100%;max-width:100%;min-width:0;justify-content:center;overflow:hidden}
+      #keyCreateRow{display:grid;grid-template-columns:1fr;align-items:stretch}
+      #keyCreateRow > *{width:100%;max-width:100%}
+      input[type=datetime-local]{min-width:0;max-width:none;width:100%}
+      .key-create-policy{align-items:center;justify-content:center;padding-top:10px}
+      .key-create-policy .seg3{width:100%;max-width:340px}
+      .seg-btn{min-height:30px}
+      .seg2.sm .seg-btn,.seg3.sm .seg-btn{min-height:26px}
+      .diag-head{align-items:stretch}
+      .diag-actions{
+        display:grid;
+        grid-template-columns:1fr 1fr;
+        gap:8px;
+        width:100%;
+      }
+      .diag-actions .small{
+        width:100%;
+        justify-content:center;
+      }
+      .diag-actions .warn{grid-column:1/-1}
+    }
+    @media (max-width:460px){
+      .top-controls{grid-template-columns:1fr}
+    }
+    @keyframes pulseGlow {
+      0% { box-shadow: 0 0 0 0 rgba(22, 163, 74, .45); }
+      70% { box-shadow: 0 0 0 12px rgba(22, 163, 74, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(22, 163, 74, 0); }
+    }
+    .pulse { animation: pulseGlow 1.2s ease-out 1; }
+    .agent-playbook{
+      position:absolute;
+      left:-200vw;
+      top:0;
+      width:1px;
+      height:1px;
+      overflow:hidden;
+      opacity:0;
+      pointer-events:none;
+      white-space:pre-wrap;
+    }
+  </style>
+</head>
+<body>
+  <pre id="agent-playbook" class="agent-playbook">
+# LLM Hotspot Agent Playbook
+
+This guide is for agents automating this console backend.
+
+## Base URLs
+- Local API base: `/v1` on local endpoint shown in UI.
+- Remote API base: `/v1` on remote endpoint shown in UI.
+- Remote console page may include `admin_key` in the URL for admin actions.
+
+## Auth Requirements
+- Read-only calls usually work with API key bearer auth.
+- Admin/management calls require console admin session or `admin_key`.
+- For remote console operations, prefer the remote console URL with `admin_key`.
+
+## Core Discovery Calls
+- `GET /v1/version` -> build and git hash.
+- `GET /v1/endpoints` -> local/remote endpoint URLs.
+- `GET /v1/models` -> advertised model IDs.
+- `GET /v1/auth/status` -> entitlement and capability state.
+- `GET /v1/diagnostics` -> request/failover/error telemetry.
+
+## Chat Interfaces (Universal Routing)
+- OpenAI-compatible: `POST /v1/chat/completions`
+- Anthropic-compatible: `POST /v1/messages`
+- Google-compatible: `POST /v1/google/models/{model}:generateContent`
+
+Route by model prefix:
+- `gpt*` -> OpenAI provider
+- `claude*` -> Anthropic provider
+- `gemini*` -> Google provider
+
+## OAuth Account Management
+- List accounts: `GET /v1/oauth/accounts`
+- Reorder account priority: `POST /v1/oauth/accounts/{account_id}/priority`
+- Enable account: `POST /v1/oauth/accounts/{account_id}/enable`
+- Disable account: `POST /v1/oauth/accounts/{account_id}/disable`
+- Disconnect account: `POST /v1/oauth/accounts/{account_id}/disconnect`
+
+Provider-specific usage:
+- OpenAI usage: `GET /v1/oauth/accounts/{account_id}/wham-usage`
+- Anthropic usage: `GET /v1/oauth/anthropic/usage/{account_id}`
+- Google usage: `GET /v1/oauth/google/usage/{account_id}`
+
+Google model verification:
+- Verify usable models: `GET /v1/oauth/google/models/verify/{account_id}`
+- Force refresh verify: `GET /v1/oauth/google/models/verify/{account_id}?refresh=1`
+
+## API Key Management
+- List keys: `GET /v1/keys`
+- Create key: `POST /v1/keys`
+- Toggle key: `POST /v1/keys/{key_id}/enable` or `/disable`
+- Delete key: `POST /v1/keys/{key_id}/revoke`
+- Copy raw key once: `GET /v1/keys/{key_id}/copy` (admin context)
+
+## Usage Counter Controls
+- Reset one model: `POST /v1/usage/reset-model/{model}`
+- Reset one OAuth account: `POST /v1/usage/reset-oauth/{account_id}`
+- Reset one API key: `POST /v1/usage/reset-key/{key_id}`
+- Reset all usage: `POST /v1/usage/reset-all`
+
+## Diagnostics and Debugging
+- Main diagnostics: `GET /v1/diagnostics`
+- Wire capture (if enabled): `GET /v1/diagnostics/wire`
+- Clear wire capture: `POST /v1/diagnostics/wire/clear`
+
+## Safe Operating Rules for Agents
+- Do not delete/revoke accounts or keys unless explicitly asked.
+- Do not silently substitute a different model family.
+- Prefer disabling over deleting when asked to "turn off" access.
+- Confirm final state with `GET` after every mutating `POST`.
+  </pre>
+  <div class="wrap grid">
+    <section class="card">
+      <div class="head">
+        <div class="brandline">
+          <img id="brandLogo" class="brand-logo" src="/console-logo-dark.png" alt="LLM Hotspot logo" />
+          <h2 class="console-title">LLM Hotspot Console<span id="appVersion" class="console-version"></span></h2>
+        </div>
+        <div class="row top-controls">
+          <button class="small" onclick="startProFlow()" id="goProBtn">Go Pro</button>
+          <button class="small alt" onclick="activateProWithKeyPrompt()" id="activateKeyBtn">Enter License Key</button>
+          <div id="themeSeg" class="seg3 sm" style="--seg-index:0">
+            <button type="button" class="seg-btn on" data-theme="auto" onclick="setThemeMode('auto')">auto</button>
+            <button type="button" class="seg-btn" data-theme="light" onclick="setThemeMode('light')">light</button>
+            <button type="button" class="seg-btn" data-theme="dark" onclick="setThemeMode('dark')">dark</button>
+          </div>
+        </div>
+      </div>
+      <div id="brokerWarning" class="notice warn" style="display:none;margin-top:10px"></div>
+      <div id="flash" style="margin-top:10px"></div>
+    </section>
+
+    <section class="card">
+      <h3 style="margin:0 0 10px 0">Endpoints</h3>
+      <div id="endpoints" class="col"></div>
+      <h3 style="margin:14px 0 10px 0">Supported Models</h3>
+      <div id="supportedModels" class="model-tags"></div>
+      <div id="supportedModelsMeta" class="muted" style="margin-top:8px"></div>
+    </section>
+
+    <section class="card">
+      <h3 style="margin:0 0 10px 0">OAuth Accounts</h3>
+      <div id="oauthConnectRow" class="row">
+        <input id="acctName" placeholder="label (optional)" />
+        <button onclick="connectAccount()" style="display:inline-flex;align-items:center;gap:7px"><svg viewBox="-1 -.1 949.1 959.8" style="width:16px;height:16px;flex-shrink:0;fill:currentColor" xmlns="http://www.w3.org/2000/svg"><path d="m925.8 456.3c10.4 23.2 17 48 19.7 73.3 2.6 25.3 1.3 50.9-4.1 75.8-5.3 24.9-14.5 48.8-27.3 70.8-8.4 14.7-18.3 28.5-29.7 41.2-11.3 12.6-23.9 24-37.6 34-13.8 10-28.5 18.4-44.1 25.3-15.5 6.8-31.7 12-48.3 15.4-7.8 24.2-19.4 47.1-34.4 67.7-14.9 20.6-33 38.7-53.6 53.6-20.6 15-43.4 26.6-67.6 34.4-24.2 7.9-49.5 11.8-75 11.8-16.9.1-33.9-1.7-50.5-5.1-16.5-3.5-32.7-8.8-48.2-15.7s-30.2-15.5-43.9-25.5c-13.6-10-26.2-21.5-37.4-34.2-25 5.4-50.6 6.7-75.9 4.1-25.3-2.7-50.1-9.3-73.4-19.7-23.2-10.3-44.7-24.3-63.6-41.4s-35-37.1-47.7-59.1c-8.5-14.7-15.5-30.2-20.8-46.3s-8.8-32.7-10.6-49.6c-1.8-16.8-1.7-33.8.1-50.7 1.8-16.8 5.5-33.4 10.8-49.5-17-18.9-31-40.4-41.4-63.6-10.3-23.3-17-48-19.6-73.3-2.7-25.3-1.3-50.9 4-75.8s14.5-48.8 27.3-70.8c8.4-14.7 18.3-28.6 29.6-41.2s24-24 37.7-34 28.5-18.5 44-25.3c15.6-6.9 31.8-12 48.4-15.4 7.8-24.3 19.4-47.1 34.3-67.7 15-20.6 33.1-38.7 53.7-53.7 20.6-14.9 43.4-26.5 67.6-34.4 24.2-7.8 49.5-11.8 75-11.7 16.9-.1 33.9 1.6 50.5 5.1s32.8 8.7 48.3 15.6c15.5 7 30.2 15.5 43.9 25.5 13.7 10.1 26.3 21.5 37.5 34.2 24.9-5.3 50.5-6.6 75.8-4s50 9.3 73.3 19.6c23.2 10.4 44.7 24.3 63.6 41.4 18.9 17 35 36.9 47.7 59 8.5 14.6 15.5 30.1 20.8 46.3 5.3 16.1 8.9 32.7 10.6 49.6 1.8 16.9 1.8 33.9-.1 50.8-1.8 16.9-5.5 33.5-10.8 49.6 17.1 18.9 31 40.3 41.4 63.6zm-333.2 426.9c21.8-9 41.6-22.3 58.3-39s30-36.5 39-58.4c9-21.8 13.7-45.2 13.7-68.8v-223q-.1-.3-.2-.7-.1-.3-.3-.6-.2-.3-.5-.5-.3-.3-.6-.4l-80.7-46.6v269.4c0 2.7-.4 5.5-1.1 8.1-.7 2.7-1.7 5.2-3.1 7.6s-3 4.6-5 6.5a32.1 32.1 0 0 1 -6.5 5l-191.1 110.3c-1.6 1-4.3 2.4-5.7 3.2 7.9 6.7 16.5 12.6 25.5 17.8 9.1 5.2 18.5 9.6 28.3 13.2 9.8 3.5 19.9 6.2 30.1 8 10.3 1.8 20.7 2.7 31.1 2.7 23.6 0 47-4.7 68.8-13.8zm-455.1-151.4c11.9 20.5 27.6 38.3 46.3 52.7 18.8 14.4 40.1 24.9 62.9 31s46.6 7.7 70 4.6 45.9-10.7 66.4-22.5l193.2-111.5.5-.5q.2-.2.3-.6.2-.3.3-.6v-94l-233.2 134.9c-2.4 1.4-4.9 2.4-7.5 3.2-2.7.7-5.4 1-8.2 1-2.7 0-5.4-.3-8.1-1-2.6-.8-5.2-1.8-7.6-3.2l-191.1-110.4c-1.7-1-4.2-2.5-5.6-3.4-1.8 10.3-2.7 20.7-2.7 31.1s1 20.8 2.8 31.1c1.8 10.2 4.6 20.3 8.1 30.1 3.6 9.8 8 19.2 13.2 28.2zm-50.2-417c-11.8 20.5-19.4 43.1-22.5 66.5s-1.5 47.1 4.6 70c6.1 22.8 16.6 44.1 31 62.9 14.4 18.7 32.3 34.4 52.7 46.2l193.1 111.6q.3.1.7.2h.7q.4 0 .7-.2.3-.1.6-.3l81-46.8-233.2-134.6c-2.3-1.4-4.5-3.1-6.5-5a32.1 32.1 0 0 1 -5-6.5c-1.3-2.4-2.4-4.9-3.1-7.6-.7-2.6-1.1-5.3-1-8.1v-227.1c-9.8 3.6-19.3 8-28.3 13.2-9 5.3-17.5 11.3-25.5 18-7.9 6.7-15.3 14.1-22 22.1-6.7 7.9-12.6 16.5-17.8 25.5zm663.3 154.4c2.4 1.4 4.6 3 6.6 5 1.9 1.9 3.6 4.1 5 6.5 1.3 2.4 2.4 5 3.1 7.6.6 2.7 1 5.4.9 8.2v227.1c32.1-11.8 60.1-32.5 80.8-59.7 20.8-27.2 33.3-59.7 36.2-93.7s-3.9-68.2-19.7-98.5-39.9-55.5-69.5-72.5l-193.1-111.6q-.3-.1-.7-.2h-.7q-.3.1-.7.2-.3.1-.6.3l-80.6 46.6 233.2 134.7zm80.5-121h-.1v.1zm-.1-.1c5.8-33.6 1.9-68.2-11.3-99.7-13.1-31.5-35-58.6-63-78.2-28-19.5-61-30.7-95.1-32.2-34.2-1.4-68 6.9-97.6 23.9l-193.1 111.5q-.3.2-.5.5l-.4.6q-.1.3-.2.7-.1.3-.1.7v93.2l233.2-134.7c2.4-1.4 5-2.4 7.6-3.2 2.7-.7 5.4-1 8.1-1 2.8 0 5.5.3 8.2 1 2.6.8 5.1 1.8 7.5 3.2l191.1 110.4c1.7 1 4.2 2.4 5.6 3.3zm-505.3-103.2c0-2.7.4-5.4 1.1-8.1.7-2.6 1.7-5.2 3.1-7.6 1.4-2.3 3-4.5 5-6.5 1.9-1.9 4.1-3.6 6.5-4.9l191.1-110.3c1.8-1.1 4.3-2.5 5.7-3.2-26.2-21.9-58.2-35.9-92.1-40.2-33.9-4.4-68.3 1-99.2 15.5-31 14.5-57.2 37.6-75.5 66.4-18.3 28.9-28 62.3-28 96.5v223q.1.4.2.7.1.3.3.6.2.3.5.6.2.2.6.4l80.7 46.6zm43.8 294.7 103.9 60 103.9-60v-119.9l-103.8-60-103.9 60z"/></svg><span style="font-family:'Segoe UI',-apple-system,BlinkMacSystemFont,'Helvetica Neue',sans-serif;font-weight:600;letter-spacing:.01em">OpenAI</span></button>
+        <button onclick="connectAnthropicAccount()" style="display:inline-flex;align-items:center;gap:7px"><svg viewBox="0 0 92.2 65" style="width:23px;height:16px;flex-shrink:0;fill:currentColor" xmlns="http://www.w3.org/2000/svg"><path d="M66.5,0H52.4l25.7,65h14.1L66.5,0z M25.7,0L0,65h14.4l5.3-13.6h26.9L51.8,65h14.4L40.5,0C40.5,0,25.7,0,25.7,0z M24.3,39.3l8.8-22.8l8.8,22.8H24.3z"/></svg><span style="font-family:'Avenir Next','Avenir','Segoe UI',sans-serif;font-weight:600;letter-spacing:.01em">Anthropic</span></button>
+        <button onclick="showApiAccountCard()" style="display:inline-flex;align-items:center;gap:7px"><span style="font-size:17px;line-height:1">+</span><span style="font-family:'Segoe UI',-apple-system,BlinkMacSystemFont,'Helvetica Neue',sans-serif;font-weight:600;letter-spacing:.01em">Add OpenAI API</span></button>
+      </div>
+      <div id="apiAccountCard" class="modal-overlay" style="display:none" onclick="if(event.target===this)hideApiAccountCard()">
+        <div class="modal-box" style="max-width:520px">
+          <div style="font-size:15px;font-weight:600;margin-bottom:10px">Add OpenAI-Compatible API</div>
+          <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Provide base URL + API key. Models are fetched from <code>/models</code> and used for failover.</div>
+          <input id="apiAcctLabel" placeholder="Label (optional)" style="width:100%;box-sizing:border-box;margin-bottom:8px" />
+          <input id="apiAcctBase" placeholder="Base URL (e.g. https://api.openai.com/v1)" style="width:100%;box-sizing:border-box;margin-bottom:8px" />
+          <input id="apiAcctKey" placeholder="API key" style="width:100%;box-sizing:border-box;margin-bottom:8px" />
+          <input id="apiAcctOrg" placeholder="OpenAI organization (optional)" style="width:100%;box-sizing:border-box;margin-bottom:8px" />
+          <input id="apiAcctProject" placeholder="OpenAI project (optional)" style="width:100%;box-sizing:border-box;margin-bottom:8px" />
+          <textarea id="apiAcctHeaders" rows="4" style="width:100%;box-sizing:border-box;font-family:ui-monospace,Consolas,monospace" placeholder='Extra headers JSON (optional), e.g. {"x-foo":"bar"}'></textarea>
+          <div id="apiAcctStatus" style="font-size:12px;color:var(--muted);min-height:18px;margin:6px 0 2px"></div>
+          <div class="modal-actions">
+            <button class="alt" onclick="hideApiAccountCard()">Cancel</button>
+            <button id="apiAcctConnectBtn" onclick="createApiAccount()">Add</button>
+          </div>
+        </div>
+      </div>
+      <div id="oauthRemoteNotice" class="notice warn" style="display:none">
+        OAuth account connection is only available from the local console on this machine. Remote consoles can use existing connected accounts but cannot add new ones.
+      </div>
+      <div id="accounts" style="margin-top:10px"></div>
+    </section>
+
+    <section class="card">
+      <h3 style="margin:0 0 10px 0">API Keys</h3>
+      <div id="keyCreateRow" class="row">
+        <input id="keyLabel" placeholder="label (optional)" />
+        <input id="keyExp" type="datetime-local" />
+        <button onclick="createKey()">Create Key</button>
+      </div>
+      <div id="keys" style="margin-top:10px"></div>
+    </section>
+
+    <section class="card">
+      <div class="head diag-head">
+        <h3 style="margin:0 0 10px 0">Diagnostics</h3>
+        <div class="actions diag-actions">
+          <button class="alt small" onclick="exportDiagnostics()">Export .md</button>
+          <button class="alt small" onclick="clearDiagnostics()">Clear</button>
+          <button id="wireToggleBtn" class="alt small" onclick="toggleWireCapture()">Wire: OFF</button>
+          <button class="warn small" onclick="factoryReset()">Factory Reset</button>
+        </div>
+      </div>
+      <div id="diag"></div>
+    </section>
+  </div>
+
+<script>
+const THEME_KEY = 'llmhotspot_theme';
+const THEME_MQ = (function(){ try { return window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null; } catch(_){ return null; } })();
+function readThemeMode(){
+  try { return (localStorage.getItem(THEME_KEY) || 'auto').toString().trim().toLowerCase() || 'auto'; } catch(_){ return 'auto'; }
+}
+function writeThemeMode(v){
+  try { localStorage.setItem(THEME_KEY, v); } catch(_){}
+}
+function systemPrefersDark(){ return !!(THEME_MQ && THEME_MQ.matches); }
+function effectiveTheme(mode){
+  if(mode === 'dark') return 'dark';
+  if(mode === 'light') return 'light';
+  return systemPrefersDark() ? 'dark' : 'light';
+}
+function updateBrandAssets(eff){
+  const url = (eff === 'dark') ? '/console-logo-light.png' : '/console-logo-dark.png';
+  const logo = document.getElementById('brandLogo');
+  const fav = document.getElementById('favicon');
+  if(logo && !logo._hovered) logo.src = url;
+  if(fav) fav.href = url;
+}
+(function(){
+  const logo = document.getElementById('brandLogo');
+  if(!logo) return;
+  logo.addEventListener('mouseenter', () => {
+    logo._hovered = true;
+    const eff = effectiveTheme(readThemeMode());
+    logo.src = (eff === 'dark') ? '/console-logo-hover-light.png' : '/console-logo-hover-dark.png';
+  });
+  logo.addEventListener('mouseleave', () => {
+    logo._hovered = false;
+    const eff = effectiveTheme(readThemeMode());
+    logo.src = (eff === 'dark') ? '/console-logo-light.png' : '/console-logo-dark.png';
+  });
+})();
+function updateThemeSeg(mode){
+  const seg = document.getElementById('themeSeg');
+  if(!seg) return;
+  const idx = (mode === 'auto') ? 0 : (mode === 'light' ? 1 : 2);
+  seg.style.setProperty('--seg-index', String(idx));
+  seg.querySelectorAll('.seg-btn').forEach((btn) => {
+    const on = ((btn.dataset && btn.dataset.theme) || '') === mode;
+    btn.classList.toggle('on', on);
+  });
+}
+function applyTheme(mode){
+  mode = (mode === 'dark' || mode === 'light' || mode === 'auto') ? mode : 'auto';
+  const root = document.documentElement;
+  if(mode === 'auto'){ root.removeAttribute('data-theme'); } else { root.setAttribute('data-theme', mode); }
+  updateThemeSeg(mode);
+  updateBrandAssets(effectiveTheme(mode));
+}
+function setThemeMode(mode){
+  writeThemeMode(mode);
+  applyTheme(mode);
+}
+applyTheme(readThemeMode());
+if(THEME_MQ && THEME_MQ.addEventListener){
+  THEME_MQ.addEventListener('change', function(){
+    if(readThemeMode() === 'auto'){ applyTheme('auto'); }
+  });
+}
+
+let lastAccounts = [];
+let lastKeys = [];
+let activeFlowId = null;
+let isRemoteConsoleSession = false;
+let supportedModels = [];
+let modelUsage = {};
+let oauthUsage = {};
+let keyUsage = {};
+let keyUsageBaseline = {};
+let oauthUsageBaseline = {};
+let modelUsageBaseline = {};
+let currentWireCaptureEnabled = false;
+let modelLoadStatus = 200;
+let googleVerifiedModels = null;
+let googleVerifiedMeta = null;
+const keyRawCache = {};
+const usageCache = {};
+const oauthUsageOpen = {};
+const keyDetailsOpen = {};
+const USAGE_TTL = 5 * 60 * 1000;
+const MODEL_ACTIVE_WINDOW_SECONDS = 10;
+const OAUTH_ACTIVE_WINDOW_SECONDS = 10;
+const MODEL_PASTELS = [
+  {start:'rgba(125,211,252,.18)', end:'rgba(96,165,250,.30)', flare:'rgba(147,197,253,.46)'},
+  {start:'rgba(134,239,172,.18)', end:'rgba(74,222,128,.30)', flare:'rgba(134,239,172,.44)'},
+  {start:'rgba(253,224,71,.16)', end:'rgba(250,204,21,.28)', flare:'rgba(253,224,71,.40)'},
+  {start:'rgba(216,180,254,.18)', end:'rgba(192,132,252,.30)', flare:'rgba(216,180,254,.42)'},
+  {start:'rgba(253,186,116,.18)', end:'rgba(251,146,60,.30)', flare:'rgba(253,186,116,.42)'},
+  {start:'rgba(244,114,182,.16)', end:'rgba(236,72,153,.28)', flare:'rgba(244,114,182,.40)'},
+  {start:'rgba(148,163,184,.18)', end:'rgba(100,116,139,.30)', flare:'rgba(148,163,184,.40)'}
+];
+let _adminKey = (function(){ try { return sessionStorage.getItem('llmhotspot_admin_key')||''; } catch(_){ return ''; } })();
+function persistActiveFlowId(id){
+  try {
+    if(id){ sessionStorage.setItem('llmhotspot_oauth_flow_id', id); }
+    else { sessionStorage.removeItem('llmhotspot_oauth_flow_id'); }
+  } catch(_){}
+}
+function restoreActiveFlowId(){
+  try {
+    return sessionStorage.getItem('llmhotspot_oauth_flow_id') || '';
+  } catch(_){
+    return '';
+  }
+}
+function adminHeaders(){
+  return _adminKey ? {'authorization':'Bearer '+_adminKey} : {};
+}
+function fmtTs(v){return v?new Date(v*1000).toLocaleString():'-';}
+function fmtNum(n){if(!n&&n!==0)return '0';return Number(n).toLocaleString();}
+function fmtTok(n){n=Number(n)||0;if(n>=1e6)return (n/1e6).toFixed(2)+'M';if(n>=1e3)return (n/1e3).toFixed(1)+'K';return String(n);}
+function fmtTimeUntil(unix){
+  if(!unix) return '-';
+  const secs = unix - Math.floor(Date.now()/1000);
+  if(secs <= 0) return 'now';
+  const d = Math.floor(secs/86400);
+  const h = Math.floor((secs%86400)/3600);
+  const m = Math.floor((secs%3600)/60);
+  if(d > 0) return h > 0 ? d+'d '+h+'h' : d+'d';
+  if(h > 0) return m > 0 ? h+'h '+m+'m' : h+'h';
+  return m+'m';
+}
+function accountLabel(a){
+  const id = (a && a.account_id) ? a.account_id : '';
+  const n = cleanUnknownLocal(a.display_name || '');
+  if(n && n !== id) return n;
+  if(window.matchMedia && window.matchMedia('(max-width:680px)').matches){
+    return shortAccountId(id);
+  }
+  const e = cleanUnknownLocal(a.email || '');
+  if(e && e !== id) return e;
+  return shortAccountId(id);
+}
+function shortAccountId(id){
+  const s = (id || '').toString();
+  if(s.length <= 6) return s || 'unknown';
+  return s.slice(0,3) + '...' + s.slice(-3);
+}
+function cleanUnknownLocal(v){
+  const s = (v || '').toString().trim();
+  return s.endsWith('@unknown.local') ? s.slice(0, -'@unknown.local'.length) : s;
+}
+function safeReplace(v, from, to){ return (v??'').toString().split(from).join(to); }
+function esc(v){
+  let out = (v??'').toString();
+  out = safeReplace(out, '&', '&amp;');
+  out = safeReplace(out, '<', '&lt;');
+  out = safeReplace(out, '>', '&gt;');
+  return out;
+}
+function flash(type, text){
+  const el = document.getElementById('flash');
+  if(!el) return;
+  if(!text){ el.innerHTML=''; return; }
+  el.innerHTML = `<div class="notice ${type}">${esc(text)}</div>`;
+  if(type !== 'err'){ setTimeout(()=>{ if(el.innerHTML.includes(text)) el.innerHTML=''; }, 3000); }
+}
+function fmtDurationShort(totalSeconds){
+  const s = Math.max(0, Number(totalSeconds||0));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if(h > 0) return `${h}h ${m}m`;
+  if(m > 0) return `${m}m`;
+  return `${Math.floor(s)}s`;
+}
+function renderBrokerWarning(auth){
+  const el = document.getElementById('brokerWarning');
+  if(!el) return;
+  if(!auth || auth.broker_reachable !== false){
+    el.style.display = 'none';
+    el.textContent = '';
+    return;
+  }
+  const base = auth.broker_warning || 'Broker connectivity is currently unavailable.';
+  const elapsed = fmtDurationShort(auth.broker_offline_seconds || 0);
+  const now = Math.floor(Date.now() / 1000);
+  const deadline = Number(auth.broker_enforcement_deadline_unix || 0);
+  const remaining = deadline > now ? fmtDurationShort(deadline - now) : '0s';
+  el.textContent = `${base} Offline: ${elapsed}. Auto-free in: ${remaining}.`;
+  el.style.display = 'block';
+}
+async function withTimeout(promise, ms, label){
+  let t;
+  const timeout = new Promise((_, reject) => {
+    t = setTimeout(() => reject(new Error((label||'operation') + ' timed out')), ms);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(t);
+  }
+}
+async function applyEmbeddedAdminKey(){
+  const u = new URL(window.location.href);
+  const embedded = u.searchParams.get('admin_key');
+  if(embedded){
+    _adminKey = embedded;
+    try { sessionStorage.setItem('llmhotspot_admin_key', embedded); } catch(_){}
+    u.searchParams.delete('admin_key');
+    window.history.replaceState({}, '', u.toString());
+  }
+  if(!_adminKey) return;
+  try{
+    await withTimeout(
+      postJson('/v1/console/session/exchange',{admin_key:_adminKey}),
+      5000,
+      'session exchange'
+    );
+  } catch (e) {
+    // Prevent repeatedly trying an invalid/stale bootstrap key on every reload.
+    _adminKey = '';
+    try { sessionStorage.removeItem('llmhotspot_admin_key'); } catch(_){}
+    flash('err', 'Console session exchange failed: '+e.message);
+  }
+}
+async function j(url,opt){
+  const res = await fetch(url,opt);
+  let body = {};
+  try { body = await res.json(); } catch (_) {}
+  return [res.status, body];
+}
+async function postJson(url, body){
+  const [s,r] = await j(url,{method:'POST',headers:{'content-type':'application/json',...adminHeaders()},body:JSON.stringify(body||{})});
+  if(s>=400){ throw new Error((r.error&&r.error.message)||('HTTP '+s));}
+  return r;
+}
+async function postNoBody(url){
+  const [s,r] = await j(url,{method:'POST',headers:{...adminHeaders()}});
+  if(s>=400){ throw new Error((r.error&&r.error.message)||('HTTP '+s));}
+  return r;
+}
+async function copyText(v){
+  const text = (v == null) ? '' : String(v);
+
+  // Modern async clipboard (preferred). Can fail on non-secure origins (e.g. http://LAN-IP),
+  // or if the browser denies permission.
+  try {
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      await navigator.clipboard.writeText(text);
+      return { ok: true };
+    }
+  } catch(e) {
+    // Fall through to legacy copy below.
+  }
+
+  // Legacy fallback that works on many insecure contexts if invoked from a user gesture.
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly','');
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    ta.style.top = '0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    ta.setSelectionRange(0, ta.value.length);
+    const ok = document.execCommand && document.execCommand('copy');
+    document.body.removeChild(ta);
+    if(ok) return { ok: true };
+  } catch(e) {
+    // Continue to final failure.
+  }
+
+  return { ok: false, error: 'Clipboard write was blocked by the browser. Try using the local console at 127.0.0.1 or copy manually.' };
+}
+async function copyEncoded(v){
+  const decoded = decodeURIComponent(v||'');
+  const r = await copyText(decoded);
+  if(r.ok){
+    flash('ok', 'Copied');
+  } else {
+    flash('err', r.error || 'Copy failed');
+    // As a last resort, show a prompt to allow manual copy without exposing secrets in the DOM.
+    try { window.prompt('Copy to clipboard:', decoded); } catch(_){}
+  }
+}
+function rowUrl(label, url){
+  const safe = esc(url||'-');
+  if(!url){
+    return '<div class="endpoint-item"><div class="endpoint-label">' + esc(label) + '</div><div class="endpoint-empty">-</div></div>';
+  }
+  const copied = encodeURIComponent(url);
+  return '<div class="endpoint-item"><div class="endpoint-label">' + esc(label) + '</div><button class="endpoint-copy" onclick="copyEncoded(\'' + copied + '\')"><span class="mono">' + safe + '</span><span class="copy-ico">&#x29C9;</span></button></div>';
+}
+function keyStatus(k){
+  const now = Math.floor(Date.now()/1000);
+  if(k.revoked_unix) return 'revoked';
+  if(k.expires_unix && k.expires_unix <= now) return 'expired';
+  return 'active';
+}
+function isLocalHostname(hostname){
+  const h = (hostname || '').toLowerCase();
+  return h === 'localhost' || h === '127.0.0.1' || h === '[::1]' || h === '::1';
+}
+function updateOauthConnectUi(endpoints){
+  const row = document.getElementById('oauthConnectRow');
+  const notice = document.getElementById('oauthRemoteNotice');
+  const remoteConsoleUrl = (endpoints && endpoints.remote_console_url) ? endpoints.remote_console_url : '';
+  let remoteHost = '';
+  try { remoteHost = remoteConsoleUrl ? new URL(remoteConsoleUrl).hostname : ''; } catch(_){}
+  const currentHost = (window.location && window.location.hostname) ? window.location.hostname : '';
+  const isRemoteHost = !isLocalHostname(currentHost);
+  const isAssignedRemoteHost = !!remoteHost && currentHost.toLowerCase() === remoteHost.toLowerCase();
+  isRemoteConsoleSession = isRemoteHost || isAssignedRemoteHost;
+  if(row) row.style.display = isRemoteConsoleSession ? 'none' : '';
+  if(notice) notice.style.display = isRemoteConsoleSession ? 'block' : 'none';
+}
+async function loadEndpoints(){
+  const [s,e] = await j('/v1/endpoints');
+  const [,tray] = await j('/v1/tray/status');
+  const container = document.getElementById('endpoints');
+  function withAdminKey(url){
+    const raw = (url || '').toString().trim();
+    if(!raw) return '';
+    let key = '';
+    try { key = (sessionStorage.getItem('llmhotspot_admin_key') || '').toString().trim(); } catch(_){}
+    if(!key) return raw;
+    try {
+      const u = new URL(raw);
+      if(u.searchParams.get('admin_key')) return raw;
+      u.searchParams.set('admin_key', key);
+      return u.toString();
+    } catch(_) {
+      return raw + (raw.includes('?') ? '&' : '?') + 'admin_key=' + encodeURIComponent(key);
+    }
+  }
+  const localBase = e.local_endpoint_url || '';
+  const remoteBase = e.remote_endpoint_url || '';
+
+  container.innerHTML = '<div class="endpoint-list">' + [
+    rowUrl('Local', localBase),
+    rowUrl('Remote', remoteBase),
+    rowUrl('Remote console', withAdminKey(e.remote_console_url))
+  ].join('') + '</div>';
+  updateOauthConnectUi(e || {});
+  return {reachable: !!e.local_endpoint_url, tray};
+}
+async function setTunnelMode(mode){
+  flash('warn', 'Tunnel mode is managed automatically by your Free/Pro entitlement.');
+}
+let _proUpgradePoller = null;
+function startProUpgradePoller(){
+  if(_proUpgradePoller) return; // already polling
+  let attempts = 0;
+  const maxAttempts = 150; // ~5 minutes at 2s intervals
+  _proUpgradePoller = setInterval(async () => {
+    attempts++;
+    try{
+      const [,auth] = await j('/v1/auth/status');
+      if(auth && auth.tier === 'pro'){
+        clearInterval(_proUpgradePoller);
+        _proUpgradePoller = null;
+        flash('ok', 'Pro activated! Welcome to LLM Hotspot Pro.');
+        await loadAll();
+        return;
+      }
+    } catch(_){}
+    if(attempts >= maxAttempts){
+      clearInterval(_proUpgradePoller);
+      _proUpgradePoller = null;
+    }
+  }, 2000);
+}
+async function startProFlow(){
+  try{
+    const out = await postJson('/v1/pro/start', {});
+    if(out && out.authorize_url){
+      window.open(out.authorize_url, '_blank', 'noopener,noreferrer');
+      flash('ok', 'Complete checkout/sign-in in your browser, then return to the app.');
+      startProUpgradePoller();
+      return;
+    }
+    throw new Error('missing_authorize_url');
+  } catch(e){
+    const msg = (e && e.message) ? e.message : String(e||'');
+    if(msg && msg.includes('upgrade_required')){
+      flash('warn', 'Upgrade required. Click Go Pro to continue.');
+    } else {
+      flash('err', 'Unable to start Go Pro flow: ' + msg);
+    }
+  }
+}
+async function activateProWithKeyPrompt(){
+  let key = '';
+  try {
+    key = (window.prompt('Enter your Pro license key (LLMH-...)') || '').trim();
+  } catch(_) {
+    key = '';
+  }
+  if(!key){
+    return;
+  }
+  try {
+    const out = await postJson('/v1/pro/activate-key', { license_key: key });
+    if(out && out.tier === 'pro'){
+      flash('ok', 'License key accepted. Pro is now active on this computer.');
+      await loadAll();
+      return;
+    }
+    flash('ok', 'License key activated.');
+    await loadAll();
+  } catch(e){
+    const msg = (e && e.message) ? e.message : String(e||'activation_failed');
+    if(msg && msg.includes('seat_full')){
+      flash('warn', 'All seats are currently in use for this key. Revoke a seat first, then try again.');
+    } else if(msg && msg.includes('license_not_found')){
+      flash('err', 'License key not found. Check the key and try again.');
+    } else if(msg && msg.includes('subscription_inactive')){
+      flash('err', 'This license is not active.');
+    } else {
+      flash('err', 'Manual key activation failed: ' + msg);
+    }
+  }
+}
+async function loadSupportedModels(){
+  const [status, body] = await j('/v1/models');
+  modelLoadStatus = status;
+  let models = Array.isArray(body.data) ? body.data.map(m => typeof m === 'object' && m.id ? m.id : m) : [];
+  if (googleVerifiedModels) {
+    models = models.filter((name) => {
+      const s = String(name || '');
+      const isGoogle = s.startsWith('gemini') || s.startsWith('google/');
+      return !isGoogle || googleVerifiedModels.has(s.toLowerCase());
+    });
+  }
+  supportedModels = models;
+  renderSupportedModels();
+}
+function displayModelName(name){
+  return canonicalModelName(name);
+}
+function canonicalModelName(name){
+  const raw = String(name || '').trim();
+  const compact = raw.toLowerCase().replace(/[\s._]+/g, '-');
+  if (compact === 'gemini-3-flash-preview') return 'gemini-3-flash';
+  return raw.replace(/-\d{8}$/,'');
+}
+function modelAliasesForCanonical(name){
+  const canonical = canonicalModelName(name);
+  if (canonical === 'gemini-3-flash') return ['gemini-3-flash', 'gemini-3-flash-preview'];
+  return [canonical];
+}
+function modelUsageState(name){
+  const aliases = modelAliasesForCanonical(name);
+  let total = 0;
+  let lastSeen = 0;
+  aliases.forEach((alias) => {
+    const row = modelUsage && modelUsage[alias] ? modelUsage[alias] : {};
+    total += Number(row.total_requests || 0);
+    lastSeen = Math.max(lastSeen, Number(row.last_seen_unix || 0));
+  });
+  const age = Math.floor(Date.now() / 1000) - lastSeen;
+  const active = lastSeen > 0 && age >= 0 && age <= MODEL_ACTIVE_WINDOW_SECONDS;
+  return {total, active};
+}
+function oauthUsageState(accountId){
+  const row = oauthUsage && oauthUsage[accountId] ? oauthUsage[accountId] : {};
+  const total = Number(row.total_requests || 0);
+  const lastSeen = Number(row.last_seen_unix || 0);
+  const age = Math.floor(Date.now() / 1000) - lastSeen;
+  const active = lastSeen > 0 && age >= 0 && age <= OAUTH_ACTIVE_WINDOW_SECONDS;
+  return {total, active};
+}
+function renderAccountsActivity(){
+  const cards = document.querySelectorAll('.acct-card[data-account-id]');
+  cards.forEach((el) => {
+    let id = el.getAttribute('data-account-id') || '';
+    try { id = decodeURIComponent(id); } catch(_) {}
+    const active = id ? oauthUsageState(id).active : false;
+    el.classList.toggle('active', !!active);
+  });
+}
+function renderSupportedModels(){
+  const canonicalModels = Array.from(new Set(supportedModels.map(name => canonicalModelName(name))));
+  const totalUsed = canonicalModels.reduce((sum, name) => {
+    const used = modelUsageState(name).total;
+    return sum + used;
+  }, 0);
+  const tags = canonicalModels.map((name, idx) => {
+    const copied = encodeURIComponent(name);
+    const display = displayModelName(name);
+    const info = modelUsageState(name);
+    const fill = totalUsed > 0 ? Math.round((info.total / totalUsed) * 100) : 0;
+    const activeClass = info.active ? ' active' : '';
+    const tone = MODEL_PASTELS[idx % MODEL_PASTELS.length];
+    const aliases = modelAliasesForCanonical(name);
+    const totals = aliases.reduce((acc, alias) => {
+      const e = modelUsage && modelUsage[alias] ? modelUsage[alias] : {};
+      const b = modelUsageBaseline && modelUsageBaseline[alias] ? modelUsageBaseline[alias] : {};
+      acc.inp += Math.max(0,(e.input_tokens||0)-(b.input_tokens||0));
+      acc.out += Math.max(0,(e.output_tokens||0)-(b.output_tokens||0));
+      acc.cac += Math.max(0,(e.cached_tokens||0)-(b.cached_tokens||0));
+      return acc;
+    }, {inp:0, out:0, cac:0});
+    const inp = totals.inp;
+    const out = totals.out;
+    const cac = totals.cac;
+    const inS = inp ? `<strong>${fmtTok(inp)}</strong>` : `<span style="opacity:.3">--</span>`;
+    const outS = out ? `<strong>${fmtTok(out)}</strong>` : `<span style="opacity:.3">--</span>`;
+    const cacS = cac ? `<strong>${fmtTok(cac)}</strong>` : `<span style="opacity:.3">--</span>`;
+    return `<button class="model-chip${activeClass}" style="--usage-pct:${fill}%;--usage-start:${tone.start};--usage-end:${tone.end};--flare:${tone.flare};"
+      title="${esc(name)} | ${info.total} total requests"
+      onclick="copyEncoded('${copied}')"><span class="chip-name-col"><span class="mono">${esc(display)}</span><span class="copy-ico">&#x29C9;</span></span><span class="chip-stat">${inS}</span><span class="chip-stat">${outS}</span><span class="chip-stat">${cacS}</span></button>`;
+  }).join('');
+  const hdr = canonicalModels.length ? `<div class="model-chip-hdr"><span>Model</span><span>in</span><span>out</span><span>cac</span></div>` : '';
+  document.getElementById('supportedModels').innerHTML = tags ? hdr+tags : '<span class="muted">No models available</span>';
+  const resettableModels = canonicalModels.filter(name => {
+    const aliases = modelAliasesForCanonical(name);
+    return aliases.some((alias) => {
+      const e = modelUsage && modelUsage[alias];
+      const b = modelUsageBaseline && modelUsageBaseline[alias];
+      return e && ((e.input_tokens||0)-(b?b.input_tokens||0:0) > 0 || (e.total_requests||0)-(b?b.total_requests||0:0) > 0);
+    });
+  });
+  const resetDisabled = resettableModels.length ? '' : 'disabled';
+  const resetTitle = resettableModels.length
+    ? `Reset counters for ${resettableModels.length} models`
+    : 'No model counters to reset';
+  const errorText = modelLoadStatus===200 ? '' : `Failed to load models (HTTP ${modelLoadStatus})`;
+  document.getElementById('supportedModelsMeta').innerHTML =
+    `<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:4px">
+      <button class="usage-reset-btn" ${resetDisabled} onclick="resetAllModelUsage()" title="${esc(resetTitle)}">Reset Model Counters</button>
+      ${errorText ? `<span class="muted">${esc(errorText)}</span>` : ''}
+    </div>`;
+}
+function renderUsage(usage){
+  if(!usage || !usage.length) return '<span class="muted">no usage windows</span>';
+  return usage.map(u=>{
+    const pct = u.limit > 0 ? Math.min(100, Math.round((u.used/u.limit)*100)) : 0;
+    return `<div class="row"><span class="pill">${esc(u.window_type)}</span><div class="bar"><i style="width:${pct}%"></i></div><span class="muted">${u.used}/${u.limit} reset ${fmtTs(u.reset_unix)}</span></div>`;
+  }).join('');
+}
+function renderWhamUsage(w){
+  if(!w) return '<span class="muted">-</span>';
+  const windows = [];
+  if(w.five_hour) windows.push({label:'5h', ...w.five_hour});
+  if(w.weekly) windows.push({label:'weekly', ...w.weekly});
+  if(!windows.length) return '<span class="muted">no data</span>';
+  const weekly = windows.find(u => u.label === 'weekly');
+  const weeklyUsed = weekly && weekly.limit > 0
+    ? Math.min(100, Math.round((weekly.used / weekly.limit) * 100))
+    : null;
+  const weeklyDepleted = weeklyUsed !== null && weeklyUsed >= 100;
+  return `<div class="acct-usage">` + windows.map(u=>{
+    const usedRaw = u.limit > 0 ? Math.min(100, Math.round((u.used/u.limit)*100)) : 0;
+    const used = (weeklyDepleted && u.label === '5h') ? 100 : usedRaw;
+    const rem = 100 - used;
+    const tone = rem > 60 ? 'ok' : (rem > 30 ? 'warn' : 'crit');
+    return `<div class="acct-usage-row"><span class="acct-usage-badge">${u.label}</span><span class="acct-usage-track"><i class="acct-usage-fill ${tone}" style="width:${rem}%"></i></span><span class="acct-usage-meta">${rem}% &middot; ${fmtTimeUntil(u.reset_unix)}</span></div>`;
+  }).join('') + `</div>`;
+}
+function setAccountPlanBadge(accountId, planType){
+  const planEl = document.getElementById('plan-'+accountId);
+  if(!planEl) return;
+  if(planType){planEl.textContent=planType;planEl.style.display='inline-block';}
+  else{planEl.style.display='none';}
+}
+function renderAnthropicUsage(r) {
+  if (!r) return '<span class="muted">-</span>';
+  const windows = [];
+  const clamp = v => Math.min(100, Math.max(0, Math.round(v)));
+  if (r.five_hour?.utilization != null)
+    windows.push({label:'5h', usedPct: clamp(r.five_hour.utilization), resets_at: r.five_hour.resets_at});
+  if (r.seven_day?.utilization != null)
+    windows.push({label:'Week', usedPct: clamp(r.seven_day.utilization), resets_at: r.seven_day.resets_at});
+  if (r.seven_day_sonnet?.utilization != null)
+    windows.push({label:'Sonnet', usedPct: clamp(r.seven_day_sonnet.utilization)});
+  if (r.seven_day_opus?.utilization != null)
+    windows.push({label:'Opus', usedPct: clamp(r.seven_day_opus.utilization)});
+  if (!windows.length) return '<span class="muted" style="font-size:12px">connected</span>';
+  return `<div class="acct-usage">` + windows.map(u => {
+    const rem = 100 - u.usedPct;
+    const tone = rem > 60 ? 'ok' : (rem > 30 ? 'warn' : 'crit');
+    const resetSuffix = u.resets_at ? ` &middot; ${fmtTimeUntil(Math.floor(new Date(u.resets_at).getTime()/1000))}` : '';
+    return `<div class="acct-usage-row"><span class="acct-usage-badge">${u.label}</span><span class="acct-usage-track"><i class="acct-usage-fill ${tone}" style="width:${rem}%"></i></span><span class="acct-usage-meta">${rem}% left${resetSuffix}</span></div>`;
+  }).join('') + `</div>`;
+}
+function renderGoogleUsage(r) {
+  if (!r) return '<span class="muted" style="font-size:12px">connected</span>';
+  if ((r.usage_status || '') === 'unavailable') {
+    return '<span class="muted" style="font-size:12px">connected &middot; usage unavailable</span>';
+  }
+  const tierId = (r.tier_id || '').toString().trim();
+  const paidTierId = (r.paid_tier_id || '').toString().trim();
+  const plan = (r.plan_type || '').toString().trim();
+  const projectId = (r.project_id || '').toString().trim();
+  const parts = [];
+  if (plan) parts.push(plan);
+  const isPaidPlan = plan.toLowerCase() === 'paid';
+  const effectiveTier = isPaidPlan ? (paidTierId || tierId) : tierId;
+  const showTier = !!effectiveTier && !(isPaidPlan && effectiveTier.toLowerCase().includes('free'));
+  if (showTier) parts.push(effectiveTier);
+  if (projectId) parts.push('proj ' + projectId);
+  if (!parts.length) return '<span class="muted" style="font-size:12px">connected</span>';
+  return `<span class="muted" style="font-size:12px">${esc(parts.join(' · '))}</span>`;
+}
+async function fetchWhamUsage(accountId){
+  const now = Date.now();
+  const cached = usageCache[accountId];
+  if(cached && (now - cached.fetchedAt) < USAGE_TTL){
+    const el = document.getElementById('wham-'+accountId);
+    if(el) el.innerHTML = cached.html;
+    setAccountPlanBadge(accountId, cached.plan_type||null);
+    return;
+  }
+  const acct = lastAccounts.find(x => x.account_id === accountId);
+  const provider = acct && acct.provider_id ? String(acct.provider_id).toLowerCase() : 'openai';
+  const isAnthropic = provider === 'anthropic';
+  const isGoogle = provider === 'google';
+  const isCustomApi = provider === 'openai_api';
+  const el = document.getElementById('wham-'+accountId);
+  if(el) el.innerHTML = '<span class="muted" style="font-size:12px">fetching...</span>';
+  let html, plan_type = null, fetchOk = false;
+  if (isAnthropic) {
+    const [s,r] = await j('/v1/oauth/anthropic/usage/'+encodeURIComponent(accountId));
+    fetchOk = s === 200;
+    html = fetchOk ? renderAnthropicUsage(r) : `<span class="muted" style="font-size:12px">usage unavailable</span>`;
+  } else if (isGoogle) {
+    const [s,r] = await j('/v1/oauth/google/usage/'+encodeURIComponent(accountId));
+    fetchOk = s === 200;
+    html = fetchOk ? renderGoogleUsage(r) : `<span class="muted" style="font-size:12px">usage unavailable</span>`;
+    plan_type = fetchOk && r ? (r.plan_type||null) : null;
+  } else if (isCustomApi) {
+    html = `<span class="muted" style="font-size:12px">custom endpoint</span>`;
+    fetchOk = true;
+  } else {
+    if(el) el.innerHTML = '<span class="muted">fetching...</span>';
+    const [s,r] = await j('/v1/oauth/accounts/'+encodeURIComponent(accountId)+'/wham-usage');
+    fetchOk = s === 200;
+    html = fetchOk ? renderWhamUsage(r) : `<span class="muted">error: ${esc((r&&r.error&&r.error.message)||'failed')}</span>`;
+    plan_type = fetchOk && r ? (r.plan_type||null) : null;
+  }
+  if (fetchOk) {
+    usageCache[accountId] = {fetchedAt: now, html, plan_type};
+  }
+  const el2 = document.getElementById('wham-'+accountId);
+  if(el2) el2.innerHTML = html;
+  setAccountPlanBadge(accountId, plan_type);
+}
+const OPENAI_SVG = `<svg viewBox="-1 -.1 949.1 959.8" class="provider-logo" xmlns="http://www.w3.org/2000/svg"><path d="m925.8 456.3c10.4 23.2 17 48 19.7 73.3 2.6 25.3 1.3 50.9-4.1 75.8-5.3 24.9-14.5 48.8-27.3 70.8-8.4 14.7-18.3 28.5-29.7 41.2-11.3 12.6-23.9 24-37.6 34-13.8 10-28.5 18.4-44.1 25.3-15.5 6.8-31.7 12-48.3 15.4-7.8 24.2-19.4 47.1-34.4 67.7-14.9 20.6-33 38.7-53.6 53.6-20.6 15-43.4 26.6-67.6 34.4-24.2 7.9-49.5 11.8-75 11.8-16.9.1-33.9-1.7-50.5-5.1-16.5-3.5-32.7-8.8-48.2-15.7s-30.2-15.5-43.9-25.5c-13.6-10-26.2-21.5-37.4-34.2-25 5.4-50.6 6.7-75.9 4.1-25.3-2.7-50.1-9.3-73.4-19.7-23.2-10.3-44.7-24.3-63.6-41.4s-35-37.1-47.7-59.1c-8.5-14.7-15.5-30.2-20.8-46.3s-8.8-32.7-10.6-49.6c-1.8-16.8-1.7-33.8.1-50.7 1.8-16.8 5.5-33.4 10.8-49.5-17-18.9-31-40.4-41.4-63.6-10.3-23.3-17-48-19.6-73.3-2.7-25.3-1.3-50.9 4-75.8s14.5-48.8 27.3-70.8c8.4-14.7 18.3-28.6 29.6-41.2s24-24 37.7-34 28.5-18.5 44-25.3c15.6-6.9 31.8-12 48.4-15.4 7.8-24.3 19.4-47.1 34.3-67.7 15-20.6 33.1-38.7 53.7-53.7 20.6-14.9 43.4-26.5 67.6-34.4 24.2-7.8 49.5-11.8 75-11.7 16.9-.1 33.9 1.6 50.5 5.1s32.8 8.7 48.3 15.6c15.5 7 30.2 15.5 43.9 25.5 13.7 10.1 26.3 21.5 37.5 34.2 24.9-5.3 50.5-6.6 75.8-4s50 9.3 73.3 19.6c23.2 10.4 44.7 24.3 63.6 41.4 18.9 17 35 36.9 47.7 59 8.5 14.6 15.5 30.1 20.8 46.3 5.3 16.1 8.9 32.7 10.6 49.6 1.8 16.9 1.8 33.9-.1 50.8-1.8 16.9-5.5 33.5-10.8 49.6 17.1 18.9 31 40.3 41.4 63.6zm-333.2 426.9c21.8-9 41.6-22.3 58.3-39s30-36.5 39-58.4c9-21.8 13.7-45.2 13.7-68.8v-223q-.1-.3-.2-.7-.1-.3-.3-.6-.2-.3-.5-.5-.3-.3-.6-.4l-80.7-46.6v269.4c0 2.7-.4 5.5-1.1 8.1-.7 2.7-1.7 5.2-3.1 7.6s-3 4.6-5 6.5a32.1 32.1 0 0 1 -6.5 5l-191.1 110.3c-1.6 1-4.3 2.4-5.7 3.2 7.9 6.7 16.5 12.6 25.5 17.8 9.1 5.2 18.5 9.6 28.3 13.2 9.8 3.5 19.9 6.2 30.1 8 10.3 1.8 20.7 2.7 31.1 2.7 23.6 0 47-4.7 68.8-13.8zm-455.1-151.4c11.9 20.5 27.6 38.3 46.3 52.7 18.8 14.4 40.1 24.9 62.9 31s46.6 7.7 70 4.6 45.9-10.7 66.4-22.5l193.2-111.5.5-.5q.2-.2.3-.6.2-.3.3-.6v-94l-233.2 134.9c-2.4 1.4-4.9 2.4-7.5 3.2-2.7.7-5.4 1-8.2 1-2.7 0-5.4-.3-8.1-1-2.6-.8-5.2-1.8-7.6-3.2l-191.1-110.4c-1.7-1-4.2-2.5-5.6-3.4-1.8 10.3-2.7 20.7-2.7 31.1s1 20.8 2.8 31.1c1.8 10.2 4.6 20.3 8.1 30.1 3.6 9.8 8 19.2 13.2 28.2zm-50.2-417c-11.8 20.5-19.4 43.1-22.5 66.5s-1.5 47.1 4.6 70c6.1 22.8 16.6 44.1 31 62.9 14.4 18.7 32.3 34.4 52.7 46.2l193.1 111.6q.3.1.7.2h.7q.4 0 .7-.2.3-.1.6-.3l81-46.8-233.2-134.6c-2.3-1.4-4.5-3.1-6.5-5a32.1 32.1 0 0 1 -5-6.5c-1.3-2.4-2.4-4.9-3.1-7.6-.7-2.6-1.1-5.3-1-8.1v-227.1c-9.8 3.6-19.3 8-28.3 13.2-9 5.3-17.5 11.3-25.5 18-7.9 6.7-15.3 14.1-22 22.1-6.7 7.9-12.6 16.5-17.8 25.5zm663.3 154.4c2.4 1.4 4.6 3 6.6 5 1.9 1.9 3.6 4.1 5 6.5 1.3 2.4 2.4 5 3.1 7.6.6 2.7 1 5.4.9 8.2v227.1c32.1-11.8 60.1-32.5 80.8-59.7 20.8-27.2 33.3-59.7 36.2-93.7s-3.9-68.2-19.7-98.5-39.9-55.5-69.5-72.5l-193.1-111.6q-.3-.1-.7-.2h-.7q-.3.1-.7.2-.3.1-.6.3l-80.6 46.6 233.2 134.7zm80.5-121h-.1v.1zm-.1-.1c5.8-33.6 1.9-68.2-11.3-99.7-13.1-31.5-35-58.6-63-78.2-28-19.5-61-30.7-95.1-32.2-34.2-1.4-68 6.9-97.6 23.9l-193.1 111.5q-.3.2-.5.5l-.4.6q-.1.3-.2.7-.1.3-.1.7v93.2l233.2-134.7c2.4-1.4 5-2.4 7.6-3.2 2.7-.7 5.4-1 8.1-1 2.8 0 5.5.3 8.2 1 2.6.8 5.1 1.8 7.5 3.2l191.1 110.4c1.7 1 4.2 2.4 5.6 3.3zm-505.3-103.2c0-2.7.4-5.4 1.1-8.1.7-2.6 1.7-5.2 3.1-7.6 1.4-2.3 3-4.5 5-6.5 1.9-1.9 4.1-3.6 6.5-4.9l191.1-110.3c1.8-1.1 4.3-2.5 5.7-3.2-26.2-21.9-58.2-35.9-92.1-40.2-33.9-4.4-68.3 1-99.2 15.5-31 14.5-57.2 37.6-75.5 66.4-18.3 28.9-28 62.3-28 96.5v223q.1.4.2.7.1.3.3.6.2.3.5.6.2.2.6.4l80.7 46.6zm43.8 294.7 103.9 60 103.9-60v-119.9l-103.8-60-103.9 60z"/></svg>`;
+const OPENAI_CHIP = `<span class="provider-chip">${OPENAI_SVG}OpenAI OAuth</span>`;
+const ANTHROPIC_SVG = `<svg viewBox="0 0 92.2 65" class="provider-logo" style="width:auto" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M66.5,0H52.4l25.7,65h14.1L66.5,0z M25.7,0L0,65h14.4l5.3-13.6h26.9L51.8,65h14.4L40.5,0C40.5,0,25.7,0,25.7,0z M24.3,39.3l8.8-22.8l8.8,22.8H24.3z"/></svg>`;
+const ANTHROPIC_CHIP = `<span class="provider-chip">${ANTHROPIC_SVG}Anthropic OAuth</span>`;
+const GOOGLE_SVG = `<img src="/console-google-logo.webp" class="provider-logo" alt="" style="object-fit:contain" />`;
+const GOOGLE_CHIP = `<span class="provider-chip">${GOOGLE_SVG}Google OAuth</span>`;
+const OPENAI_API_CHIP = `<span class="provider-chip">${OPENAI_SVG}OpenAI API</span>`;
+async function loadAccounts(){
+  const [,o] = await j('/v1/oauth/accounts');
+  const [,api] = await j('/v1/api-accounts');
+  const oauthItems = (o && o.accounts) ? o.accounts : [];
+  const apiItems = (api && api.accounts) ? api.accounts : [];
+  const merged = [...oauthItems, ...apiItems];
+  const byId = new Map();
+  for(const row of merged){
+    const id = row && row.account ? row.account.account_id : '';
+    if(!id) continue;
+    byId.set(id, row);
+  }
+  const items = Array.from(byId.values()).sort((a,b)=>{
+    const pa = Number((a && a.account && a.account.priority) || 0);
+    const pb = Number((b && b.account && b.account.priority) || 0);
+    return pa - pb;
+  });
+  lastAccounts = items.map(x=>x.account);
+  const small = !!(window.matchMedia && window.matchMedia('(max-width:680px)').matches);
+  const html = items.map((row,idx)=>{
+    const a = row.account;
+    const label = accountLabel(a);
+    const id = a.account_id;
+    const activeClass = oauthUsageState(id).active ? ' active' : '';
+    const idE = id.replace(/'/g,'&#39;');
+    const upBtn = idx > 0 ? `<button class="icon-btn oauth-ctrl move" title="Move up" onclick="moveAccount('${idE}',${idx-1})">&#8593;</button>` : '';
+    const dnBtn = idx < items.length-1 ? `<button class="icon-btn oauth-ctrl move" title="Move down" onclick="moveAccount('${idE}',${idx+1})">&#8595;</button>` : '';
+    const tog = `<label class="tog oauth-tog" title="${a.enabled?'Enabled - click to disable':'Disabled - click to enable'}"><input type="checkbox" ${a.enabled?'checked':''} onchange="toggleAccount('${idE}',this.checked)"><span class="tog-sl"></span></label>`;
+    const del = `<button class="icon-btn del oauth-ctrl" title="Disconnect" onclick="disconnectAccount('${idE}')">&#128465;</button>`;
+    const emailClean = cleanUnknownLocal(a.email || '');
+    const sub = small ? '' : (emailClean && emailClean !== id ? emailClean : '');
+    const provider = (a.provider_id || 'openai').toLowerCase();
+    const isAnthropic = provider === 'anthropic';
+    const isGoogle = provider === 'google';
+    const isCustomApi = provider === 'openai_api';
+    const providerSvg = isAnthropic ? ANTHROPIC_SVG : (isGoogle ? GOOGLE_SVG : OPENAI_SVG);
+    const providerChip = isAnthropic ? ANTHROPIC_CHIP : (isGoogle ? GOOGLE_CHIP : (isCustomApi ? OPENAI_API_CHIP : OPENAI_CHIP));
+    const whamHtml = '<span class="muted" style="font-size:12px">fetching...</span>';
+    return `<div class="acct-card${activeClass}" data-account-id="${encodeURIComponent(id)}">
+      <div class="acct-head"><div class="acct-title-wrap"><div class="acct-name-row">${providerSvg}<strong class="acct-title">${esc(label)}</strong><span id="plan-${id}" class="acct-plan-badge" style="display:none;margin-bottom:0;flex-shrink:0;font-size:11px;padding:2px 8px"></span></div>${sub ? `<span class="acct-sub">${esc(sub)}</span>` : ''}${providerChip}</div><div class="acct-ctrls">${upBtn}${dnBtn}${tog}${del}</div></div>
+      <div id="wham-${id}" style="margin-top:8px">${whamHtml}</div>
+      <div class="oauth-usage-slot"></div>
+    </div>`;
+  }).join('');
+  document.getElementById('accounts').innerHTML = html || '<div class="muted">No connected accounts</div>';
+  const anthropicAccounts = items.filter(row => (row.account.provider_id || '').toLowerCase() === 'anthropic');
+  const googleAccounts = items.filter(row => (row.account.provider_id || '').toLowerCase() === 'google');
+  await Promise.all([
+    ...items.map(row => fetchWhamUsage(row.account.account_id)),
+  ]);
+  renderAccountsActivity();
+  renderOAuthUsage();
+  if (anthropicAccounts.length > 0) {
+    await Promise.all(anthropicAccounts.map(row => j('/v1/oauth/anthropic/models/'+encodeURIComponent(row.account.account_id))));
+    await loadSupportedModels();
+  }
+  if (googleAccounts.length > 0) {
+    await Promise.all(googleAccounts.map(row => j('/v1/oauth/google/models/'+encodeURIComponent(row.account.account_id))));
+    // Fast path: verify against the highest-priority Google account (first in sorted list).
+    try {
+      const acct = googleAccounts[0] && googleAccounts[0].account ? googleAccounts[0].account.account_id : '';
+      if (acct) {
+        const [vs, vr] = await j('/v1/oauth/google/models/verify/'+encodeURIComponent(acct));
+        if (vs === 200 && vr && Array.isArray(vr.data)) {
+          const set = new Set();
+          for (const row of vr.data) {
+            if (!row || row.available !== true) continue;
+            const req = String(row.requested_model || '').toLowerCase();
+            const res = String(row.resolved_model || '').toLowerCase();
+            if (req) set.add(req);
+            if (res) set.add(res);
+          }
+          googleVerifiedModels = set;
+          googleVerifiedMeta = {
+            account_id: acct,
+            cached: !!vr.cached,
+            verified_at_unix: Number(vr.verified_at_unix || 0),
+          };
+        } else {
+          googleVerifiedModels = null;
+          googleVerifiedMeta = null;
+        }
+      }
+    } catch(_) {
+      googleVerifiedModels = null;
+      googleVerifiedMeta = null;
+    }
+    loadSupportedModels();
+  }
+}
+function maskedKey(k){
+  return 'hs_********' + k.key_id.slice(-6);
+}
+function visibleKey(k){
+  const raw = keyRawCache[k.key_id];
+  if(typeof raw === 'string' && raw.length > 0) return raw;
+  return 'raw key unavailable';
+}
+async function ensureRawKeys(keys){
+  const work = (keys||[]).map(async (x) => {
+    if(Object.prototype.hasOwnProperty.call(keyRawCache, x.key_id)) return;
+    const [s,r] = await j(`/v1/keys/${encodeURIComponent(x.key_id)}/copy`,{headers:{...adminHeaders()}});
+    keyRawCache[x.key_id] = (s === 200 && r && r.raw_key) ? r.raw_key : '';
+  });
+  await Promise.all(work);
+}
+function netUsageMap(lifetime, baseline) {
+  if (!lifetime || typeof lifetime !== 'object') return {};
+  const net = {};
+  for (const [model, e] of Object.entries(lifetime)) {
+    const b = (baseline && baseline[model]) || {};
+    const inp = Math.max(0, (e.input_tokens||0) - (b.input_tokens||0));
+    const out = Math.max(0, (e.output_tokens||0) - (b.output_tokens||0));
+    const cac = Math.max(0, (e.cached_tokens||0) - (b.cached_tokens||0));
+    const req = Math.max(0, (e.request_count||0) - (b.request_count||0));
+    if (inp || out || cac || req) net[model] = {input_tokens:inp, output_tokens:out, cached_tokens:cac, request_count:req};
+  }
+  return net;
+}
+function renderKeyUsageSection(key_id){
+  const net = netUsageMap(keyUsage[key_id], keyUsageBaseline[key_id]);
+  const encId = encodeURIComponent(key_id);
+  const hd = `<div class="key-usage-hd"><span class="key-usage-title">Token Usage</span></div>`;
+  if(!net||!Object.keys(net).length) return hd + `<span class="muted" style="font-size:11px;padding-top:2px">--</span>`;
+  const rows = Object.entries(net).map(([model,s])=>{
+    const cached = s.cached_tokens||0;
+    return `<div class="key-usage-row">
+      <span class="key-usage-model">${esc(displayModelName(model))}</span>
+      <span class="key-usage-stat"><strong>${fmtTok(s.input_tokens)}</strong></span>
+      <span class="key-usage-stat"><strong>${fmtTok(s.output_tokens)}</strong></span>
+      <span class="key-usage-stat">${cached?'<strong>'+fmtTok(cached)+'</strong>':''}</span>
+    </div>`;
+  }).join('');
+  return `<div class="key-usage-hd"><span class="key-usage-title">Token Usage</span><button class="usage-reset-btn" onclick="resetKeyUsage('${encId}')">Reset</button></div>
+    <div class="key-usage-row key-usage-hdr"><span></span><span>in</span><span>out</span><span>cac</span></div>
+    ${rows}`;
+}
+function renderOAuthUsageSection(account_id) {
+  const net = netUsageMap(oauthUsage[account_id], oauthUsageBaseline[account_id]);
+  if (!net || !Object.keys(net).length) return '';
+  const encId = encodeURIComponent(account_id);
+  const open = !!oauthUsageOpen[account_id];
+  const chev = open ? '&#9662;' : '&#9656;';
+  const resetBtn = open ? `<button class="usage-reset-btn" onclick="event.stopPropagation();resetOAuthUsage('${encId}')">Reset</button>` : '';
+  const body = open ? `
+    <div class="key-usage-row key-usage-hdr"><span></span><span>in</span><span>out</span><span>cac</span></div>
+    ${Object.entries(net).map(([model, s]) => {
+      const cached = s.cached_tokens || 0;
+      return `<div class="key-usage-row">
+        <span class="key-usage-model">${esc(displayModelName(model))}</span>
+        <span class="key-usage-stat"><strong>${fmtTok(s.input_tokens)}</strong></span>
+        <span class="key-usage-stat"><strong>${fmtTok(s.output_tokens)}</strong></span>
+        <span class="key-usage-stat">${cached ? '<strong>'+fmtTok(cached)+'</strong>' : ''}</span>
+      </div>`;
+    }).join('')}` : '';
+  return `<div class="key-usage" id="ou-${account_id}" style="border-top:1px solid var(--border);margin-top:8px;padding-top:6px">
+    <div class="collapse-toggle" onclick="toggleOAuthUsage('${encId}')"><span class="collapse-chevron">${chev}</span><span class="key-usage-title">Token Usage</span>${resetBtn}</div>
+    ${body}
+  </div>`;
+}
+function toggleOAuthUsage(encId) {
+  let id; try { id = decodeURIComponent(encId); } catch(_) { id = encId; }
+  oauthUsageOpen[id] = !oauthUsageOpen[id];
+  renderOAuthUsage();
+}
+function renderOAuthUsage() {
+  document.querySelectorAll('[data-account-id]').forEach(card => {
+    let rawId = card.getAttribute('data-account-id') || '';
+    try { rawId = decodeURIComponent(rawId); } catch(_) {}
+    const el = card.querySelector('.oauth-usage-slot');
+    if (el) el.innerHTML = renderOAuthUsageSection(rawId);
+  });
+}
+function renderKeyUsage(){
+  lastKeys.forEach(x=>{
+    const el = document.getElementById('ku-'+x.key_id);
+    if(el) el.innerHTML = renderKeyUsageSection(x.key_id);
+  });
+}
+async function loadKeys(){
+  const [,k] = await j('/v1/keys');
+  lastKeys = k.keys||[];
+  await ensureRawKeys(lastKeys);
+  const cards = lastKeys.map(x=>{
+    const state = keyStatus(x);
+    const statePill = state === 'active'
+      ? '<span class="pill ok">active</span>'
+      : '<span class="pill off">'+esc(state)+'</span>';
+    const kdOpen = !!keyDetailsOpen[x.key_id];
+    return `<div class="key-card">
+      <div class="key-head">
+        <div class="row"><strong class="key-title">${esc(x.label)}</strong>${statePill}</div>
+        <div class="key-ctrls">
+          <label class="tog key-tog" title="${state==='active'?'Enabled - click to disable':'Disabled - click to enable'}"><input type="checkbox" ${state==='active'?'checked':''} onchange="toggleKey('${x.key_id}',this.checked)"><span class="tog-sl"></span></label>
+          <button class="icon-btn del key-ctrl" title="Delete key" onclick="deleteKey('${x.key_id}')">&#128465;</button>
+        </div>
+      </div>
+      <button class="copy-pill key-secret" onclick="copyKey('${x.key_id}')"><span class="mono">${esc(visibleKey(x))}</span><span class="copy-ico">&#x29C9;</span></button>
+      <button class="key-details-toggle" id="kd-btn-${x.key_id}" onclick="toggleKeyDetails('${x.key_id}')">${kdOpen ? 'Details &#9652;' : 'Details &#9662;'}</button>
+      <div class="key-meta" id="km-${x.key_id}" style="${kdOpen?'':'display:none'}">
+        <div class="key-meta-left">
+          <div class="key-meta-item"><span class="key-meta-label">Created</span><span class="key-meta-value">${esc(fmtTs(x.created_unix))}</span></div>
+          <div class="key-meta-item"><span class="key-meta-label">Expires</span><span class="key-meta-value">${esc(fmtTs(x.expires_unix))}</span></div>
+          <div class="key-meta-item"><span class="key-meta-label">Used</span><span class="key-meta-value">${esc(fmtTs(x.last_used_unix))}</span></div>
+        </div>
+        <div id="ku-${x.key_id}" class="key-meta-right"></div>
+      </div>
+    </div>`;
+  }).join('');
+  document.getElementById('keys').innerHTML = cards ? `<div class="cards">${cards}</div>` : '<div class="muted">No API keys</div>';
+  renderKeyUsage();
+}
+async function loadDiag(){
+  const [,d] = await j('/v1/diagnostics');
+  modelUsage = (d && d.model_usage && typeof d.model_usage === 'object') ? d.model_usage : {};
+  oauthUsage = (d && d.oauth_usage && typeof d.oauth_usage === 'object') ? d.oauth_usage : {};
+  keyUsage = (d && d.key_usage && typeof d.key_usage === 'object') ? d.key_usage : {};
+  keyUsageBaseline = (d && d.key_usage_baseline && typeof d.key_usage_baseline === 'object') ? d.key_usage_baseline : {};
+  oauthUsageBaseline = (d && d.oauth_usage_baseline && typeof d.oauth_usage_baseline === 'object') ? d.oauth_usage_baseline : {};
+  modelUsageBaseline = (d && d.model_usage_baseline && typeof d.model_usage_baseline === 'object') ? d.model_usage_baseline : {};
+  renderSupportedModels();
+  renderAccountsActivity();
+  renderKeyUsage();
+  renderOAuthUsage();
+  const lastAuth = d.last_bearer_auth_rejection
+    ? `${esc(d.last_bearer_auth_rejection)} (${fmtTs(d.last_bearer_auth_rejection_unix)})`
+    : 'none';
+  const ue = d && d.last_upstream_error ? d.last_upstream_error : null;
+  const wireEnabled = !!(d && d.wire_capture_enabled);
+  currentWireCaptureEnabled = wireEnabled;
+  updateWireCaptureToggle();
+  const wireLine = wireEnabled
+    ? 'Wire capture: ON'
+    : 'Wire capture: OFF (set LLMHOTSPOT_WIRE_CAPTURE=1 to enable)';
+  const ipc = (d && d.runtime_ipc && typeof d.runtime_ipc === 'object') ? d.runtime_ipc : {};
+  const ipcLine = `Runtime IPC v${ipc.protocol_version||1}: hits ${ipc.shell_ipc_hits_total||0} · fallback ${ipc.shell_fallback_total||0} · fail ${ipc.shell_fail_total||0} · server errors ${ipc.server_errors_total||0}`;
+  const pending = (ipc && ipc.pending_shell_deltas && typeof ipc.pending_shell_deltas === 'object') ? ipc.pending_shell_deltas : null;
+  const pendingLine = pending
+    ? `IPC pending deltas: hits ${pending.hits||0} · fallback ${pending.fallbacks||0} · fail ${pending.fails||0}${pending.updated_unix ? ` (updated ${fmtTs(pending.updated_unix)})` : ''}`
+    : 'IPC pending deltas: none';
+  const doctor = (d && d.doctor_last_run && typeof d.doctor_last_run === 'object') ? d.doctor_last_run : null;
+  const doctorLine = doctor
+    ? `Doctor: ${doctor.ok ? 'OK' : 'failed'} at ${fmtTs(doctor.run_unix)}`
+    : 'Doctor: not run';
+  const ueLine = (ue && (ue.url || ue.transport_message || ue.body_snippet))
+    ? `Upstream: ${esc((ue.kind||'').toString())}` +
+      (ue.status ? ` (HTTP ${esc(ue.status)})` : '') +
+      (ue.account_id ? ` | acct ${esc(ue.account_id)}` : '') +
+      (ue.url ? ` | ${esc(ue.url)}` : '') +
+      (ue.transport_message ? ` | ${esc(ue.transport_message)}` : '') +
+      (ue.body_snippet ? ` | ${esc(ue.body_snippet)}` : '')
+    : 'Upstream: -';
+  const chain = Array.isArray(d && d.last_failover_chain) ? d.last_failover_chain : [];
+  const chainLine = chain.length
+    ? `Failover chain: ${chain.map((a) => {
+        const acct = a && a.account_id ? esc(a.account_id) : '?';
+        const out = a && a.outcome ? esc(a.outcome) : '';
+        const status = a && a.status ? ` (HTTP ${esc(a.status)})` : '';
+        const cd = a && a.cooldown_until_unix ? ` [cooldown until ${esc(fmtTs(a.cooldown_until_unix))}]` : '';
+        return `${acct} ${out}${status}${cd}`.trim();
+      }).join(' -> ')}`
+    : 'Failover chain: -';
+  const reqs = (d.recent_requests||[]).slice().reverse();
+  const reqRows = reqs.length ? reqs.map(r => {
+    const t = r.at_unix ? new Date(r.at_unix*1000).toLocaleTimeString() : '';
+    const epLabel = r.endpoint ? r.endpoint.replace('/v1/','') : '';
+    const streamTag = r.stream ? ' · stream' : '';
+    return `<div class="diag-req-row">
+      <span class="pill" style="font-size:10px">${esc(r.model||'?')}</span>
+      <span class="muted" style="font-size:11px">${esc(epLabel)}${streamTag} · ${r.msg_count||0} msgs · ${t}</span>
+    </div>`;
+  }).join('') : '<div class="muted" style="font-size:11px">No requests yet</div>';
+  const reqScrollClass = reqs.length > 3 ? ' diag-req-scroll' : '';
+  document.getElementById('diag').innerHTML =
+    `<div class="row"><span class="pill">requests ${d.requests||0}</span><span class="pill">failovers ${d.failover_events||0}</span></div>
+     <div style="margin-top:8px" class="muted">${ueLine}</div>
+     <div style="margin-top:4px" class="muted">${chainLine}</div>
+     <div style="margin-top:4px" class="muted">${wireLine}</div>
+     <div style="margin-top:4px" class="muted">${ipcLine}</div>
+     <div style="margin-top:4px" class="muted">${pendingLine}</div>
+     <div style="margin-top:4px" class="muted">${doctorLine}</div>
+     ${d.last_bearer_auth_rejection ? `<div style="margin-top:4px" class="muted">Last auth rejection: ${lastAuth}</div>` : ''}
+     <div style="margin-top:4px" class="muted">${(d.recent_errors||[]).join(' · ') || ''}</div>
+     <div style="margin-top:10px"><strong style="font-size:12px">Recent Requests</strong><div class="diag-req-list${reqScrollClass}">${reqRows}</div></div>`;
+}
+function updateWireCaptureToggle(){
+  const btn = document.getElementById('wireToggleBtn');
+  if(!btn) return;
+  btn.textContent = currentWireCaptureEnabled ? 'Wire: ON' : 'Wire: OFF';
+  btn.className = currentWireCaptureEnabled ? 'small' : 'alt small';
+}
+async function toggleWireCapture(){
+  const next = !currentWireCaptureEnabled;
+  try{
+    await postJson('/v1/diagnostics/wire/toggle', { enabled: next });
+    currentWireCaptureEnabled = next;
+    updateWireCaptureToggle();
+    flash('ok', next ? 'Wire capture enabled' : 'Wire capture disabled');
+    await loadDiag();
+  } catch(e){
+    flash('err', 'Wire toggle failed: ' + (e && e.message ? e.message : 'request failed'));
+  }
+}
+function toggleKeyDetails(keyId) {
+  keyDetailsOpen[keyId] = !keyDetailsOpen[keyId];
+  const km = document.getElementById('km-' + keyId);
+  const btn = document.getElementById('kd-btn-' + keyId);
+  if (km) km.style.display = keyDetailsOpen[keyId] ? '' : 'none';
+  if (btn) btn.textContent = keyDetailsOpen[keyId] ? 'Details ▲' : 'Details ▼';
+}
+async function resetKeyUsage(keyId) {
+  try {
+    await postNoBody('/v1/usage/reset-key/' + encodeURIComponent(keyId));
+    await loadDiag();
+  } catch(e) { flash('err', 'Reset failed'); }
+}
+async function resetOAuthUsage(accountId) {
+  try {
+    await postNoBody('/v1/usage/reset-oauth/' + encodeURIComponent(accountId));
+    await loadDiag();
+  } catch(e) { flash('err', 'Reset failed'); }
+}
+async function resetModelUsage(model) {
+  try {
+    await postNoBody('/v1/usage/reset-model/' + encodeURIComponent(model));
+    await loadDiag();
+    renderSupportedModels();
+  } catch(e) { flash('err', 'Reset failed'); }
+}
+async function resetAllModelUsage() {
+  try {
+    const canonicalModels = Array.from(new Set(supportedModels.map(name => canonicalModelName(name))));
+    const resettableCanonical = canonicalModels.filter(name => {
+      const aliases = modelAliasesForCanonical(name);
+      return aliases.some((alias) => {
+        const e = modelUsage && modelUsage[alias];
+        const b = modelUsageBaseline && modelUsageBaseline[alias];
+        return e && ((e.input_tokens||0)-(b?b.input_tokens||0:0) > 0 || (e.total_requests||0)-(b?b.total_requests||0:0) > 0);
+      });
+    });
+    if(!resettableCanonical.length){
+      flash('warn', 'No model counters to reset');
+      return;
+    }
+    const resettableAliases = Array.from(new Set(resettableCanonical.flatMap(name => modelAliasesForCanonical(name))));
+    await Promise.all(resettableAliases.map(name => postNoBody('/v1/usage/reset-model/' + encodeURIComponent(name))));
+    flash('ok', `Reset model counters for ${resettableCanonical.length} model${resettableCanonical.length===1?'':'s'}`);
+    await loadDiag();
+    renderSupportedModels();
+  } catch(e) { flash('err', 'Reset failed'); }
+}
+async function exportDiagnostics(){
+  try {
+    const resp = await fetch('/v1/diagnostics/export', { headers: adminHeaders() });
+    if (!resp.ok) { flash('err', 'Export failed: HTTP ' + resp.status); return; }
+    const blob = await resp.blob();
+    const cd = resp.headers.get('content-disposition') || '';
+    const match = cd.match(/filename="([^"]+)"/);
+    const filename = match ? match[1] : 'llmhotspot-diag.md';
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename; a.click();
+    URL.revokeObjectURL(url);
+  } catch(e) { flash('err', 'Export error: ' + e.message); }
+}
+async function clearDiagnostics(){
+  try{
+    await postNoBody('/v1/diagnostics/clear');
+    flash('ok', 'Diagnostics cleared');
+    await loadDiag();
+  } catch(e){
+    alert(e.message);
+  }
+}
+async function factoryReset(){
+  const msg = [
+    'There be dragons here.',
+    'Factory reset will wipe everything:',
+    '- all OAuth accounts',
+    '- all API keys',
+    '- diagnostics history',
+    '- current remote assignment',
+    '',
+    'A new remote assignment will be fetched.',
+    'Are you sure?'
+  ].join('\\n');
+  if(!confirm(msg)) return;
+  try{
+    await postNoBody('/v1/factory-reset');
+    flash('warn', 'Factory reset complete. Refreshing assignment...');
+    await loadAll();
+    setTimeout(loadAll, 1500);
+    setTimeout(loadAll, 4000);
+  } catch(e){
+    alert(e.message);
+  }
+}
+async function connectAccount(){
+  if(isRemoteConsoleSession){
+    flash('warn', 'Connect OAuth is disabled on remote console. Open the local console to add a new OAuth account.');
+    return;
+  }
+  const display_name = document.getElementById('acctName').value.trim() || null;
+  try {
+    const body = {};
+    if(display_name) body.display_name = display_name;
+    body.provider = 'openai';
+    const out = await postJson('/v1/oauth/connect/browser/start', body);
+    activeFlowId = out.flow_id;
+    persistActiveFlowId(activeFlowId);
+    flash('warn', 'Redirecting to OAuth...');
+    if(out.authorization_url){
+      window.open(out.authorization_url, '_blank', 'width=700,height=760');
+      await pollOauthFlow();
+      return;
+    }
+    await pollOauthFlow();
+  } catch(e){ flash('err', e.message); }
+}
+async function pollOauthFlow(){
+  if(!activeFlowId) return;
+  for(let i=0;i<120;i++){
+    const [s,r] = await j('/v1/oauth/connect/browser/'+encodeURIComponent(activeFlowId));
+    if(s >= 400){ activeFlowId = null; break; }
+    const state = (r.state||'').toString();
+    if(state === 'completed'){
+      flash('ok', 'OAuth connected: ' + (r.account_id||''));
+      activeFlowId = null;
+      persistActiveFlowId(null);
+      await loadAll();
+      return;
+    }
+    if(state === 'failed' || state === 'expired'){
+      flash('err', 'OAuth ' + state + ': ' + (r.error||''));
+      activeFlowId = null;
+      persistActiveFlowId(null);
+      return;
+    }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  activeFlowId = null;
+  persistActiveFlowId(null);
+}
+function accountProvider(accountId){
+  const row = (lastAccounts||[]).find(a => a && a.account_id === accountId);
+  return (row && row.provider_id ? String(row.provider_id).toLowerCase() : 'openai');
+}
+async function moveAccount(accountId,index){
+  try { await postJson(`/v1/oauth/accounts/${encodeURIComponent(accountId)}/priority`,{index}); await loadAll(); } catch(e){ alert(e.message); }
+}
+async function toggleAccount(accountId, enabled){
+  const provider = accountProvider(accountId);
+  try {
+    if(provider === 'openai_api'){
+      await postJson(`/v1/api-accounts/${encodeURIComponent(accountId)}`, { enabled });
+    } else {
+      await postNoBody(`/v1/oauth/accounts/${encodeURIComponent(accountId)}/${enabled?'enable':'disable'}`);
+    }
+    await loadAll();
+  } catch(e){ alert(e.message); }
+}
+async function disconnectAccount(accountId){
+  if(!confirm('Disconnect this account?')) return;
+  const provider = accountProvider(accountId);
+  try {
+    if(provider === 'openai_api'){
+      await postNoBody(`/v1/api-accounts/${encodeURIComponent(accountId)}/delete`);
+    } else {
+      await postNoBody(`/v1/oauth/accounts/${encodeURIComponent(accountId)}/disconnect`);
+    }
+    await loadAll();
+  } catch(e){ alert(e.message); }
+}
+
+// â”€â”€â”€ Anthropic OAuth â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+async function connectAnthropicAccount(){
+  if(isRemoteConsoleSession){
+    flash('warn','Connect OAuth is disabled on remote console. Open the local console to add a new OAuth account.');
+    return;
+  }
+  const display_name = document.getElementById('acctName').value.trim() || null;
+  try {
+    const body = { provider: 'anthropic' };
+    if(display_name) body.display_name = display_name;
+    const out = await postJson('/v1/oauth/connect/browser/start', body);
+    activeFlowId = out.flow_id;
+    persistActiveFlowId(activeFlowId);
+    flash('warn', 'Redirecting to Anthropic authorization...');
+    if(out.authorization_url){
+      window.open(out.authorization_url, '_blank', 'width=700,height=760');
+    }
+    await pollOauthFlow();
+  } catch(e){
+    flash('err', e.message);
+  }
+}
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+function showApiAccountCard(){
+  const card = document.getElementById('apiAccountCard');
+  if(!card) return;
+  card.style.display = 'flex';
+  document.getElementById('apiAcctLabel').value = document.getElementById('acctName').value || '';
+  document.getElementById('apiAcctBase').value = '';
+  document.getElementById('apiAcctKey').value = '';
+  document.getElementById('apiAcctOrg').value = '';
+  document.getElementById('apiAcctProject').value = '';
+  document.getElementById('apiAcctHeaders').value = '';
+  document.getElementById('apiAcctStatus').textContent = '';
+  document.getElementById('apiAcctConnectBtn').disabled = false;
+  setTimeout(()=>{ const f=document.getElementById('apiAcctBase'); if(f) f.focus(); }, 80);
+}
+
+function hideApiAccountCard(){
+  const card = document.getElementById('apiAccountCard');
+  if(card) card.style.display = 'none';
+}
+
+async function createApiAccount(){
+  const status = document.getElementById('apiAcctStatus');
+  const btn = document.getElementById('apiAcctConnectBtn');
+  const label = (document.getElementById('apiAcctLabel').value || '').trim();
+  const base_url = (document.getElementById('apiAcctBase').value || '').trim();
+  const api_key = (document.getElementById('apiAcctKey').value || '').trim();
+  const organization = (document.getElementById('apiAcctOrg').value || '').trim();
+  const project = (document.getElementById('apiAcctProject').value || '').trim();
+  const extraHeadersRaw = (document.getElementById('apiAcctHeaders').value || '').trim();
+  if(!base_url || !api_key){
+    status.textContent = 'Base URL and API key are required.';
+    return;
+  }
+  let extra_headers = {};
+  if(extraHeadersRaw){
+    try{
+      const parsed = JSON.parse(extraHeadersRaw);
+      if(!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('invalid');
+      extra_headers = parsed;
+    } catch(_) {
+      status.textContent = 'Extra headers must be valid JSON object.';
+      return;
+    }
+  }
+  btn.disabled = true;
+  status.textContent = 'Adding account...';
+  try{
+    const body = { base_url, api_key, extra_headers };
+    if(label) body.label = label;
+    if(organization) body.organization = organization;
+    if(project) body.project = project;
+    await postJson('/v1/api-accounts', body);
+    hideApiAccountCard();
+    flash('ok', 'Custom OpenAI API account added');
+    await loadAll();
+  } catch(e){
+    status.textContent = 'Error: ' + e.message;
+    btn.disabled = false;
+  }
+}
+
+async function createKey(){
+  const label = document.getElementById('keyLabel').value.trim() || 'default';
+  const rawDt = document.getElementById('keyExp').value;
+  const expires_unix = rawDt ? Math.floor(new Date(rawDt).getTime()/1000) : null;
+  try {
+    const out = await postJson('/v1/keys/create',{label,expires_unix});
+    if(out.key_id && out.raw_key){ keyRawCache[out.key_id] = out.raw_key; }
+    if(out.raw_key){
+      const r = await copyText(out.raw_key);
+      if(!r.ok){
+        flash('warn', 'API key created, but copy failed. The key will be shown once for manual copy.');
+      }
+      alert('New API key:\\n'+out.raw_key);
+    }
+    flash('ok', 'API key created');
+    await loadAll();
+  } catch(e){
+    const msg = e && e.message ? e.message : String(e||'');
+    if(msg.includes('upgrade_required')){
+      flash('warn', 'Free mode supports one API key. Click Go Pro to create more.');
+      const btn = document.getElementById('goProBtn');
+      if(btn){
+        btn.classList.add('pulse');
+        setTimeout(()=>btn.classList.remove('pulse'), 1600);
+      }
+      return;
+    }
+    alert(msg);
+  }
+}
+async function copyKey(keyId){
+  const [s,r] = await j(`/v1/keys/${encodeURIComponent(keyId)}/copy`,{headers:{...adminHeaders()}});
+  if(s >= 400){ alert((r.error&&r.error.message)||('HTTP '+s)); return; }
+  if(r.raw_key){ keyRawCache[keyId] = r.raw_key; }
+  const out = await copyText(r.raw_key||'');
+  if(out.ok) flash('ok', 'Copied key to clipboard');
+  else flash('err', out.error || 'Copy failed');
+}
+async function toggleKey(keyId, enabled){
+  try {
+    await postNoBody(`/v1/keys/${encodeURIComponent(keyId)}/${enabled?'enable':'disable'}`);
+    flash('ok', enabled ? 'API key enabled' : 'API key disabled');
+    await loadAll();
+  } catch(e){
+    alert(e.message);
+  }
+}
+async function deleteKey(keyId){
+  if(!confirm('Delete this key permanently?')) return;
+  try{
+    await postNoBody(`/v1/keys/${encodeURIComponent(keyId)}/delete`);
+    delete keyRawCache[keyId];
+    flash('ok', 'API key deleted');
+    await loadAll();
+  } catch(e){
+    alert(e.message);
+  }
+}
+async function openRoutingEditor(accountId){
+  selectedRoutingAccount = accountId;
+  const [s,r] = await j(`/v1/oauth/accounts/${encodeURIComponent(accountId)}/routing`);
+  if(s >= 400){ flash('err', (r.error&&r.error.message)||('HTTP '+s)); return; }
+  routingDraft = {
+    upstream_base_url: r.upstream_base_url || '',
+    chat_path: r.chat_path || '',
+    responses_path: r.responses_path || '',
+    org_id: r.org_id || '',
+    project_id: r.project_id || '',
+    extra_headers: JSON.stringify(r.extra_headers || {}, null, 2),
+  };
+  renderRoutingEditor();
+}
+function closeRoutingEditor(){ selectedRoutingAccount = null; routingDraft = null; renderRoutingEditor(); }
+function renderRoutingEditor(){
+  const container = document.getElementById('routingEditor');
+  if(!selectedRoutingAccount || !routingDraft){ container.innerHTML=''; return; }
+  container.innerHTML = `<div class="mini-card">
+    <div class="mini-head"><strong>Routing profile: ${esc(selectedRoutingAccount)}</strong><button class="small alt" onclick="closeRoutingEditor()">Close</button></div>
+    <div class="two" style="margin-top:8px">
+      <input id="rtBase" placeholder="upstream_base_url" value="${esc(routingDraft.upstream_base_url)}" />
+      <input id="rtChat" placeholder="chat_path" value="${esc(routingDraft.chat_path)}" />
+      <input id="rtResponses" placeholder="responses_path" value="${esc(routingDraft.responses_path)}" />
+      <input id="rtOrg" placeholder="org_id" value="${esc(routingDraft.org_id)}" />
+      <input id="rtProject" placeholder="project_id" value="${esc(routingDraft.project_id)}" />
+    </div>
+    <div style="margin-top:8px">
+      <textarea id="rtHeaders" rows="6" style="width:100%;border:1px solid var(--input-border);border-radius:10px;padding:8px;background:var(--input-bg);color:var(--ink)" aria-label="extra headers json">${esc(routingDraft.extra_headers)}</textarea>
+      <div id="rtErr" class="muted" style="margin-top:6px"></div>
+    </div>
+    <div class="actions" style="margin-top:8px">
+      <button onclick="saveRoutingEditor()">Save Routing</button>
+    </div>
+  </div>`;
+}
+async function saveRoutingEditor(){
+  const body = {
+    upstream_base_url: document.getElementById('rtBase').value.trim() || null,
+    chat_path: document.getElementById('rtChat').value.trim() || null,
+    responses_path: document.getElementById('rtResponses').value.trim() || null,
+    org_id: document.getElementById('rtOrg').value.trim() || null,
+    project_id: document.getElementById('rtProject').value.trim() || null,
+    extra_headers: {}
+  };
+  const raw = document.getElementById('rtHeaders').value.trim();
+  try{
+    body.extra_headers = raw ? JSON.parse(raw) : {};
+  } catch(e){
+    document.getElementById('rtErr').textContent = 'extra_headers must be valid JSON object';
+    return;
+  }
+  try{
+    await postJson(`/v1/oauth/accounts/${encodeURIComponent(selectedRoutingAccount)}/routing`, body);
+    flash('ok', `Routing updated for ${selectedRoutingAccount}`);
+    closeRoutingEditor();
+  } catch(e){
+    document.getElementById('rtErr').textContent = e.message;
+  }
+}
+let _loadAllInFlight = null;
+let _loadAllQueued = false;
+async function loadAll(){
+  if(_loadAllInFlight){
+    _loadAllQueued = true;
+    return _loadAllInFlight;
+  }
+  _loadAllInFlight = (async () => {
+  try{
+    let auth = null;
+    try {
+      const [, a] = await withTimeout(j('/v1/auth/status'), 6000, 'auth status');
+      auth = a || null;
+    } catch(_){}
+    const goProBtn = document.getElementById('goProBtn');
+    const activateKeyBtn = document.getElementById('activateKeyBtn');
+    if(goProBtn){
+      if(auth && auth.tier === 'pro'){
+        goProBtn.textContent = 'Manage Subscription';
+        goProBtn.onclick = function(){ window.open((auth.upgrade_url || 'https://llmhotspot.com') + '/manage', '_blank', 'noopener,noreferrer'); };
+        if(activateKeyBtn) activateKeyBtn.style.display = 'none';
+      } else {
+        goProBtn.textContent = 'Go Pro';
+        goProBtn.onclick = function(){ startProFlow(); };
+        if(activateKeyBtn) activateKeyBtn.style.display = '';
+      }
+    }
+    const [ep] = await withTimeout(Promise.all([loadEndpoints(), loadSupportedModels()]), 6000, 'endpoints/models');
+    renderBrokerWarning(auth || {});
+    await Promise.allSettled([
+      withTimeout(loadAccounts(), 8000, 'accounts load'),
+      withTimeout(loadKeys(), 8000, 'keys load'),
+      withTimeout(loadDiag(), 8000, 'diagnostics load')
+    ]);
+  } catch(e){
+    const msg = (e && e.message) ? String(e.message) : String(e || '');
+    if(msg.includes('auth status timed out')) return;
+    flash('err', 'Load failed: '+msg);
+  } finally {
+    _loadAllInFlight = null;
+    if(_loadAllQueued){
+      _loadAllQueued = false;
+      setTimeout(()=>{ loadAll(); }, 0);
+    }
+  }
+  })();
+  return _loadAllInFlight;
+}
+window.addEventListener('error', (e) => {
+  flash('err', 'UI error: ' + (e.message || 'unknown'));
+});
+window.addEventListener('unhandledrejection', (e) => {
+  const reason = e && e.reason ? (e.reason.message || e.reason.toString()) : 'unknown';
+  flash('err', 'UI async error: ' + reason);
+});
+async function bootstrapConsole(){
+  try { await applyEmbeddedAdminKey(); } catch(_){}
+  try {
+    const [,v] = await withTimeout(j('/v1/version'), 3000, 'version');
+    if(v && v.build) document.getElementById('appVersion').textContent = 'v' + v.build;
+  } catch(_){}
+  await loadAll();
+  if(!activeFlowId){
+    const pending = restoreActiveFlowId();
+    if(pending){
+      activeFlowId = pending;
+      pollOauthFlow();
+    }
+  }
+}
+bootstrapConsole().catch((e)=>{
+  flash('err', 'Console load failed: '+(e && e.message ? e.message : e));
+});
+setInterval(()=>{ loadAll(); }, 30000);
+setInterval(renderSupportedModels, 1000);
+setInterval(renderAccountsActivity, 1000);
+// Fast-poll for remote URLs until they appear (tunnel may provision after page load).
+(function watchRemoteUrls(){
+  let attempts = 0;
+  const maxAttempts = 60; // give up after ~5 minutes
+  const iv = setInterval(async ()=>{
+    attempts++;
+    if(attempts > maxAttempts){ clearInterval(iv); return; }
+    try{
+      const [,e] = await j('/v1/endpoints');
+      if(e && (e.remote_endpoint_url || e.remote_console_url)){
+        clearInterval(iv);
+        await loadAll();
+      }
+    }catch(_){}
+  }, 5000);
+})();
+</script>
+</body>
+</html>
