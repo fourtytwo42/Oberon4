@@ -102,6 +102,82 @@ pub trait OAuthTokenExchange {
     ) -> Result<TokenBundle, OberonError>;
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ReqwestOAuthTokenExchange;
+
+#[derive(Debug, Deserialize)]
+struct OAuthTokenResponse {
+    access_token: String,
+    #[serde(default)]
+    refresh_token: Option<String>,
+    #[serde(default)]
+    expires_in: Option<u64>,
+    #[serde(default)]
+    account_id: Option<String>,
+    #[serde(default)]
+    label: Option<String>,
+}
+
+impl OAuthTokenExchange for ReqwestOAuthTokenExchange {
+    fn exchange_code(
+        &self,
+        provider: &OAuthProviderConfig,
+        code: &str,
+        code_verifier: &str,
+        redirect_uri: &str,
+    ) -> Result<TokenBundle, OberonError> {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|err| OberonError::Storage(format!("oauth client build failed: {err}")))?;
+
+        let params = [
+            ("grant_type", "authorization_code"),
+            ("client_id", provider.client_id.as_str()),
+            ("code", code),
+            ("code_verifier", code_verifier),
+            ("redirect_uri", redirect_uri),
+        ];
+
+        let response = client
+            .post(&provider.token_url)
+            .form(&params)
+            .send()
+            .map_err(|err| OberonError::Storage(format!("oauth token request failed: {err}")))?;
+
+        let status = response.status();
+        let body = response
+            .text()
+            .map_err(|err| OberonError::Storage(format!("oauth token read failed: {err}")))?;
+
+        if !status.is_success() {
+            return Err(OberonError::Validation(format!(
+                "oauth token endpoint returned HTTP {}",
+                status.as_u16()
+            )));
+        }
+
+        let token: OAuthTokenResponse = serde_json::from_str(&body).map_err(|err| {
+            OberonError::Validation(format!("oauth token response invalid: {err}"))
+        })?;
+
+        let expires_at_unix = now_unix().saturating_add(token.expires_in.unwrap_or(3600));
+        let provider_name = provider_name(provider.provider);
+
+        Ok(TokenBundle {
+            access_token: token.access_token,
+            refresh_token: token.refresh_token,
+            expires_at_unix,
+            account_id: token
+                .account_id
+                .unwrap_or_else(|| format!("{provider_name}-{}", code.trim())),
+            label: token
+                .label
+                .unwrap_or_else(|| format!("{} Account", provider_label(provider.provider))),
+        })
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct AccountRegistry {
     accounts: Vec<StoredAccount>,
@@ -400,10 +476,7 @@ fn save_token_bundle<S: SecretStore>(
     provider: OAuthProviderKind,
     token: &TokenBundle,
 ) -> Result<(), OberonError> {
-    let provider_id = match provider {
-        OAuthProviderKind::OpenAi => "openai",
-        OAuthProviderKind::Anthropic => "anthropic",
-    };
+    let provider_id = provider_name(provider);
     store.set_secret(
         &format!("oauth.{provider_id}.{}.access_token", token.account_id),
         &token.access_token,
@@ -475,12 +548,32 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
+fn provider_name(provider: OAuthProviderKind) -> &'static str {
+    match provider {
+        OAuthProviderKind::OpenAi => "openai",
+        OAuthProviderKind::Anthropic => "anthropic",
+    }
+}
+
+fn provider_label(provider: OAuthProviderKind) -> &'static str {
+    match provider {
+        OAuthProviderKind::OpenAi => "OpenAI",
+        OAuthProviderKind::Anthropic => "Anthropic",
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        thread,
+    };
+
     use super::{
         AccountRegistry, AnthropicOAuthAdapter, OAuthCallbackPayload, OAuthFlowManager,
-        OAuthProviderConfig, OAuthTokenExchange, OpenAiOAuthAdapter, TokenBundle,
-        store_provider_token,
+        OAuthProviderConfig, OAuthTokenExchange, OpenAiOAuthAdapter, ReqwestOAuthTokenExchange,
+        TokenBundle, store_provider_token,
     };
     use oberon4_core::{InMemorySecretStore, OAuthProvider, OAuthProviderKind, SecretStore};
 
@@ -770,5 +863,97 @@ mod tests {
             .disconnect(OAuthProviderKind::OpenAi, "acct-openai")
             .unwrap();
         assert!(registry.list().is_empty());
+    }
+
+    #[test]
+    fn reqwest_exchange_posts_openai_form_to_local_server() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let addr = listener.local_addr().expect("local addr");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept should succeed");
+            let mut buffer = [0_u8; 4096];
+            let bytes_read = stream.read(&mut buffer).expect("request should read");
+            let request = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
+            assert!(request.starts_with("POST /token HTTP/1.1"));
+            assert!(request.contains("grant_type=authorization_code"));
+            assert!(request.contains("client_id=openai-desktop"));
+            assert!(request.contains("code=code-123"));
+            assert!(request.contains("code_verifier=verifier-123"));
+
+            let body = r#"{"access_token":"access-openai","refresh_token":"refresh-openai","expires_in":1200,"account_id":"acct-openai","label":"OpenAI Primary"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("response should write");
+        });
+
+        let provider = OAuthProviderConfig {
+            token_url: format!("http://{}/token", addr),
+            ..OAuthProviderConfig::openai()
+        };
+        let exchange = ReqwestOAuthTokenExchange;
+
+        let token = exchange
+            .exchange_code(
+                &provider,
+                "code-123",
+                "verifier-123",
+                "http://localhost:1455/auth/callback",
+            )
+            .expect("real exchange should succeed");
+
+        server.join().expect("server thread should finish");
+        assert_eq!(token.access_token, "access-openai");
+        assert_eq!(token.refresh_token.as_deref(), Some("refresh-openai"));
+        assert_eq!(token.account_id, "acct-openai");
+    }
+
+    #[test]
+    fn reqwest_exchange_posts_anthropic_form_to_local_server() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let addr = listener.local_addr().expect("local addr");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept should succeed");
+            let mut buffer = [0_u8; 4096];
+            let bytes_read = stream.read(&mut buffer).expect("request should read");
+            let request = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
+            assert!(request.starts_with("POST /token HTTP/1.1"));
+            assert!(request.contains("client_id=anthropic-console"));
+            assert!(request.contains("code=anthropic-code"));
+
+            let body = r#"{"access_token":"access-anthropic","expires_in":900,"account_id":"acct-anthropic","label":"Anthropic Primary"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("response should write");
+        });
+
+        let provider = OAuthProviderConfig {
+            token_url: format!("http://{}/token", addr),
+            ..OAuthProviderConfig::anthropic()
+        };
+        let exchange = ReqwestOAuthTokenExchange;
+
+        let token = exchange
+            .exchange_code(
+                &provider,
+                "anthropic-code",
+                "anthropic-verifier",
+                "http://localhost:1455/callback",
+            )
+            .expect("real exchange should succeed");
+
+        server.join().expect("server thread should finish");
+        assert_eq!(token.access_token, "access-anthropic");
+        assert!(token.refresh_token.is_none());
+        assert_eq!(token.account_id, "acct-anthropic");
     }
 }
