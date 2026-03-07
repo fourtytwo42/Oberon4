@@ -50,6 +50,7 @@ Use this map to reduce context load while preserving full detail:
 1. Canonical requirement docs (for example `docs/SOURCE_OF_TRUTH.md`) are authoritative.
 2. Do not implement speculative behavior.
 3. If behavior changes, update code + canonical docs in the same change.
+4. For Oberon4 v0.1 implementation work, `docs/plans/plan-oberon4-v0.1-build.md` is the canonical execution order and progress tracker.
 
 ## 2) Workflow Baseline
 1. Use the lightest safe workflow.
@@ -72,6 +73,7 @@ Medium/high-risk project work uses stable IDs:
 - `NFR-###` non-functional
 - `AC-###` acceptance
 Prefer measurable criteria (Given/When/Then where possible). Implementation must map to IDs.
+For Oberon4 v0.1 delivery, implementation sequencing must also map to phase/task IDs in `docs/plans/plan-oberon4-v0.1-build.md`.
 
 ## 3.2) Change Planning Standard (Delta-First)
 Behavior changes require a change artifact with:
@@ -111,6 +113,7 @@ Implementation output must include:
 Handoffs must include:
 - Done, remaining, risks/blockers, evidence links, exact next step
 Use fixed structure; avoid narrative-only handoffs.
+For Oberon4 v0.1 implementation changes, handoffs must also state which plan tasks were marked complete or remain blocked.
 
 ## 5) Pre-Flight and In-Flight Discipline
 Before edits: state objective, acceptance checks, touched files.
@@ -118,6 +121,7 @@ During edits:
 - Keep diffs small/reviewable
 - No opportunistic refactors unless requested or required
 - If scope drifts, stop and split follow-up work
+- If working on Oberon4 v0.1, confirm the active task IDs from `docs/plans/plan-oberon4-v0.1-build.md` before editing.
 
 ## 5.1) No Hidden Magic
 Automation/hook behavior must be documented.
@@ -133,6 +137,7 @@ Before claiming done:
 - Validate acceptance criteria
 - Avoid unrelated churn
 Refactors require characterization evidence first.
+For Oberon4 v0.1, a plan task may not be checked off until its listed verification gate has passed.
 
 ## 6.1) Mandatory Test Scope Contract
 For `feature|bugfix|refactor|security`, commit metadata and evidence must include:
@@ -335,6 +340,17 @@ Non-trivial tasks must create a compact context pack:
 - relevant contracts/interfaces
 - relevant file map
 Do not include unrelated files or long dumps.
+For Oberon4 v0.1, the active phase and next unchecked task from `docs/plans/plan-oberon4-v0.1-build.md` must be included in the compact context pack.
+
+## 17.4) Oberon4 Plan Discipline
+When working in `/home/hendo420/Oberon4` on v0.1 delivery:
+1. Read `docs/plans/plan-oberon4-v0.1-build.md` before implementation.
+2. Execute work in plan order; do not skip dependencies.
+3. Update plan checkboxes in the same change that completes verified work.
+4. If a task is incomplete, leave it unchecked.
+5. If a task is blocked, record the blocker under the task in the plan file.
+6. Do not begin human testing until the plan's human-testing entry criteria are satisfied.
+7. Prefer adding tests before or alongside implementation, never as an afterthought.
 
 ## 17.1) Context Saturation and Reset Threshold
 Defaults:
