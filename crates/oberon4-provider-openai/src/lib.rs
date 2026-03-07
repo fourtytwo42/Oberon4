@@ -49,24 +49,80 @@ pub struct OpenAiChatResponseMessage {
 }
 
 pub trait OpenAiTransport {
-    fn post_json(&self, url: &str, body: &str, timeout_ms: u64) -> Result<String, OberonError>;
+    fn post_json(
+        &self,
+        url: &str,
+        body: &str,
+        timeout_ms: u64,
+        bearer_token: Option<&str>,
+    ) -> Result<String, OberonError>;
+    fn get_text(
+        &self,
+        url: &str,
+        timeout_ms: u64,
+        bearer_token: Option<&str>,
+    ) -> Result<String, OberonError>;
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct ReqwestTransport;
 
 impl OpenAiTransport for ReqwestTransport {
-    fn post_json(&self, url: &str, body: &str, timeout_ms: u64) -> Result<String, OberonError> {
+    fn post_json(
+        &self,
+        url: &str,
+        body: &str,
+        timeout_ms: u64,
+        bearer_token: Option<&str>,
+    ) -> Result<String, OberonError> {
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_millis(timeout_ms))
             .build()
             .map_err(|err| OberonError::Storage(format!("transport client build failed: {err}")))?;
 
-        let response = client
+        let mut request = client
             .post(url)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .header(reqwest::header::CONNECTION, "close")
+            .header(reqwest::header::CONNECTION, "close");
+        if let Some(token) = bearer_token {
+            request = request.bearer_auth(token);
+        }
+        let response = request
             .body(body.to_string())
+            .send()
+            .map_err(|err| OberonError::Storage(format!("transport request failed: {err}")))?;
+
+        let status = response.status();
+        let text = response.text().map_err(|err| {
+            OberonError::Storage(format!("transport response read failed: {err}"))
+        })?;
+
+        if !status.is_success() {
+            return Err(OberonError::Validation(format!(
+                "provider returned HTTP {}",
+                status.as_u16()
+            )));
+        }
+
+        Ok(text)
+    }
+
+    fn get_text(
+        &self,
+        url: &str,
+        timeout_ms: u64,
+        bearer_token: Option<&str>,
+    ) -> Result<String, OberonError> {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_millis(timeout_ms))
+            .build()
+            .map_err(|err| OberonError::Storage(format!("transport client build failed: {err}")))?;
+
+        let mut request = client.get(url).header(reqwest::header::CONNECTION, "close");
+        if let Some(token) = bearer_token {
+            request = request.bearer_auth(token);
+        }
+        let response = request
             .send()
             .map_err(|err| OberonError::Storage(format!("transport request failed: {err}")))?;
 
@@ -89,14 +145,21 @@ impl OpenAiTransport for ReqwestTransport {
 #[derive(Debug, Clone)]
 pub struct OpenAiCompatibleClient<T> {
     base_url: String,
+    api_key_env: Option<String>,
     retry_policy: RetryPolicy,
     transport: T,
 }
 
 impl<T> OpenAiCompatibleClient<T> {
-    pub fn new(base_url: impl Into<String>, retry_policy: RetryPolicy, transport: T) -> Self {
+    pub fn new(
+        base_url: impl Into<String>,
+        api_key_env: Option<String>,
+        retry_policy: RetryPolicy,
+        transport: T,
+    ) -> Self {
         Self {
             base_url: base_url.into(),
+            api_key_env,
             retry_policy,
             transport,
         }
@@ -104,6 +167,14 @@ impl<T> OpenAiCompatibleClient<T> {
 
     pub fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    pub fn set_retry_policy(&mut self, retry_policy: RetryPolicy) {
+        self.retry_policy = retry_policy;
+    }
+
+    pub fn set_api_key_env(&mut self, api_key_env: Option<String>) {
+        self.api_key_env = api_key_env;
     }
 }
 
@@ -128,7 +199,7 @@ where
             "{}/v1/chat/completions",
             self.effective_base_url(endpoint_override)
         );
-        let response_body = self.post_with_retry(&url, &body)?;
+        let response_body = self.post_with_retry(&url, &body, self.bearer_token()?.as_deref())?;
         let response: OpenAiChatResponse = serde_json::from_str(&response_body).map_err(|err| {
             OberonError::Validation(format!("malformed provider response: {err}"))
         })?;
@@ -148,13 +219,11 @@ where
     pub fn endpoint_health(
         &self,
         endpoint_override: Option<&str>,
-        model: &str,
+        _model: &str,
     ) -> Result<(), OberonError> {
-        let probe = [ChatMessage {
-            role: ChatRole::User,
-            content: "health".to_string(),
-        }];
-        self.send_chat_messages(endpoint_override, model, &probe)
+        let url = format!("{}/v1/version", self.effective_base_url(endpoint_override));
+        self.transport
+            .get_text(&url, self.retry_policy.timeout_ms, self.bearer_token()?.as_deref())
             .map(|_| ())
     }
 
@@ -166,14 +235,19 @@ where
             .to_string()
     }
 
-    fn post_with_retry(&self, url: &str, body: &str) -> Result<String, OberonError> {
+    fn post_with_retry(
+        &self,
+        url: &str,
+        body: &str,
+        bearer_token: Option<&str>,
+    ) -> Result<String, OberonError> {
         let attempts = self.retry_policy.max_retries.saturating_add(1);
         let mut last_error: Option<OberonError> = None;
 
         for _ in 0..attempts {
             match self
                 .transport
-                .post_json(url, body, self.retry_policy.timeout_ms)
+                .post_json(url, body, self.retry_policy.timeout_ms, bearer_token)
             {
                 Ok(response) => return Ok(response),
                 Err(err) => last_error = Some(err),
@@ -183,6 +257,19 @@ where
         Err(last_error.unwrap_or_else(|| {
             OberonError::Storage("provider request failed without an error".to_string())
         }))
+    }
+
+    fn bearer_token(&self) -> Result<Option<String>, OberonError> {
+        match self.api_key_env.as_deref() {
+            Some(name) if !name.trim().is_empty() => std::env::var(name)
+                .map(Some)
+                .map_err(|_| {
+                    OberonError::Validation(format!(
+                        "api key environment variable is not set: {name}"
+                    ))
+                }),
+            _ => Ok(None),
+        }
     }
 }
 
@@ -202,6 +289,21 @@ where
             Some(endpoint)
         };
         self.send_chat_messages(endpoint_override, model, messages)
+    }
+
+    fn endpoint_health(&self, endpoint: &str, model: &str) -> Result<(), OberonError> {
+        let endpoint_override = if endpoint.trim().is_empty() {
+            None
+        } else {
+            Some(endpoint)
+        };
+        OpenAiCompatibleClient::endpoint_health(self, endpoint_override, model)
+    }
+
+    fn apply_runtime_config(&mut self, config: &AppConfig) -> Result<(), OberonError> {
+        self.set_retry_policy(RetryPolicy::from_config(config));
+        self.set_api_key_env(config.endpoint.api_key_env.clone());
+        Ok(())
     }
 }
 
@@ -235,14 +337,40 @@ fn into_chat_message(message: OpenAiChatResponseMessage) -> Result<ChatMessage, 
 
     Ok(ChatMessage {
         role,
-        content: message.content,
+        content: normalize_assistant_content(role, message.content),
     })
+}
+
+fn normalize_assistant_content(role: ChatRole, content: String) -> String {
+    if role != ChatRole::Assistant {
+        return content;
+    }
+
+    let mut normalized = content;
+    loop {
+        let len = normalized.len();
+        if len < 16 || len % 2 != 0 {
+            return normalized;
+        }
+
+        let midpoint = len / 2;
+        if !normalized.is_char_boundary(midpoint) {
+            return normalized;
+        }
+
+        let (left, right) = normalized.split_at(midpoint);
+        if left != right {
+            return normalized;
+        }
+
+        normalized = left.to_string();
+    }
 }
 
 #[derive(Debug)]
 pub struct FakeTransport {
     responses: RefCell<VecDeque<Result<String, OberonError>>>,
-    requests: RefCell<Vec<(String, String, u64)>>,
+    requests: RefCell<Vec<(String, String, String, u64, Option<String>)>>,
 }
 
 impl FakeTransport {
@@ -257,16 +385,46 @@ impl FakeTransport {
         self.requests.borrow().len()
     }
 
-    pub fn recorded_requests(&self) -> Vec<(String, String, u64)> {
+    pub fn recorded_requests(&self) -> Vec<(String, String, String, u64, Option<String>)> {
         self.requests.borrow().clone()
     }
 }
 
 impl OpenAiTransport for FakeTransport {
-    fn post_json(&self, url: &str, body: &str, timeout_ms: u64) -> Result<String, OberonError> {
-        self.requests
-            .borrow_mut()
-            .push((url.to_string(), body.to_string(), timeout_ms));
+    fn post_json(
+        &self,
+        url: &str,
+        body: &str,
+        timeout_ms: u64,
+        bearer_token: Option<&str>,
+    ) -> Result<String, OberonError> {
+        self.requests.borrow_mut().push((
+            "POST".to_string(),
+            url.to_string(),
+            body.to_string(),
+            timeout_ms,
+            bearer_token.map(ToOwned::to_owned),
+        ));
+        self.responses.borrow_mut().pop_front().unwrap_or_else(|| {
+            Err(OberonError::Storage(
+                "fake transport ran out of scripted responses".to_string(),
+            ))
+        })
+    }
+
+    fn get_text(
+        &self,
+        url: &str,
+        timeout_ms: u64,
+        bearer_token: Option<&str>,
+    ) -> Result<String, OberonError> {
+        self.requests.borrow_mut().push((
+            "GET".to_string(),
+            url.to_string(),
+            String::new(),
+            timeout_ms,
+            bearer_token.map(ToOwned::to_owned),
+        ));
         self.responses.borrow_mut().pop_front().unwrap_or_else(|| {
             Err(OberonError::Storage(
                 "fake transport ran out of scripted responses".to_string(),
@@ -304,6 +462,7 @@ mod tests {
         let transport = FakeTransport::new(vec![Ok(ok_response("hi"))]);
         let client = OpenAiCompatibleClient::new(
             "https://api.openai.com",
+            None,
             RetryPolicy {
                 timeout_ms: 30_000,
                 max_retries: 0,
@@ -330,8 +489,9 @@ mod tests {
 
         let requests = client.transport.recorded_requests();
         assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].0, "https://api.openai.com/v1/chat/completions");
-        let decoded: OpenAiChatRequest = serde_json::from_str(&requests[0].1).unwrap();
+        assert_eq!(requests[0].0, "POST");
+        assert_eq!(requests[0].1, "https://api.openai.com/v1/chat/completions");
+        let decoded: OpenAiChatRequest = serde_json::from_str(&requests[0].2).unwrap();
         assert_eq!(decoded.model, "gpt-4.1-mini");
         assert!(!decoded.stream);
         assert_eq!(decoded.messages[0].role, "system");
@@ -343,6 +503,7 @@ mod tests {
         let transport = FakeTransport::new(vec![Ok(ok_response("hi"))]);
         let client = OpenAiCompatibleClient::new(
             "https://api.openai.com",
+            None,
             RetryPolicy {
                 timeout_ms: 10_000,
                 max_retries: 0,
@@ -363,7 +524,7 @@ mod tests {
 
         let requests = client.transport.recorded_requests();
         assert_eq!(
-            requests[0].0,
+            requests[0].1,
             "https://gateway.example.test/v1/chat/completions"
         );
     }
@@ -377,6 +538,7 @@ mod tests {
         ]);
         let client = OpenAiCompatibleClient::new(
             "https://api.openai.com",
+            None,
             RetryPolicy {
                 timeout_ms: 5_000,
                 max_retries: 2,
@@ -404,6 +566,7 @@ mod tests {
         let transport = FakeTransport::new(vec![Ok("{\"choices\":[".to_string())]);
         let client = OpenAiCompatibleClient::new(
             "https://api.openai.com",
+            None,
             RetryPolicy {
                 timeout_ms: 5_000,
                 max_retries: 0,
@@ -430,6 +593,7 @@ mod tests {
         let transport = FakeTransport::new(vec![Ok("{\"choices\":[]}".to_string())]);
         let client = OpenAiCompatibleClient::new(
             "https://api.openai.com",
+            None,
             RetryPolicy {
                 timeout_ms: 5_000,
                 max_retries: 0,
@@ -462,6 +626,7 @@ mod tests {
         ]);
         let client = OpenAiCompatibleClient::new(
             "https://api.openai.com",
+            None,
             RetryPolicy {
                 timeout_ms: 5_000,
                 max_retries: 1,
@@ -489,6 +654,7 @@ mod tests {
         let transport = FakeTransport::new(vec![Ok(ok_response("healthy"))]);
         let client = OpenAiCompatibleClient::new(
             "https://api.openai.com",
+            None,
             RetryPolicy::from_config(&AppConfig::default()),
             transport,
         );
@@ -496,9 +662,132 @@ mod tests {
         client.endpoint_health(None, "gpt-4.1-mini").unwrap();
 
         let requests = client.transport.recorded_requests();
-        let decoded: OpenAiChatRequest = serde_json::from_str(&requests[0].1).unwrap();
-        assert_eq!(decoded.messages.len(), 1);
-        assert_eq!(decoded.messages[0].content, "health");
+        assert_eq!(requests[0].0, "GET");
+        assert_eq!(requests[0].1, "https://api.openai.com/v1/version");
+        assert_eq!(requests[0].2, "");
+    }
+
+    #[test]
+    fn exact_duplicated_assistant_content_is_collapsed() {
+        let duplicated = r#"{"choices":[{"message":{"role":"assistant","content":"Hello! How can I help you today?Hello! How can I help you today?"}}]}"#;
+        let transport = FakeTransport::new(vec![Ok(duplicated.to_string())]);
+        let client = OpenAiCompatibleClient::new(
+            "https://api.openai.com",
+            None,
+            RetryPolicy {
+                timeout_ms: 5_000,
+                max_retries: 0,
+            },
+            transport,
+        );
+
+        let reply = client
+            .send_message(
+                "",
+                "gpt-4.1-mini",
+                &[ChatMessage {
+                    role: ChatRole::User,
+                    content: "hello".to_string(),
+                }],
+            )
+            .unwrap();
+
+        assert_eq!(reply.content, "Hello! How can I help you today?");
+    }
+
+    #[test]
+    fn nonduplicated_assistant_content_is_preserved() {
+        let transport = FakeTransport::new(vec![Ok(ok_response("Your name is Eric."))]);
+        let client = OpenAiCompatibleClient::new(
+            "https://api.openai.com",
+            None,
+            RetryPolicy {
+                timeout_ms: 5_000,
+                max_retries: 0,
+            },
+            transport,
+        );
+
+        let reply = client
+            .send_message(
+                "",
+                "gpt-4.1-mini",
+                &[ChatMessage {
+                    role: ChatRole::User,
+                    content: "hello".to_string(),
+                }],
+            )
+            .unwrap();
+
+        assert_eq!(reply.content, "Your name is Eric.");
+    }
+
+    #[test]
+    fn request_uses_bearer_auth_from_configured_env() {
+        unsafe {
+            std::env::set_var("OBERON4_TEST_API_KEY", "hs_test_key");
+        }
+        let transport = FakeTransport::new(vec![Ok(ok_response("hi"))]);
+        let client = OpenAiCompatibleClient::new(
+            "https://api.openai.com",
+            Some("OBERON4_TEST_API_KEY".to_string()),
+            RetryPolicy {
+                timeout_ms: 5_000,
+                max_retries: 0,
+            },
+            transport,
+        );
+
+        let reply = client
+            .send_message(
+                "",
+                "gpt-4.1-mini",
+                &[ChatMessage {
+                    role: ChatRole::User,
+                    content: "hello".to_string(),
+                }],
+            )
+            .unwrap();
+
+        assert_eq!(reply.content, "hi");
+        let requests = client.transport.recorded_requests();
+        assert_eq!(requests[0].4.as_deref(), Some("hs_test_key"));
+        unsafe {
+            std::env::remove_var("OBERON4_TEST_API_KEY");
+        }
+    }
+
+    #[test]
+    fn missing_api_key_env_fails_fast() {
+        unsafe {
+            std::env::remove_var("OBERON4_TEST_API_KEY_MISSING");
+        }
+        let transport = FakeTransport::new(vec![Ok(ok_response("hi"))]);
+        let client = OpenAiCompatibleClient::new(
+            "https://api.openai.com",
+            Some("OBERON4_TEST_API_KEY_MISSING".to_string()),
+            RetryPolicy {
+                timeout_ms: 5_000,
+                max_retries: 0,
+            },
+            transport,
+        );
+
+        let err = client
+            .send_message(
+                "",
+                "gpt-4.1-mini",
+                &[ChatMessage {
+                    role: ChatRole::User,
+                    content: "hello".to_string(),
+                }],
+            )
+            .expect_err("missing api key env should fail fast");
+
+        assert_eq!(
+            err.to_string(),
+            "validation failed: api key environment variable is not set: OBERON4_TEST_API_KEY_MISSING"
+        );
     }
 
     #[test]
@@ -506,6 +795,7 @@ mod tests {
         let transport = FakeTransport::new(vec![Ok(ok_response("done"))]);
         let client = OpenAiCompatibleClient::new(
             "https://api.openai.com",
+            None,
             RetryPolicy {
                 timeout_ms: 12_345,
                 max_retries: 0,
@@ -525,7 +815,7 @@ mod tests {
             .unwrap();
 
         let requests = client.transport.recorded_requests();
-        assert_eq!(requests[0].2, 12_345);
+        assert_eq!(requests[0].3, 12_345);
     }
 
     #[test]
@@ -553,6 +843,7 @@ mod tests {
 
         let client = OpenAiCompatibleClient::new(
             format!("http://{}", addr),
+            None,
             RetryPolicy {
                 timeout_ms: 5_000,
                 max_retries: 0,
@@ -573,5 +864,42 @@ mod tests {
 
         server.join().expect("server thread should finish");
         assert_eq!(reply.content, "from server");
+    }
+
+    #[test]
+    fn reqwest_transport_gets_version_from_local_server() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let addr = listener.local_addr().expect("local addr");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept should succeed");
+            let mut buffer = [0_u8; 4096];
+            let bytes_read = stream.read(&mut buffer).expect("request should read");
+            let request = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
+            assert!(request.starts_with("GET /v1/version HTTP/1.1"));
+
+            let body = r#"{"version":"0.1.0"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("response should write");
+        });
+
+        let client = OpenAiCompatibleClient::new(
+            format!("http://{}", addr),
+            None,
+            RetryPolicy {
+                timeout_ms: 5_000,
+                max_retries: 0,
+            },
+            ReqwestTransport,
+        );
+
+        client.endpoint_health(None, "ignored-model").unwrap();
+
+        server.join().expect("server thread should finish");
     }
 }

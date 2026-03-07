@@ -26,13 +26,16 @@ Optional env:
 
 Commands:
 - shell smoke: `scripts/live-hotspot-smoke.sh`
+- daemon-backed CLI smoke: `scripts/live-daemon-smoke.sh`
 - Rust live provider test only:
   - `OBERON4_LIVE_HOTSPOT=1 OBERON4_LIVE_BASE_URL=<base> cargo test -p oberon4-provider-openai --test live_hotspot -- --ignored --nocapture`
+- Rust live daemon/CLI test only:
+  - `OBERON4_LIVE_HOTSPOT=1 OBERON4_LIVE_BASE_URL=<base> cargo test -p oberon4-cli --test live_daemon -- --ignored --nocapture`
 
 Rules:
 - keep live tests non-destructive
 - do not use account/key revoke/delete operations in automated live smoke
-- confirm success by both HTTP response and Rust live integration test
+- confirm success by both provider-level HTTP response and daemon-backed CLI live integration test
 
 ## 3. Coverage Expectations by Requirement
 - `FR-001`: lifecycle tests (start, health, graceful stop)

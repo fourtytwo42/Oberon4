@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -178,10 +180,76 @@ impl OAuthTokenExchange for ReqwestOAuthTokenExchange {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AccountRegistry {
     accounts: Vec<StoredAccount>,
     active_accounts: BTreeMap<OAuthProviderKind, String>,
+}
+
+pub trait AccountMetadataStore {
+    fn load_registry(&self) -> Result<AccountRegistry, OberonError>;
+    fn save_registry(&mut self, registry: &AccountRegistry) -> Result<(), OberonError>;
+}
+
+#[derive(Debug, Default)]
+pub struct InMemoryAccountMetadataStore {
+    registry: AccountRegistry,
+}
+
+#[derive(Debug, Clone)]
+pub struct FileAccountMetadataStore {
+    path: PathBuf,
+}
+
+impl Default for FileAccountMetadataStore {
+    fn default() -> Self {
+        Self::new(oberon4_core::default_data_dir().join("accounts.json"))
+    }
+}
+
+impl FileAccountMetadataStore {
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl AccountMetadataStore for InMemoryAccountMetadataStore {
+    fn load_registry(&self) -> Result<AccountRegistry, OberonError> {
+        Ok(self.registry.clone())
+    }
+
+    fn save_registry(&mut self, registry: &AccountRegistry) -> Result<(), OberonError> {
+        self.registry = registry.clone();
+        Ok(())
+    }
+}
+
+impl AccountMetadataStore for FileAccountMetadataStore {
+    fn load_registry(&self) -> Result<AccountRegistry, OberonError> {
+        if !self.path.exists() {
+            return Ok(AccountRegistry::default());
+        }
+        let raw = fs::read(&self.path)
+            .map_err(|err| OberonError::Storage(format!("account store read failed: {err}")))?;
+        serde_json::from_slice(&raw)
+            .map_err(|err| OberonError::Validation(format!("account store decode failed: {err}")))
+    }
+
+    fn save_registry(&mut self, registry: &AccountRegistry) -> Result<(), OberonError> {
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent).map_err(|err| {
+                OberonError::Storage(format!("account store parent create failed: {err}"))
+            })?;
+        }
+        let encoded = serde_json::to_vec_pretty(registry)
+            .map_err(|err| OberonError::Storage(format!("account store encode failed: {err}")))?;
+        fs::write(&self.path, encoded)
+            .map_err(|err| OberonError::Storage(format!("account store write failed: {err}")))
+    }
 }
 
 impl AccountRegistry {
@@ -565,15 +633,18 @@ fn provider_label(provider: OAuthProviderKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use std::{
+        fs,
         io::{Read, Write},
         net::TcpListener,
         thread,
+        time::{SystemTime, UNIX_EPOCH},
     };
 
     use super::{
-        AccountRegistry, AnthropicOAuthAdapter, OAuthCallbackPayload, OAuthFlowManager,
-        OAuthProviderConfig, OAuthTokenExchange, OpenAiOAuthAdapter, ReqwestOAuthTokenExchange,
-        TokenBundle, store_provider_token,
+        AccountMetadataStore, AccountRegistry, AnthropicOAuthAdapter, FileAccountMetadataStore,
+        InMemoryAccountMetadataStore, OAuthCallbackPayload, OAuthFlowManager, OAuthProviderConfig,
+        OAuthTokenExchange, OpenAiOAuthAdapter, ReqwestOAuthTokenExchange, TokenBundle,
+        store_provider_token,
     };
     use oberon4_core::{InMemorySecretStore, OAuthProvider, OAuthProviderKind, SecretStore};
 
@@ -591,6 +662,14 @@ mod tests {
         ) -> Result<TokenBundle, oberon4_core::OberonError> {
             Ok(self.bundle.clone())
         }
+    }
+
+    fn temp_path(name: &str) -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("oberon4-accounts-{name}-{nonce}.json"))
     }
 
     #[test]
@@ -863,6 +942,61 @@ mod tests {
             .disconnect(OAuthProviderKind::OpenAi, "acct-openai")
             .unwrap();
         assert!(registry.list().is_empty());
+    }
+
+    #[test]
+    fn in_memory_account_store_round_trips_registry() {
+        let mut store = InMemoryAccountMetadataStore::default();
+        let mut registry = AccountRegistry::default();
+        let mut secrets = InMemorySecretStore::default();
+        let bundle = TokenBundle {
+            access_token: "access-openai".to_string(),
+            refresh_token: Some("refresh-openai".to_string()),
+            expires_at_unix: 999,
+            account_id: "acct-openai".to_string(),
+            label: "OpenAI Primary".to_string(),
+        };
+
+        registry
+            .connect(OAuthProviderKind::OpenAi, &bundle, &mut secrets)
+            .unwrap();
+        store.save_registry(&registry).unwrap();
+
+        let loaded = store.load_registry().unwrap();
+        assert_eq!(loaded.list(), registry.list());
+        assert_eq!(
+            loaded.active_account_id(OAuthProviderKind::OpenAi),
+            Some("acct-openai")
+        );
+    }
+
+    #[test]
+    fn file_account_store_round_trips_registry() {
+        let path = temp_path("file");
+        let mut store = FileAccountMetadataStore::new(&path);
+        let mut registry = AccountRegistry::default();
+        let mut secrets = InMemorySecretStore::default();
+        let bundle = TokenBundle {
+            access_token: "access-anthropic".to_string(),
+            refresh_token: None,
+            expires_at_unix: 999,
+            account_id: "acct-anthropic".to_string(),
+            label: "Anthropic Primary".to_string(),
+        };
+
+        registry
+            .connect(OAuthProviderKind::Anthropic, &bundle, &mut secrets)
+            .unwrap();
+        store.save_registry(&registry).unwrap();
+
+        let loaded = store.load_registry().unwrap();
+        assert_eq!(loaded.list(), registry.list());
+        assert_eq!(
+            loaded.active_account_id(OAuthProviderKind::Anthropic),
+            Some("acct-anthropic")
+        );
+
+        let _ = fs::remove_file(path);
     }
 
     #[test]

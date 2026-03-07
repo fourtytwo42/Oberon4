@@ -2,8 +2,9 @@ use std::{
     io,
     path::PathBuf,
     process::{Command, Stdio},
+    sync::mpsc::{self, Receiver, TryRecvError},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crossterm::{
@@ -58,6 +59,12 @@ pub struct TuiShellState {
     status: String,
     should_quit: bool,
     transcript: Vec<UiLine>,
+}
+
+struct PendingSubmission {
+    receiver: Receiver<Result<(DaemonBackedTuiApp, TuiShellState), (TuiShellState, OberonError)>>,
+    started_at: Instant,
+    timeout: Duration,
 }
 
 pub struct TuiApp {
@@ -153,6 +160,7 @@ impl TuiApp {
             TuiCommand::Model(model) => {
                 let mut config = self.runtime.load_config()?;
                 config.endpoint.model = model.clone();
+                self.provider_client.apply_runtime_config(&config)?;
                 self.runtime.save_config(&config)?;
                 Ok(TuiResponse {
                     output: format!("model set to {model}"),
@@ -162,6 +170,7 @@ impl TuiApp {
             TuiCommand::Endpoint(url) => {
                 let mut config = self.runtime.load_config()?;
                 config.endpoint.base_url = url.clone();
+                self.provider_client.apply_runtime_config(&config)?;
                 self.runtime.save_config(&config)?;
                 Ok(TuiResponse {
                     output: format!("endpoint set to {url}"),
@@ -491,7 +500,7 @@ impl TuiShellState {
             return Ok(());
         }
 
-        if !trimmed.starts_with('/') {
+        if !trimmed.starts_with('/') && !has_trailing_user_line(&self.transcript, trimmed) {
             self.transcript.push(UiLine {
                 role: "user".to_string(),
                 content: trimmed.to_string(),
@@ -542,7 +551,42 @@ fn run_terminal_loop(
     app: &mut DaemonBackedTuiApp,
     shell: &mut TuiShellState,
 ) -> Result<(), OberonError> {
+    let mut pending_submission: Option<PendingSubmission> = None;
+
     loop {
+        handle_pending_timeout(&mut pending_submission, shell);
+
+        if let Some(pending) = pending_submission.as_ref() {
+            match pending.receiver.try_recv() {
+                Ok(result) => {
+                    pending_submission = None;
+                    match result {
+                        Ok((updated_app, updated_shell)) => {
+                            let preserved_input = std::mem::take(&mut shell.input);
+                            *app = updated_app;
+                            *shell = updated_shell;
+                            shell.input = preserved_input;
+                        }
+                        Err((failed_shell, err)) => {
+                            let preserved_input = std::mem::take(&mut shell.input);
+                            *shell = failed_shell;
+                            shell.input = preserved_input;
+                            shell.status = err.to_string();
+                            shell.transcript.push(UiLine {
+                                role: "error".to_string(),
+                                content: err.to_string(),
+                            });
+                        }
+                    }
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => {
+                    pending_submission = None;
+                    shell.status = "request worker disconnected".to_string();
+                }
+            }
+        }
+
         terminal
             .draw(|frame| render_terminal(frame, shell))
             .map_err(|err| OberonError::Storage(format!("tui draw failed: {err}")))?;
@@ -574,7 +618,16 @@ fn run_terminal_loop(
             }
             KeyCode::Char(ch) => shell.push_input_char(ch),
             KeyCode::Backspace => shell.backspace(),
-            KeyCode::Enter => shell.submit(app)?,
+            KeyCode::Enter => {
+                if pending_submission.is_some() {
+                    if !handle_pending_local_command(shell)? {
+                        shell.status =
+                            "request in flight; wait, or press Esc/Ctrl+C to quit".to_string();
+                    }
+                } else if let Some(pending) = start_async_submit(app, shell)? {
+                    pending_submission = Some(pending);
+                }
+            }
             KeyCode::Esc => {
                 shell.should_quit = true;
                 shell.status = "quitting".to_string();
@@ -582,6 +635,121 @@ fn run_terminal_loop(
             _ => {}
         }
     }
+}
+
+fn handle_pending_local_command(shell: &mut TuiShellState) -> Result<bool, OberonError> {
+    let trimmed = shell.input.trim().to_string();
+    if !trimmed.starts_with('/') {
+        return Ok(false);
+    }
+
+    let command = parse_tui_command(&trimmed)?;
+    let response = match command {
+        TuiCommand::Help => TuiResponse {
+            output: "/help /quit /status /config /model <name> /endpoint <url> /system <text> /clear /save <name> /load <name>".to_string(),
+            should_quit: false,
+        },
+        TuiCommand::Status => TuiResponse {
+            output: "request in flight".to_string(),
+            should_quit: false,
+        },
+        TuiCommand::Quit => TuiResponse {
+            output: "quitting".to_string(),
+            should_quit: true,
+        },
+        _ => return Ok(false),
+    };
+
+    shell.input.clear();
+    shell.status = response.output.clone();
+    shell.should_quit = response.should_quit;
+    shell.transcript.push(UiLine {
+        role: "system".to_string(),
+        content: format!("command: {trimmed}"),
+    });
+    if !response.output.is_empty() {
+        shell.transcript.push(UiLine {
+            role: "status".to_string(),
+            content: response.output,
+        });
+    }
+    Ok(true)
+}
+
+fn start_async_submit(
+    app: &DaemonBackedTuiApp,
+    shell: &mut TuiShellState,
+) -> Result<Option<PendingSubmission>, OberonError> {
+    let trimmed = shell.input.trim().to_string();
+    if trimmed.is_empty() {
+        shell.input.clear();
+        shell.status = "Input was empty".to_string();
+        return Ok(None);
+    }
+
+    let mut app_clone = app.clone();
+    let mut shell_clone = shell.clone();
+    shell_clone.input = std::mem::take(&mut shell.input);
+    let timeout = app
+        .load_config()
+        .map(|config| Duration::from_millis(config.runtime.request_timeout_ms))
+        .unwrap_or_else(|_| Duration::from_secs(30));
+    shell.status = if trimmed.starts_with('/') {
+        format!("running command: {trimmed}")
+    } else {
+        shell.transcript.push(UiLine {
+            role: "user".to_string(),
+            content: trimmed.clone(),
+        });
+        shell.transcript.push(UiLine {
+            role: "status".to_string(),
+            content: "waiting on provider response...".to_string(),
+        });
+        "waiting on provider response...".to_string()
+    };
+
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let result = match shell_clone.submit(&mut app_clone) {
+            Ok(()) => Ok((app_clone, shell_clone)),
+            Err(err) => Err((shell_clone, err)),
+        };
+        let _ = sender.send(result);
+    });
+
+    Ok(Some(PendingSubmission {
+        receiver,
+        started_at: Instant::now(),
+        timeout,
+    }))
+}
+
+fn has_trailing_user_line(transcript: &[UiLine], content: &str) -> bool {
+    transcript
+        .last()
+        .map(|line| line.role == "user" && line.content == content)
+        .unwrap_or(false)
+}
+
+fn handle_pending_timeout(
+    pending_submission: &mut Option<PendingSubmission>,
+    shell: &mut TuiShellState,
+) {
+    let should_timeout = pending_submission
+        .as_ref()
+        .map(|pending| pending.started_at.elapsed() > pending.timeout.saturating_add(Duration::from_millis(500)))
+        .unwrap_or(false);
+
+    if !should_timeout {
+        return;
+    }
+
+    *pending_submission = None;
+    shell.status = "request timed out".to_string();
+    shell.transcript.push(UiLine {
+        role: "error".to_string(),
+        content: "request timed out".to_string(),
+    });
 }
 
 fn render_terminal(frame: &mut Frame, shell: &TuiShellState) {
@@ -767,6 +935,7 @@ fn role_label(role: ChatRole) -> &'static str {
 fn default_provider_client() -> OpenAiCompatibleClient<FakeTransport> {
     OpenAiCompatibleClient::new(
         "https://api.openai.com",
+        None,
         RetryPolicy {
             timeout_ms: 30_000,
             max_retries: 0,
@@ -785,12 +954,15 @@ fn ok_response(content: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{thread, time::Duration};
+    use std::{thread, time::{Duration, Instant}};
+    use std::sync::mpsc;
 
     use super::{
-        DaemonBackedTuiApp, TuiApp, TuiCommand, TuiShellState, parse_tui_command, status_line,
+        DaemonBackedTuiApp, PendingSubmission, TuiApp, TuiCommand, TuiShellState,
+        handle_pending_local_command, handle_pending_timeout, parse_tui_command,
+        start_async_submit, status_line,
     };
-    use oberon4_auth::AccountRegistry;
+    use oberon4_auth::{AccountRegistry, InMemoryAccountMetadataStore};
     use oberon4_core::{
         AppConfig, ChatRole, FakeChatProvider, FakeOAuthProvider, InMemorySecretStore,
         OAuthProviderKind,
@@ -924,6 +1096,7 @@ mod tests {
                 FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
                 AccountRegistry::default(),
                 InMemorySecretStore::default(),
+                InMemoryAccountMetadataStore::default(),
             );
             serve_unix_socket(&thread_socket, app)
         });
@@ -985,6 +1158,7 @@ mod tests {
                 FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
                 AccountRegistry::default(),
                 InMemorySecretStore::default(),
+                InMemoryAccountMetadataStore::default(),
             );
             serve_unix_socket(&thread_socket, app)
         });
@@ -1009,5 +1183,154 @@ mod tests {
         let client = DaemonIpcClient::new(&socket_path);
         let _ = client.send(&oberon4_core::DaemonCommand::Shutdown).unwrap();
         handle.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn async_submit_completes_and_updates_shell() {
+        let socket_path = std::env::temp_dir().join(format!(
+            "oberon4-tui-async-test-{}.sock",
+            std::process::id()
+        ));
+        let thread_socket = socket_path.clone();
+        let handle = thread::spawn(move || {
+            let app = DaemonApp::new(
+                DaemonRuntime::default(),
+                FakeChatProvider {
+                    reply: "daemon reply".to_string(),
+                },
+                FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
+                FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+                AccountRegistry::default(),
+                InMemorySecretStore::default(),
+                InMemoryAccountMetadataStore::default(),
+            );
+            serve_unix_socket(&thread_socket, app)
+        });
+
+        for _ in 0..20 {
+            if socket_path.exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+
+        let mut app = DaemonBackedTuiApp::new(DaemonIpcClient::new(&socket_path));
+        let mut shell = TuiShellState::default();
+        for ch in "hello".chars() {
+            shell.push_input_char(ch);
+        }
+
+        let pending = start_async_submit(&app, &mut shell)
+            .unwrap()
+            .expect("submission should start");
+        assert_eq!(shell.input(), "");
+        assert_eq!(shell.status(), "waiting on provider response...");
+        assert_eq!(shell.transcript()[0].role, "user");
+        assert_eq!(shell.transcript()[0].content, "hello");
+        assert_eq!(shell.transcript()[1].role, "status");
+        assert_eq!(
+            shell.transcript()[1].content,
+            "waiting on provider response..."
+        );
+
+        shell.push_input_char('x');
+
+        let (updated_app, updated_shell) = pending
+            .receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker should finish")
+            .expect("submission should succeed");
+
+        let preserved_input = std::mem::take(&mut shell.input);
+        app = updated_app;
+        shell = updated_shell;
+        shell.input = preserved_input;
+
+        assert_eq!(shell.input(), "x");
+        assert_eq!(shell.status(), "daemon reply");
+        assert_eq!(app.transcript().len(), 2);
+        assert_eq!(shell.transcript()[0].role, "user");
+        assert_eq!(shell.transcript()[1].role, "assistant");
+
+        let client = DaemonIpcClient::new(&socket_path);
+        let _ = client.send(&oberon4_core::DaemonCommand::Shutdown).unwrap();
+        handle.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn pending_request_allows_help_status_and_quit_commands() {
+        let mut shell = TuiShellState {
+            input: "/help".to_string(),
+            ..TuiShellState::default()
+        };
+        assert!(handle_pending_local_command(&mut shell).unwrap());
+        assert!(shell.status().contains("/help"));
+        assert!(!shell.should_quit());
+
+        shell.input = "/status".to_string();
+        assert!(handle_pending_local_command(&mut shell).unwrap());
+        assert_eq!(shell.status(), "request in flight");
+        assert!(!shell.should_quit());
+
+        shell.input = "/quit".to_string();
+        assert!(handle_pending_local_command(&mut shell).unwrap());
+        assert!(shell.should_quit());
+    }
+
+    #[test]
+    fn async_submit_error_preserves_user_message() {
+        unsafe {
+            std::env::set_var("OBERON4_DAEMON_BIN", "/definitely/missing/oberon4-daemon");
+        }
+        let socket_path = std::env::temp_dir().join(format!(
+            "oberon4-tui-async-error-{}.sock",
+            std::process::id()
+        ));
+        let app = DaemonBackedTuiApp::new(DaemonIpcClient::new(&socket_path));
+        let mut shell = TuiShellState::default();
+        for ch in "hello".chars() {
+            shell.push_input_char(ch);
+        }
+
+        let pending = start_async_submit(&app, &mut shell)
+            .unwrap()
+            .expect("submission should start");
+        let result = pending
+            .receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("worker should finish");
+
+        match result {
+            Ok((_app, shell)) => {
+                assert_eq!(shell.transcript()[0].role, "user");
+                assert_eq!(shell.transcript()[0].content, "hello");
+            }
+            Err((shell, err)) => {
+                assert_eq!(shell.transcript()[0].role, "user");
+                assert_eq!(shell.transcript()[0].content, "hello");
+                assert!(!err.to_string().is_empty());
+            }
+        }
+
+        unsafe {
+            std::env::remove_var("OBERON4_DAEMON_BIN");
+        }
+    }
+
+    #[test]
+    fn pending_submission_times_out_and_recovers_ui() {
+        let (_sender, receiver) = mpsc::channel();
+        let mut pending = Some(PendingSubmission {
+            receiver,
+            started_at: Instant::now() - Duration::from_secs(2),
+            timeout: Duration::from_millis(10),
+        });
+        let mut shell = TuiShellState::default();
+
+        handle_pending_timeout(&mut pending, &mut shell);
+
+        assert!(pending.is_none());
+        assert_eq!(shell.status(), "request timed out");
+        assert_eq!(shell.transcript()[0].role, "error");
     }
 }

@@ -3,6 +3,9 @@ use oberon4_tui::TuiApp;
 
 #[test]
 fn end_to_end_endpoint_configuration_and_connectivity() {
+    unsafe {
+        std::env::set_var("OPENAI_API_KEY", "test-key");
+    }
     let mut app = CliApp::default();
     let set_endpoint = app.run(CliCommand::ConfigSet {
         key: "endpoint.base_url".to_string(),
@@ -18,6 +21,9 @@ fn end_to_end_endpoint_configuration_and_connectivity() {
     assert_eq!(set_model.exit_code, 0);
     assert_eq!(endpoint_test.exit_code, 0);
     assert_eq!(endpoint_test.stdout, "endpoint test passed");
+    unsafe {
+        std::env::remove_var("OPENAI_API_KEY");
+    }
 }
 
 #[test]

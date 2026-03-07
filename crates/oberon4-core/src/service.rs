@@ -10,6 +10,18 @@ pub trait ChatProvider {
         model: &str,
         messages: &[ChatMessage],
     ) -> Result<ChatMessage, OberonError>;
+
+    fn endpoint_health(&self, endpoint: &str, model: &str) -> Result<(), OberonError> {
+        let probe = [ChatMessage {
+            role: crate::ChatRole::User,
+            content: "health".to_string(),
+        }];
+        self.send_message(endpoint, model, &probe).map(|_| ())
+    }
+
+    fn apply_runtime_config(&mut self, _config: &AppConfig) -> Result<(), OberonError> {
+        Ok(())
+    }
 }
 
 pub trait OAuthProvider {

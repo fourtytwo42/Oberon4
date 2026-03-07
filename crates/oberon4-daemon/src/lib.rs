@@ -7,12 +7,12 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use oberon4_auth::{AccountRegistry, TokenBundle};
+use oberon4_auth::{AccountMetadataStore, AccountRegistry, FileAccountMetadataStore, TokenBundle};
 use oberon4_core::{
-    AppConfig, ChatMessage, ChatProvider, ChatProviderKind, ConfigStore, DaemonCommand,
-    DaemonEvent, DaemonStatus, FileConfigStore, FileSecretStore, FileSessionStore,
-    InMemoryConfigStore, InMemorySessionStore, OAuthProvider, OAuthProviderKind, OberonError,
-    RequestId, SecretStore, ServiceEnvelope, SessionStore,
+    AppConfig, ChatProvider, ChatProviderKind, ConfigStore, DaemonCommand, DaemonEvent,
+    DaemonStatus, FileConfigStore, FileSecretStore, FileSessionStore, InMemoryConfigStore,
+    InMemorySessionStore, OAuthProvider, OAuthProviderKind, OberonError, RequestId, SecretStore,
+    ServiceEnvelope, SessionStore,
 };
 
 pub fn daemon_status(config: &AppConfig) -> ServiceEnvelope<String> {
@@ -148,13 +148,14 @@ struct CommandOutcome {
     should_shutdown: bool,
 }
 
-pub struct DaemonApp<C, S, P, OO, AO, SS> {
+pub struct DaemonApp<C, S, P, OO, AO, SS, AS> {
     runtime: DaemonRuntime<C, S>,
     chat_provider: P,
     openai_oauth: OO,
     anthropic_oauth: AO,
     accounts: AccountRegistry,
     secrets: SS,
+    account_store: AS,
 }
 
 impl Default
@@ -165,10 +166,13 @@ impl Default
         oberon4_auth::OpenAiOAuthAdapter,
         oberon4_auth::AnthropicOAuthAdapter,
         FileSecretStore,
+        FileAccountMetadataStore,
     >
 {
     fn default() -> Self {
         let config = AppConfig::default();
+        let account_store = FileAccountMetadataStore::default();
+        let accounts = account_store.load_registry().unwrap_or_default();
         Self::new(
             DaemonRuntime {
                 config_store: FileConfigStore::default(),
@@ -177,18 +181,20 @@ impl Default
             },
             oberon4_provider_openai::OpenAiCompatibleClient::new(
                 config.endpoint.base_url.clone(),
+                config.endpoint.api_key_env.clone(),
                 oberon4_provider_openai::RetryPolicy::from_config(&config),
                 oberon4_provider_openai::ReqwestTransport,
             ),
             oberon4_auth::OpenAiOAuthAdapter::default(),
             oberon4_auth::AnthropicOAuthAdapter::default(),
-            AccountRegistry::default(),
+            accounts,
             FileSecretStore::default(),
+            account_store,
         )
     }
 }
 
-impl<C, S, P, OO, AO, SS> DaemonApp<C, S, P, OO, AO, SS>
+impl<C, S, P, OO, AO, SS, AS> DaemonApp<C, S, P, OO, AO, SS, AS>
 where
     C: ConfigStore,
     S: SessionStore,
@@ -196,6 +202,7 @@ where
     OO: OAuthProvider,
     AO: OAuthProvider,
     SS: SecretStore,
+    AS: AccountMetadataStore,
 {
     pub fn new(
         runtime: DaemonRuntime<C, S>,
@@ -204,6 +211,7 @@ where
         anthropic_oauth: AO,
         accounts: AccountRegistry,
         secrets: SS,
+        account_store: AS,
     ) -> Self {
         Self {
             runtime,
@@ -212,6 +220,7 @@ where
             anthropic_oauth,
             accounts,
             secrets,
+            account_store,
         }
     }
 
@@ -227,6 +236,49 @@ where
             self.runtime.lifecycle_state(),
             self.active_account(),
         ))
+    }
+
+    fn sync_api_key_secret(&mut self, config: &AppConfig) -> Result<(), OberonError> {
+        let Some(env_name) = config
+            .endpoint
+            .api_key_env
+            .as_deref()
+            .filter(|name| !name.trim().is_empty())
+        else {
+            return Ok(());
+        };
+
+        if let Ok(value) = std::env::var(env_name) {
+            self.secrets
+                .set_secret(&format!("env.{env_name}"), &value)?;
+        }
+
+        Ok(())
+    }
+
+    fn materialize_api_key_env(&mut self, config: &AppConfig) -> Result<(), OberonError> {
+        let Some(env_name) = config
+            .endpoint
+            .api_key_env
+            .as_deref()
+            .filter(|name| !name.trim().is_empty())
+        else {
+            return Ok(());
+        };
+
+        if std::env::var(env_name).is_ok() {
+            return Ok(());
+        }
+
+        let value = match self.secrets.get_secret(&format!("env.{env_name}")) {
+            Ok(value) => value,
+            Err(OberonError::NotFound(_)) => return Ok(()),
+            Err(err) => return Err(err),
+        };
+        unsafe {
+            std::env::set_var(env_name, value);
+        }
+        Ok(())
     }
 
     pub(crate) fn handle_command(
@@ -256,6 +308,7 @@ where
                     ));
                 }
                 let config = self.runtime.load_config()?;
+                self.materialize_api_key_env(&config)?;
                 let reply = self.chat_provider.send_message(
                     &config.endpoint.base_url,
                     &config.endpoint.model,
@@ -273,15 +326,9 @@ where
                     ));
                 }
                 let config = self.runtime.load_config()?;
-                let probe = [ChatMessage {
-                    role: oberon4_core::ChatRole::User,
-                    content: "health".to_string(),
-                }];
-                let _ = self.chat_provider.send_message(
-                    &config.endpoint.base_url,
-                    &config.endpoint.model,
-                    &probe,
-                )?;
+                self.materialize_api_key_env(&config)?;
+                self.chat_provider
+                    .endpoint_health(&config.endpoint.base_url, &config.endpoint.model)?;
                 Ok(CommandOutcome {
                     event: DaemonEvent::Ack {
                         message: "endpoint test passed".to_string(),
@@ -290,6 +337,8 @@ where
                 })
             }
             DaemonCommand::SaveConfig { config } => {
+                self.sync_api_key_secret(&config)?;
+                self.chat_provider.apply_runtime_config(&config)?;
                 self.runtime.save_config(&config)?;
                 Ok(CommandOutcome {
                     event: DaemonEvent::ConfigLoaded { config },
@@ -334,6 +383,7 @@ where
                 let _ = self
                     .accounts
                     .connect(provider, &bundle, &mut self.secrets)?;
+                self.persist_accounts()?;
                 Ok(CommandOutcome {
                     event: DaemonEvent::OAuthStarted { provider, url },
                     should_shutdown: false,
@@ -350,6 +400,7 @@ where
                 account_id,
             } => {
                 self.accounts.activate(provider, &account_id)?;
+                self.persist_accounts()?;
                 Ok(CommandOutcome {
                     event: DaemonEvent::Ack {
                         message: format!("activated {} {}", provider_name(provider), account_id),
@@ -362,6 +413,7 @@ where
                 account_id,
             } => {
                 self.accounts.disable(provider, &account_id)?;
+                self.persist_accounts()?;
                 Ok(CommandOutcome {
                     event: DaemonEvent::Ack {
                         message: format!("disabled {} {}", provider_name(provider), account_id),
@@ -374,6 +426,7 @@ where
                 account_id,
             } => {
                 self.accounts.disconnect(provider, &account_id)?;
+                self.persist_accounts()?;
                 Ok(CommandOutcome {
                     event: DaemonEvent::Ack {
                         message: format!("disconnected {} {}", provider_name(provider), account_id),
@@ -402,6 +455,10 @@ where
                     .active_account_id(provider)
                     .map(str::to_string)
             })
+    }
+
+    fn persist_accounts(&mut self) -> Result<(), OberonError> {
+        self.account_store.save_registry(&self.accounts)
     }
 }
 
@@ -452,9 +509,9 @@ pub fn default_socket_path() -> PathBuf {
     std::env::temp_dir().join("oberon4-daemon.sock")
 }
 
-pub fn serve_unix_socket<C, S, P, OO, AO, SS>(
+pub fn serve_unix_socket<C, S, P, OO, AO, SS, AS>(
     socket_path: impl AsRef<Path>,
-    mut app: DaemonApp<C, S, P, OO, AO, SS>,
+    mut app: DaemonApp<C, S, P, OO, AO, SS, AS>,
 ) -> Result<(), OberonError>
 where
     C: ConfigStore,
@@ -463,6 +520,7 @@ where
     OO: OAuthProvider,
     AO: OAuthProvider,
     SS: SecretStore,
+    AS: AccountMetadataStore,
 {
     let socket_path = socket_path.as_ref();
     if let Some(parent) = socket_path.parent() {
@@ -491,9 +549,9 @@ where
     Ok(())
 }
 
-fn handle_stream<C, S, P, OO, AO, SS>(
+fn handle_stream<C, S, P, OO, AO, SS, AS>(
     stream: &mut UnixStream,
-    app: &mut DaemonApp<C, S, P, OO, AO, SS>,
+    app: &mut DaemonApp<C, S, P, OO, AO, SS, AS>,
 ) -> Result<bool, OberonError>
 where
     C: ConfigStore,
@@ -502,6 +560,7 @@ where
     OO: OAuthProvider,
     AO: OAuthProvider,
     SS: SecretStore,
+    AS: AccountMetadataStore,
 {
     let mut input = Vec::new();
     stream
@@ -550,18 +609,34 @@ fn provider_label(provider: OAuthProviderKind) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::{thread, time::Duration};
+    use std::{
+        fs, thread,
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
 
     use super::{
         DaemonApp, DaemonIpcClient, DaemonRuntime, LifecycleState, LogEntry, LogLevel,
         daemon_status, default_socket_path, log_entry, serve_unix_socket,
     };
-    use oberon4_auth::AccountRegistry;
+    use oberon4_auth::{
+        AccountMetadataStore, AccountRegistry, FileAccountMetadataStore,
+        InMemoryAccountMetadataStore,
+    };
     use oberon4_core::{
         AppConfig, ChatMessage, ChatProviderKind, ChatRole, DaemonCommand, DaemonEvent,
-        FakeChatProvider, FakeOAuthProvider, InMemorySecretStore, OAuthProviderKind, SavedSession,
-        SessionId, SessionSummary,
+        FakeChatProvider, FakeOAuthProvider, FileConfigStore, FileSecretStore, FileSessionStore,
+        InMemorySecretStore, OAuthProviderKind, SavedSession, SecretStore, SessionId,
+        SessionSummary,
     };
+    use oberon4_provider_openai::{FakeTransport, OpenAiCompatibleClient, RetryPolicy};
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("oberon4-daemon-{name}-{nonce}"))
+    }
 
     #[test]
     fn daemon_status_uses_shared_config() {
@@ -625,6 +700,7 @@ mod tests {
             FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
             AccountRegistry::default(),
             InMemorySecretStore::default(),
+            InMemoryAccountMetadataStore::default(),
         );
         let _ = app.start().unwrap();
 
@@ -690,6 +766,7 @@ mod tests {
             FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
             AccountRegistry::default(),
             InMemorySecretStore::default(),
+            InMemoryAccountMetadataStore::default(),
         );
         let err = app
             .handle_command(DaemonCommand::SendChat {
@@ -720,6 +797,7 @@ mod tests {
                 FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
                 AccountRegistry::default(),
                 InMemorySecretStore::default(),
+                InMemoryAccountMetadataStore::default(),
             );
             serve_unix_socket(&thread_socket, app)
         });
@@ -757,6 +835,7 @@ mod tests {
             FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
             AccountRegistry::default(),
             InMemorySecretStore::default(),
+            InMemoryAccountMetadataStore::default(),
         );
         let _ = app.start().unwrap();
         let session = SavedSession {
@@ -789,6 +868,135 @@ mod tests {
         match loaded {
             DaemonEvent::SessionLoaded { session: loaded } => assert_eq!(loaded, session),
             other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn account_metadata_persists_across_daemon_restart() {
+        let dir = temp_dir("accounts");
+        let config_path = dir.join("config.toml");
+        let session_dir = dir.join("sessions");
+        let secret_path = dir.join("secrets.json");
+        let account_path = dir.join("accounts.json");
+
+        let mut app = DaemonApp::new(
+            DaemonRuntime {
+                config_store: FileConfigStore::new(&config_path),
+                session_store: FileSessionStore::new(&session_dir),
+                lifecycle: LifecycleState::Stopped,
+            },
+            FakeChatProvider::default(),
+            FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
+            FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+            AccountRegistry::default(),
+            FileSecretStore::new(&secret_path),
+            FileAccountMetadataStore::new(&account_path),
+        );
+        let _ = app.start().unwrap();
+        let _ = app
+            .handle_command(DaemonCommand::ConnectAccount {
+                provider: OAuthProviderKind::OpenAi,
+            })
+            .unwrap();
+
+        let store = FileAccountMetadataStore::new(&account_path);
+        let registry = store.load_registry().unwrap();
+        assert_eq!(registry.list().len(), 1);
+        assert_eq!(
+            registry.active_account_id(OAuthProviderKind::OpenAi),
+            Some("openai-default")
+        );
+
+        let reloaded = DaemonApp::new(
+            DaemonRuntime {
+                config_store: FileConfigStore::new(&config_path),
+                session_store: FileSessionStore::new(&session_dir),
+                lifecycle: LifecycleState::Stopped,
+            },
+            FakeChatProvider::default(),
+            FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
+            FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+            store.load_registry().unwrap(),
+            FileSecretStore::new(&secret_path),
+            store,
+        );
+        let status = reloaded.status().unwrap();
+        assert_eq!(status.active_account.as_deref(), Some("openai-default"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn chat_materializes_api_key_from_secret_store_when_env_missing() {
+        unsafe {
+            std::env::remove_var("OPENAI_API_KEY");
+        }
+
+        let mut secrets = InMemorySecretStore::default();
+        secrets
+            .set_secret("env.OPENAI_API_KEY", "hs_test_key")
+            .unwrap();
+
+        let transport = FakeTransport::new(vec![Ok(
+            r#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#.to_string(),
+        )]);
+        let provider = OpenAiCompatibleClient::new(
+            "http://gateway.example.test",
+            Some("OPENAI_API_KEY".to_string()),
+            RetryPolicy {
+                timeout_ms: 5_000,
+                max_retries: 0,
+            },
+            transport,
+        );
+
+        let mut app = DaemonApp::new(
+            DaemonRuntime::default(),
+            provider,
+            FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
+            FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+            AccountRegistry::default(),
+            secrets,
+            InMemoryAccountMetadataStore::default(),
+        );
+        let _ = app.start().unwrap();
+
+        let _ = app
+            .handle_command(DaemonCommand::SaveConfig {
+                config: AppConfig {
+                    endpoint: oberon4_core::EndpointConfig {
+                        base_url: "http://gateway.example.test".to_string(),
+                        model: "gpt-5.1-codex-mini".to_string(),
+                        api_key_env: Some("OPENAI_API_KEY".to_string()),
+                    },
+                    runtime: oberon4_core::RuntimeConfig {
+                        request_timeout_ms: 5_000,
+                        max_retries: 0,
+                        log_level: "info".to_string(),
+                    },
+                },
+            })
+            .unwrap();
+
+        let event = app
+            .handle_command(DaemonCommand::SendChat {
+                session_id: None,
+                messages: vec![ChatMessage {
+                    role: ChatRole::User,
+                    content: "hello".to_string(),
+                }],
+            })
+            .unwrap()
+            .event;
+
+        match event {
+            DaemonEvent::ChatComplete { message } => assert_eq!(message.content, "ok"),
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        assert_eq!(std::env::var("OPENAI_API_KEY").ok().as_deref(), Some("hs_test_key"));
+        unsafe {
+            std::env::remove_var("OPENAI_API_KEY");
         }
     }
 }

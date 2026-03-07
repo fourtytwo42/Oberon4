@@ -123,9 +123,7 @@ impl CliApp {
                     status.running, status.endpoint_base_url, status.model
                 )))
             }
-            CliCommand::Tui => Ok(CliOutput::success(
-                "tui launch delegated to oberon4-tui (not yet wired in phase 5)",
-            )),
+            CliCommand::Tui => launch_tui(),
             CliCommand::ConfigShow => {
                 let config = self.runtime.load_config()?;
                 Ok(CliOutput::success(redacted_config_json(&config)?))
@@ -133,6 +131,7 @@ impl CliApp {
             CliCommand::ConfigSet { key, value } => {
                 let mut config = self.runtime.load_config()?;
                 apply_config_value(&mut config, &key, &value)?;
+                self.provider_client.apply_runtime_config(&config)?;
                 self.runtime.save_config(&config)?;
                 Ok(CliOutput::success(format!("set {key}={value}")))
             }
@@ -268,9 +267,7 @@ fn execute_via_daemon(command: CliCommand) -> Result<CliOutput, OberonError> {
                 }
             }
         }
-        CliCommand::Tui => Ok(CliOutput::success(
-            "tui launch delegated to oberon4-tui (real daemon boundary only wired for CLI in this step)",
-        )),
+        CliCommand::Tui => launch_tui(),
         CliCommand::ConfigShow => {
             ensure_daemon_running()?;
             match daemon_client()?.send(&oberon4_core::DaemonCommand::LoadConfig)? {
@@ -432,6 +429,9 @@ fn spawn_daemon_process(socket_path: PathBuf) -> Result<(), OberonError> {
 }
 
 fn daemon_binary_path() -> Result<PathBuf, OberonError> {
+    if let Some(path) = std::env::var_os("OBERON4_DAEMON_BIN") {
+        return Ok(PathBuf::from(path));
+    }
     let current = std::env::current_exe()
         .map_err(|err| OberonError::Storage(format!("current executable lookup failed: {err}")))?;
     let direct = current
@@ -453,6 +453,55 @@ fn daemon_binary_path() -> Result<PathBuf, OberonError> {
     }
     Err(OberonError::Storage(
         "oberon4-daemon binary not found next to current executable".to_string(),
+    ))
+}
+
+fn launch_tui() -> Result<CliOutput, OberonError> {
+    let status = Command::new(tui_binary_path()?)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .map_err(|err| OberonError::Storage(format!("failed to launch tui: {err}")))?;
+
+    if status.success() {
+        Ok(CliOutput::success(String::new()))
+    } else {
+        Err(OberonError::Storage(format!(
+            "tui exited with status {}",
+            status
+                .code()
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "signal".to_string())
+        )))
+    }
+}
+
+fn tui_binary_path() -> Result<PathBuf, OberonError> {
+    if let Some(path) = std::env::var_os("OBERON4_TUI_BIN") {
+        return Ok(PathBuf::from(path));
+    }
+    let current = std::env::current_exe()
+        .map_err(|err| OberonError::Storage(format!("current executable lookup failed: {err}")))?;
+    let direct = current
+        .parent()
+        .map(|dir| dir.join("oberon4-tui"))
+        .ok_or_else(|| {
+            OberonError::Storage("current executable has no parent directory".to_string())
+        })?;
+    if direct.exists() {
+        return Ok(direct);
+    }
+    let sibling = current
+        .parent()
+        .and_then(|dir| dir.parent())
+        .map(|dir| dir.join("oberon4-tui"))
+        .ok_or_else(|| OberonError::Storage("tui binary path resolution failed".to_string()))?;
+    if sibling.exists() {
+        return Ok(sibling);
+    }
+    Err(OberonError::Storage(
+        "oberon4-tui binary not found next to current executable".to_string(),
     ))
 }
 
@@ -667,6 +716,7 @@ fn redacted_config_json(config: &AppConfig) -> Result<String, OberonError> {
 fn default_provider_client() -> OpenAiCompatibleClient<FakeTransport> {
     OpenAiCompatibleClient::new(
         "https://api.openai.com",
+        None,
         RetryPolicy {
             timeout_ms: 30_000,
             max_retries: 0,
@@ -685,7 +735,14 @@ fn ok_response(content: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, OnceLock};
+
     use super::{CliApp, CliCommand, parse_command};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn parses_daemon_commands() {
@@ -797,5 +854,40 @@ mod tests {
         let output = app.run(CliCommand::LogsTail);
         assert_eq!(output.exit_code, 0);
         assert!(output.stdout.contains("\"request_id\""));
+    }
+
+    #[test]
+    fn tui_command_launches_override_binary() {
+        let _guard = env_lock().lock().expect("env lock");
+        unsafe {
+            std::env::set_var("OBERON4_TUI_BIN", "/bin/true");
+        }
+
+        let mut app = CliApp::default();
+        let output = app.run(CliCommand::Tui);
+
+        assert_eq!(output.exit_code, 0);
+
+        unsafe {
+            std::env::remove_var("OBERON4_TUI_BIN");
+        }
+    }
+
+    #[test]
+    fn tui_command_reports_override_binary_failure() {
+        let _guard = env_lock().lock().expect("env lock");
+        unsafe {
+            std::env::set_var("OBERON4_TUI_BIN", "/bin/false");
+        }
+
+        let mut app = CliApp::default();
+        let output = app.run(CliCommand::Tui);
+
+        assert_eq!(output.exit_code, 3);
+        assert!(output.stderr.contains("tui exited with status"));
+
+        unsafe {
+            std::env::remove_var("OBERON4_TUI_BIN");
+        }
     }
 }

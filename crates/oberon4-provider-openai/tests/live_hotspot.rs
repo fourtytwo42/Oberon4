@@ -26,6 +26,7 @@ fn live_hotspot_openai_chat_completions_round_trip() {
 
     let client = OpenAiCompatibleClient::new(
         normalized_base_url(),
+        std::env::var("OBERON4_LIVE_API_KEY_ENV").ok(),
         RetryPolicy {
             timeout_ms: 45_000,
             max_retries: 1,

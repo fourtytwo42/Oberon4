@@ -20,6 +20,10 @@ Use this checklist only after automated gates through `EG-P8` are green.
 - [ ] `cargo test --workspace`
 - [ ] `cargo test -p oberon4-cli --test end_to_end`
 
+## Optional Live Endpoint Preconditions
+- [ ] `OBERON4_LIVE_BASE_URL=<base> scripts/live-hotspot-smoke.sh`
+- [ ] `OBERON4_LIVE_BASE_URL=<base> scripts/live-daemon-smoke.sh`
+
 ## Manual Smoke Flow
 ### CLI
 - [ ] `cargo run -p oberon4-cli -- daemon start`
@@ -36,6 +40,8 @@ Use this checklist only after automated gates through `EG-P8` are green.
   - expect JSON log line with `request_id`
 - [ ] `cargo run -p oberon4-cli -- doctor`
   - expect success once daemon is running
+- [ ] optional live smoke: `OBERON4_LIVE_BASE_URL=<base> scripts/live-daemon-smoke.sh`
+  - expect daemon-backed `endpoint test` and `chat --message` to succeed against the live endpoint
 
 ### Accounts
 - [ ] `cargo run -p oberon4-cli -- account connect --provider openai`
