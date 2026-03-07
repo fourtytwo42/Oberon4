@@ -10,9 +10,9 @@ use serde::{Deserialize, Serialize};
 use oberon4_auth::{AccountRegistry, TokenBundle};
 use oberon4_core::{
     AppConfig, ChatMessage, ChatProvider, ChatProviderKind, ConfigStore, DaemonCommand,
-    DaemonEvent, DaemonStatus, InMemoryConfigStore, InMemorySecretStore, InMemorySessionStore,
-    OAuthProvider, OAuthProviderKind, OberonError, RequestId, SecretStore, ServiceEnvelope,
-    SessionStore,
+    DaemonEvent, DaemonStatus, FileConfigStore, FileSessionStore, InMemoryConfigStore,
+    InMemorySecretStore, InMemorySessionStore, OAuthProvider, OAuthProviderKind, OberonError,
+    RequestId, SecretStore, ServiceEnvelope, SessionStore,
 };
 
 pub fn daemon_status(config: &AppConfig) -> ServiceEnvelope<String> {
@@ -151,8 +151,8 @@ pub struct DaemonApp<C, S, P, OO, AO, SS> {
 
 impl Default
     for DaemonApp<
-        InMemoryConfigStore,
-        InMemorySessionStore,
+        FileConfigStore,
+        FileSessionStore,
         oberon4_provider_openai::OpenAiCompatibleClient<oberon4_provider_openai::ReqwestTransport>,
         oberon4_auth::OpenAiOAuthAdapter,
         oberon4_auth::AnthropicOAuthAdapter,
@@ -162,7 +162,11 @@ impl Default
     fn default() -> Self {
         let config = AppConfig::default();
         Self::new(
-            DaemonRuntime::default(),
+            DaemonRuntime {
+                config_store: FileConfigStore::default(),
+                session_store: FileSessionStore::default(),
+                lifecycle: LifecycleState::Stopped,
+            },
             oberon4_provider_openai::OpenAiCompatibleClient::new(
                 config.endpoint.base_url.clone(),
                 oberon4_provider_openai::RetryPolicy::from_config(&config),
