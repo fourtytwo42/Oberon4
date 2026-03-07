@@ -97,13 +97,124 @@ Build a local-first, modular agent host with:
 - `NFR-004` Maintainability: crate-level boundaries enforced by API contracts.
 - `NFR-005` Performance: interactive TUI latency target <250ms local render path.
 - `NFR-006` Auth security: OAuth callback/state handling must fail closed on mismatch/expiry.
+- `NFR-007` Code minimization: feature delivery must prefer reuse of shared daemon/core logic over duplicated surface-specific implementations.
+- `NFR-008` Portability: platform-specific code must be isolated behind adapter boundaries so core chat/auth/config logic remains platform-neutral.
+- `NFR-009` Testability: provider, storage, and IPC boundaries must be mockable without requiring UI or network execution.
 
 ## 6. Risks and Mitigations
 - endpoint variance risk -> adapter tests + strict schema validation
 - tray cross-platform risk -> adapter trait + progressive platform rollout
 - coupling risk -> crate boundaries + contract tests
 
+## 6.1 Build Strategy
+- daemon-first architecture:
+  - daemon is the source of truth for config, accounts, sessions, provider routing, and chat execution
+  - CLI, TUI, and tray are thin clients over daemon APIs and must not duplicate business logic
+- reuse-first implementation:
+  - transplant proven Rust OAuth/account-flow components from `llmhotspot` where compatible instead of redesigning them
+  - reuse shared domain types, request envelopes, error contracts, and test fixtures across all surfaces
+- modular workspace layout:
+  - `oberon4-core`: domain models, config schema, error types, service traits
+  - `oberon4-provider-openai`: OpenAI-compatible endpoint client and request translation
+  - `oberon4-auth`: provider OAuth flows and secure token storage abstractions
+  - `oberon4-daemon`: orchestration layer and local IPC server
+  - `oberon4-cli`: command parsing and daemon client only
+  - `oberon4-tui`: terminal rendering/input and daemon client only
+  - `oberon4-tray`: platform adapter shell over daemon client only
+- abstraction rules:
+  - provider differences must be isolated behind traits such as `ChatProvider`, `OAuthProvider`, `SecretStore`, and `ConfigStore`
+  - platform differences must be isolated behind tray and IPC adapter traits
+  - network retry/timeout logic belongs in provider modules, not in TUI or CLI layers
+- minimal-code delivery rules:
+  - if logic is needed by both CLI and TUI, it must live in shared core or daemon code
+  - app surfaces may format output differently, but must call the same service operations
+  - prefer a single local IPC contract and shared command/event model over separate surface-specific APIs
+
+## 6.2 Robustness and Portability Strategy
+- use typed request/response models for provider and IPC boundaries
+- validate all user-controlled inputs at daemon/service boundaries
+- separate config storage from secret storage
+- keep platform-specific code out of core crates
+- fail cleanly on unsupported tray/platform capabilities
+- prefer Linux-first delivery, but preserve adapter boundaries for future macOS/Windows support
+
+## 6.3 Test and Reuse Strategy
+- most behavioral tests must target `oberon4-core`, `oberon4-auth`, and `oberon4-daemon`
+- CLI tests should focus on argument parsing, exit codes, and daemon-client integration
+- TUI tests should focus on command parsing and state transitions rather than terminal snapshot volume
+- provider integrations must support deterministic mock/fake implementations for unit and contract tests
+- end-to-end tests should cover:
+  - configure endpoint
+  - connect OAuth account
+  - send chat request
+  - save and load session
+- shared fixtures, fake providers, and reusable integration harnesses must be preferred over per-surface duplicated test scaffolding
+
 ## 7. Release Gate (v0.1)
 - all `AC-001.*` through `AC-009.*` are `met`
 - required test suite green
 - docs + implementation + tests synchronized
+
+## 8. Command Reference (v0.1 target)
+
+### 8.1 CLI Commands
+- `oberon4 daemon start`
+  - starts the local daemon in foreground mode for v0.1
+- `oberon4 daemon stop`
+  - requests graceful daemon shutdown through local control channel
+- `oberon4 daemon status`
+  - prints daemon status, pid when available, uptime, and endpoint health summary
+- `oberon4 tui`
+  - launches the interactive terminal UI and connects to the local daemon
+- `oberon4 config show`
+  - prints effective runtime configuration with secrets redacted
+- `oberon4 config set <key> <value>`
+  - updates a persisted configuration key
+- `oberon4 endpoint test`
+  - performs a minimal connectivity/authentication test against the configured OpenAI-compatible endpoint
+- `oberon4 chat --message <text>`
+  - runs a one-shot non-interactive chat request through the daemon
+- `oberon4 logs tail`
+  - streams recent daemon logs with correlation/request identifiers when available
+- `oberon4 doctor`
+  - runs local environment and configuration diagnostics and exits non-zero on failed checks
+
+### 8.2 Account and OAuth CLI Commands
+- `oberon4 account connect --provider <openai|anthropic>`
+  - starts browser-based OAuth connect flow for the selected provider
+- `oberon4 account list`
+  - lists known connected accounts and active/inactive state
+- `oberon4 account activate --provider <openai|anthropic> --account <id>`
+  - marks a specific provider account as the active account
+- `oberon4 account disable --provider <openai|anthropic> --account <id>`
+  - disables a connected account without deleting local metadata
+- `oberon4 account disconnect --provider <openai|anthropic> --account <id>`
+  - removes the selected connected account and associated local credentials
+
+### 8.3 TUI Commands
+- `/help`
+  - lists supported commands and key behaviors
+- `/quit`
+  - exits the TUI cleanly
+- `/status`
+  - shows daemon status, active endpoint, model, and account summary
+- `/config`
+  - shows effective runtime configuration with secrets redacted
+- `/model <name>`
+  - switches the active model for the current session
+- `/endpoint <url>`
+  - overrides endpoint base URL for the current session
+- `/system <text>`
+  - sets or replaces the current session system prompt
+- `/clear`
+  - clears the visible transcript buffer without deleting persisted session state
+- `/save <name>`
+  - saves the current session transcript and local session metadata
+- `/load <name>`
+  - loads a previously saved session transcript and metadata
+
+### 8.4 Command Contract Rules
+- CLI commands must return deterministic exit codes and sanitized errors.
+- TUI commands must fail with explicit help text when arguments are invalid or unsupported.
+- Provider-specific account commands must reject unsupported providers.
+- Secrets and tokens must never be printed by CLI or TUI output.
