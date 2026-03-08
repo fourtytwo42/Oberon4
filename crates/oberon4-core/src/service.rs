@@ -56,6 +56,7 @@ pub trait SessionStore {
     fn save_session(&mut self, session: SavedSession) -> Result<(), OberonError>;
     fn load_session(&self, session_id: &str) -> Result<SavedSession, OberonError>;
     fn list_sessions(&self) -> Result<Vec<SavedSession>, OberonError>;
+    fn delete_session(&mut self, session_id: &str) -> Result<(), OberonError>;
 }
 
 pub trait StatusProvider {

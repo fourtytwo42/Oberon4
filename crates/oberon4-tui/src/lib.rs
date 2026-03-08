@@ -708,6 +708,15 @@ impl DaemonBackedTuiApp {
         }
     }
 
+    pub fn delete_session(&self, session_id: &str) -> Result<String, OberonError> {
+        match self.client.send(&oberon4_core::DaemonCommand::DeleteSession {
+            session_id: session_id.to_string(),
+        })? {
+            oberon4_core::DaemonEvent::Ack { message } => Ok(message),
+            event => Err(protocol_error_inner(event)),
+        }
+    }
+
     pub fn list_accounts(&self) -> Result<Vec<StoredAccount>, OberonError> {
         match self
             .client
@@ -1762,6 +1771,40 @@ impl TuiShellState {
         Ok(false)
     }
 
+    fn delete_selected_session(
+        &mut self,
+        app: &mut DaemonBackedTuiApp,
+    ) -> Result<bool, OberonError> {
+        if !matches!(self.workspace, Workspace::Chat) || !matches!(self.focus, FocusTarget::List) {
+            return Ok(false);
+        }
+
+        let Some(item) = self.session_sidebar_items().get(self.session_index).copied() else {
+            return Ok(false);
+        };
+
+        let SessionSidebarItem::Saved(index) = item else {
+            self.set_activity(ActivityState::Idle, "only saved sessions can be deleted");
+            return Ok(true);
+        };
+
+        let Some(session) = self.sessions.get(index) else {
+            return Ok(false);
+        };
+        let session_id = session.id.as_str().to_string();
+        let session_title = session.title.clone();
+        let message = app.delete_session(&session_id)?;
+        self.refresh_runtime_data(app);
+        let item_count = self.session_sidebar_items().len();
+        if item_count == 0 {
+            self.session_index = 0;
+        } else if self.session_index >= item_count {
+            self.session_index = item_count.saturating_sub(1);
+        }
+        self.set_activity(ActivityState::Idle, format!("{message} ({session_title})"));
+        Ok(true)
+    }
+
     pub fn submit(&mut self, app: &mut DaemonBackedTuiApp) -> Result<(), OberonError> {
         let input = std::mem::take(&mut self.input);
         self.autocomplete = None;
@@ -2123,6 +2166,10 @@ fn run_terminal_loop(
                     KeyCode::Backspace => {
                         if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
                             shell.backspace();
+                        } else if matches!(shell.focus, FocusTarget::List)
+                            && matches!(shell.workspace, Workspace::Chat)
+                        {
+                            let _ = shell.delete_selected_session(app)?;
                         }
                     }
                     KeyCode::Tab if matches!(shell.focus, FocusTarget::Composer) => {
@@ -2204,6 +2251,9 @@ fn run_terminal_loop(
                         } else if let Some(pending) = start_async_submit(app, shell)? {
                             pending_submission = Some(pending);
                         }
+                    }
+                    KeyCode::Delete => {
+                        let _ = shell.delete_selected_session(app)?;
                     }
                     KeyCode::Esc => shell.handle_escape(),
                     _ => {}
@@ -4123,6 +4173,53 @@ mod tests {
         assert!(matches!(shell.workspace, Workspace::Chat));
         assert!(matches!(shell.focus, FocusTarget::List));
         assert_eq!(shell.session_sidebar_items().len(), 2);
+
+        let client = DaemonIpcClient::new(&socket_path);
+        let _ = client.send(&oberon4_core::DaemonCommand::Shutdown).unwrap();
+        handle.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn session_rail_delete_removes_saved_session() {
+        let socket_path = std::env::temp_dir().join(format!(
+            "oberon4-tui-delete-session-test-{}.sock",
+            std::process::id()
+        ));
+        let thread_socket = socket_path.clone();
+        let handle = thread::spawn(move || {
+            let app = DaemonApp::new(
+                DaemonRuntime::default(),
+                FakeChatProvider {
+                    reply: "daemon reply".to_string(),
+                },
+                FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
+                FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+                AccountRegistry::default(),
+                InMemorySecretStore::default(),
+                InMemoryAccountMetadataStore::default(),
+            );
+            serve_unix_socket(&thread_socket, app)
+        });
+
+        for _ in 0..20 {
+            if socket_path.exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+
+        let mut app = DaemonBackedTuiApp::new(DaemonIpcClient::new(&socket_path));
+        app.handle_command(TuiCommand::Save("demo".to_string())).unwrap();
+
+        let mut shell = TuiShellState::default();
+        shell.refresh_runtime_data(&app);
+        shell.focus = FocusTarget::List;
+        shell.session_index = 1;
+
+        let deleted = shell.delete_selected_session(&mut app).unwrap();
+        assert!(deleted);
+        assert_eq!(shell.sessions.len(), 0);
+        assert!(shell.status().contains("deleted session demo"));
 
         let client = DaemonIpcClient::new(&socket_path);
         let _ = client.send(&oberon4_core::DaemonCommand::Shutdown).unwrap();

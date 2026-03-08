@@ -117,6 +117,13 @@ impl SessionStore for InMemorySessionStore {
     fn list_sessions(&self) -> Result<Vec<SavedSession>, OberonError> {
         Ok(self.sessions.values().cloned().collect())
     }
+
+    fn delete_session(&mut self, session_id: &str) -> Result<(), OberonError> {
+        self.sessions
+            .remove(session_id)
+            .map(|_| ())
+            .ok_or_else(|| OberonError::NotFound(format!("session:{session_id}")))
+    }
 }
 
 #[cfg(test)]
@@ -175,5 +182,27 @@ mod tests {
             store.load_session("session-1").unwrap().summary.id.as_str(),
             "session-1"
         );
+    }
+
+    #[test]
+    fn session_store_deletes_saved_sessions() {
+        let mut store = InMemorySessionStore::default();
+        store
+            .save_session(SavedSession {
+                summary: SessionSummary {
+                    id: SessionId::new("session-1"),
+                    title: "Demo".to_string(),
+                    provider: ChatProviderKind::OpenAiCompatible,
+                    model: "gpt-4.1-mini".to_string(),
+                },
+                messages: vec![],
+            })
+            .unwrap();
+
+        store.delete_session("session-1").unwrap();
+        assert!(matches!(
+            store.load_session("session-1"),
+            Err(crate::OberonError::NotFound(_))
+        ));
     }
 }

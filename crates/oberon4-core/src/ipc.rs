@@ -26,6 +26,9 @@ pub enum DaemonCommand {
         session_id: String,
     },
     ListSessions,
+    DeleteSession {
+        session_id: String,
+    },
     ConnectAccount {
         provider: OAuthProviderKind,
     },
@@ -171,6 +174,17 @@ mod tests {
     fn save_config_command_embeds_shared_config() {
         let command = DaemonCommand::SaveConfig {
             config: AppConfig::default(),
+        };
+
+        let encoded = serde_json::to_string(&command).unwrap();
+        let decoded: DaemonCommand = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, command);
+    }
+
+    #[test]
+    fn delete_session_command_round_trips() {
+        let command = DaemonCommand::DeleteSession {
+            session_id: "session-1".to_string(),
         };
 
         let encoded = serde_json::to_string(&command).unwrap();

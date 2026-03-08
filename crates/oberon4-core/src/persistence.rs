@@ -113,6 +113,15 @@ impl SessionStore for FileSessionStore {
         sessions.sort_by(|left, right| left.summary.id.as_str().cmp(right.summary.id.as_str()));
         Ok(sessions)
     }
+
+    fn delete_session(&mut self, session_id: &str) -> Result<(), OberonError> {
+        let path = self.session_path(session_id);
+        if !path.exists() {
+            return Err(OberonError::NotFound(format!("session:{session_id}")));
+        }
+        fs::remove_file(&path)
+            .map_err(|err| OberonError::Storage(format!("session delete failed: {err}")))
+    }
 }
 
 pub fn default_data_dir() -> PathBuf {
@@ -190,6 +199,11 @@ mod tests {
 
         assert_eq!(store.load_session("demo").unwrap(), session);
         assert_eq!(store.list_sessions().unwrap().len(), 1);
+        store.delete_session("demo").unwrap();
+        assert!(matches!(
+            store.load_session("demo"),
+            Err(crate::OberonError::NotFound(_))
+        ));
         let _ = fs::remove_dir_all(dir);
     }
 

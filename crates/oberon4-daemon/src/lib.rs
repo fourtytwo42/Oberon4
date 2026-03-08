@@ -361,6 +361,15 @@ where
                 },
                 should_shutdown: false,
             }),
+            DaemonCommand::DeleteSession { session_id } => {
+                self.runtime.session_store.delete_session(&session_id)?;
+                Ok(CommandOutcome {
+                    event: DaemonEvent::Ack {
+                        message: format!("deleted session {session_id}"),
+                    },
+                    should_shutdown: false,
+                })
+            }
             DaemonCommand::ConnectAccount { provider } => {
                 let url = self.oauth_provider(provider)?.start_connect_flow()?;
                 let bundle = TokenBundle {
@@ -697,7 +706,7 @@ mod tests {
     use oberon4_core::{
         AppConfig, ChatMessage, ChatProviderKind, ChatRole, DaemonCommand, DaemonEvent,
         FakeChatProvider, FakeOAuthProvider, FileConfigStore, FileSecretStore, FileSessionStore,
-        InMemorySecretStore, OAuthProviderKind, SavedSession, SecretStore, SessionId,
+        InMemorySecretStore, OAuthProviderKind, OberonError, SavedSession, SecretStore, SessionId,
         SessionSummary,
     };
     use oberon4_provider_openai::{FakeTransport, OpenAiCompatibleClient, RetryPolicy};
@@ -944,6 +953,22 @@ mod tests {
             DaemonEvent::SessionLoaded { session: loaded } => assert_eq!(loaded, session),
             other => panic!("unexpected event: {other:?}"),
         }
+
+        let deleted = app
+            .handle_command(DaemonCommand::DeleteSession {
+                session_id: "session-1".to_string(),
+            })
+            .unwrap()
+            .event;
+        match deleted {
+            DaemonEvent::Ack { message } => assert_eq!(message, "deleted session session-1"),
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let missing = app.handle_command(DaemonCommand::LoadSession {
+            session_id: "session-1".to_string(),
+        });
+        assert!(matches!(missing, Err(OberonError::NotFound(_))));
     }
 
     #[test]
