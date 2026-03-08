@@ -11,8 +11,9 @@ use oberon4_auth::{AccountRegistry, AnthropicOAuthAdapter, OpenAiOAuthAdapter, T
 use oberon4_core::{
     AppConfig, ChatMessage, ChatProvider, ChatRole, ChatToolCallDelta, InMemoryConfigStore,
     InMemorySecretStore, InMemorySessionStore, OAuthProvider, OAuthProviderKind, OberonError,
+    default_data_dir,
 };
-use oberon4_daemon::{DaemonIpcClient, DaemonRuntime, LogLevel, log_entry};
+use oberon4_daemon::{DaemonIpcClient, DaemonRuntime, LogLevel, default_socket_path, log_entry};
 use oberon4_provider_openai::{FakeTransport, OpenAiCompatibleClient, RetryPolicy};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,6 +91,23 @@ pub struct CliApp {
     anthropic_oauth: AnthropicOAuthAdapter,
     accounts: AccountRegistry,
     secrets: InMemorySecretStore,
+}
+
+#[derive(Debug, Clone)]
+struct DoctorSnapshot {
+    running: bool,
+    ready: bool,
+    endpoint_base_url: String,
+    model: String,
+    endpoint_check: String,
+    error: Option<String>,
+    exit_code: i32,
+    config_path: String,
+    data_dir: String,
+    socket_path: String,
+    api_key_env: Option<String>,
+    config_exists: bool,
+    daemon_reachable: bool,
 }
 
 impl Default for CliApp {
@@ -172,17 +190,35 @@ impl CliApp {
             )?)),
             CliCommand::Doctor { json } => {
                 let health = self.runtime.health()?;
+                let data_dir = default_data_dir();
+                let config_path = data_dir.join("config.toml");
+                let config = self.runtime.load_config()?;
+                let snapshot = DoctorSnapshot {
+                    running: health.running,
+                    ready: health.ready,
+                    endpoint_base_url: health.endpoint_base_url.clone(),
+                    model: health.model.clone(),
+                    endpoint_check: if health.ready {
+                        "pass".to_string()
+                    } else {
+                        "fail".to_string()
+                    },
+                    error: if health.ready {
+                        None
+                    } else {
+                        Some("daemon is not running".to_string())
+                    },
+                    exit_code: if health.ready { 0 } else { 3 },
+                    config_path: config_path.display().to_string(),
+                    data_dir: data_dir.display().to_string(),
+                    socket_path: default_socket_path().display().to_string(),
+                    api_key_env: config.endpoint.api_key_env.clone(),
+                    config_exists: config_path.exists(),
+                    daemon_reachable: health.running,
+                };
                 if !health.ready {
                     return if json {
-                        doctor_json_output(
-                            health.running,
-                            health.ready,
-                            &health.endpoint_base_url,
-                            &health.model,
-                            "fail",
-                            Some("daemon is not running".to_string()),
-                            3,
-                        )
+                        doctor_json_output(&snapshot)
                     } else {
                         Ok(CliOutput::error("daemon is not running", 3))
                     };
@@ -191,25 +227,14 @@ impl CliApp {
                     .provider_client
                     .endpoint_health(Some(&health.endpoint_base_url), &health.model)
                 {
-                    Ok(()) if json => doctor_json_output(
-                        health.running,
-                        health.ready,
-                        &health.endpoint_base_url,
-                        &health.model,
-                        "pass",
-                        None,
-                        0,
-                    ),
+                    Ok(()) if json => doctor_json_output(&snapshot),
                     Ok(()) => Ok(CliOutput::success("doctor passed")),
-                    Err(err) if json => doctor_json_output(
-                        health.running,
-                        health.ready,
-                        &health.endpoint_base_url,
-                        &health.model,
-                        "fail",
-                        Some(err.to_string()),
-                        3,
-                    ),
+                    Err(err) if json => doctor_json_output(&DoctorSnapshot {
+                        endpoint_check: "fail".to_string(),
+                        error: Some(err.to_string()),
+                        exit_code: 3,
+                        ..snapshot
+                    }),
                     Err(err) => Err(err),
                 }
             }
@@ -354,88 +379,106 @@ fn execute_via_daemon(command: CliCommand) -> Result<CliOutput, OberonError> {
         )?)),
         CliCommand::Doctor { json } => {
             let default = AppConfig::default();
+            let data_dir = default_data_dir();
+            let config_path = data_dir.join("config.toml");
+            let socket_path = default_socket_path();
+            let default_snapshot = DoctorSnapshot {
+                running: false,
+                ready: false,
+                endpoint_base_url: default.endpoint.base_url.clone(),
+                model: default.endpoint.model.clone(),
+                endpoint_check: "fail".to_string(),
+                error: None,
+                exit_code: 3,
+                config_path: config_path.display().to_string(),
+                data_dir: data_dir.display().to_string(),
+                socket_path: socket_path.display().to_string(),
+                api_key_env: default.endpoint.api_key_env.clone(),
+                config_exists: config_path.exists(),
+                daemon_reachable: false,
+            };
             if let Err(err) = ensure_daemon_running() {
                 return if json {
-                    doctor_json_output(
-                        false,
-                        false,
-                        &default.endpoint.base_url,
-                        &default.endpoint.model,
-                        "fail",
-                        Some(err.to_string()),
-                        3,
-                    )
+                    doctor_json_output(&DoctorSnapshot {
+                        error: Some(err.to_string()),
+                        ..default_snapshot
+                    })
                 } else {
                     Err(err)
                 };
             }
 
             let client = daemon_client()?;
+            let loaded_config = match client.send(&oberon4_core::DaemonCommand::LoadConfig) {
+                Ok(oberon4_core::DaemonEvent::ConfigLoaded { config }) => Some(config),
+                Ok(_) => None,
+                Err(_) => None,
+            };
             let status = match client.send(&oberon4_core::DaemonCommand::GetStatus) {
                 Ok(oberon4_core::DaemonEvent::Status { status }) => status,
                 Ok(event) => {
                     return if json {
-                        doctor_json_output(
-                            false,
-                            false,
-                            &default.endpoint.base_url,
-                            &default.endpoint.model,
-                            "fail",
-                            Some(
+                        doctor_json_output(&DoctorSnapshot {
+                            error: Some(
                                 OberonError::Storage(format!(
                                     "unexpected daemon response: {event:?}"
                                 ))
                                 .to_string(),
                             ),
-                            3,
-                        )
+                            ..default_snapshot
+                        })
                     } else {
                         daemon_protocol_error(event)
                     };
                 }
                 Err(err) => {
                     return if json {
-                        doctor_json_output(
-                            false,
-                            false,
-                            &default.endpoint.base_url,
-                            &default.endpoint.model,
-                            "fail",
-                            Some(err.to_string()),
-                            3,
-                        )
+                        doctor_json_output(&DoctorSnapshot {
+                            error: Some(err.to_string()),
+                            ..default_snapshot
+                        })
                     } else {
                         Err(err)
                     };
                 }
             };
+            let config = loaded_config.unwrap_or_else(|| default.clone());
+            let base_snapshot = DoctorSnapshot {
+                running: status.running,
+                ready: status.running,
+                endpoint_base_url: status.endpoint_base_url.clone(),
+                model: status.model.clone(),
+                endpoint_check: if status.running {
+                    "pass".to_string()
+                } else {
+                    "fail".to_string()
+                },
+                error: if status.running {
+                    None
+                } else {
+                    Some("daemon is not running".to_string())
+                },
+                exit_code: if status.running { 0 } else { 3 },
+                config_path: config_path.display().to_string(),
+                data_dir: data_dir.display().to_string(),
+                socket_path: socket_path.display().to_string(),
+                api_key_env: config.endpoint.api_key_env.clone(),
+                config_exists: config_path.exists(),
+                daemon_reachable: true,
+            };
 
             if !status.running {
                 return if json {
-                    doctor_json_output(
-                        status.running,
-                        status.running,
-                        &status.endpoint_base_url,
-                        &status.model,
-                        "fail",
-                        Some("daemon is not running".to_string()),
-                        3,
-                    )
+                    doctor_json_output(&base_snapshot)
                 } else {
                     Ok(CliOutput::error("daemon is not running", 3))
                 };
             }
 
             match client.send(&oberon4_core::DaemonCommand::EndpointHealth) {
-                Ok(oberon4_core::DaemonEvent::Ack { message: _ }) if json => doctor_json_output(
-                    status.running,
-                    status.running,
-                    &status.endpoint_base_url,
-                    &status.model,
-                    "pass",
-                    None,
-                    0,
-                ),
+                Ok(oberon4_core::DaemonEvent::Ack { message: _ }) if json => {
+                    doctor_json_output(&base_snapshot)
+                }
                 Ok(oberon4_core::DaemonEvent::Ack { message }) => {
                     Ok(CliOutput::success(if message == "endpoint test passed" {
                         "doctor passed".to_string()
@@ -447,30 +490,24 @@ fn execute_via_daemon(command: CliCommand) -> Result<CliOutput, OberonError> {
                     let err =
                         OberonError::Storage(format!("unexpected daemon response: {event:?}"));
                     if json {
-                        doctor_json_output(
-                            status.running,
-                            status.running,
-                            &status.endpoint_base_url,
-                            &status.model,
-                            "fail",
-                            Some(err.to_string()),
-                            3,
-                        )
+                        doctor_json_output(&DoctorSnapshot {
+                            endpoint_check: "fail".to_string(),
+                            error: Some(err.to_string()),
+                            exit_code: 3,
+                            ..base_snapshot
+                        })
                     } else {
                         daemon_protocol_error(event)
                     }
                 }
                 Err(err) => {
                     if json {
-                        doctor_json_output(
-                            status.running,
-                            status.running,
-                            &status.endpoint_base_url,
-                            &status.model,
-                            "fail",
-                            Some(err.to_string()),
-                            3,
-                        )
+                        doctor_json_output(&DoctorSnapshot {
+                            endpoint_check: "fail".to_string(),
+                            error: Some(err.to_string()),
+                            exit_code: 3,
+                            ..base_snapshot
+                        })
                     } else {
                         Err(err)
                     }
@@ -813,29 +850,27 @@ fn render_tool_delta(
     )
 }
 
-fn doctor_json_output(
-    running: bool,
-    ready: bool,
-    endpoint_base_url: &str,
-    model: &str,
-    endpoint_check: &str,
-    error: Option<String>,
-    exit_code: i32,
-) -> Result<CliOutput, OberonError> {
+fn doctor_json_output(snapshot: &DoctorSnapshot) -> Result<CliOutput, OberonError> {
     let stdout = serde_json::to_string_pretty(&serde_json::json!({
-        "running": running,
-        "ready": ready,
-        "endpoint_base_url": endpoint_base_url,
-        "model": model,
-        "endpoint_check": endpoint_check,
-        "error": error,
+        "running": snapshot.running,
+        "ready": snapshot.ready,
+        "endpoint_base_url": snapshot.endpoint_base_url,
+        "model": snapshot.model,
+        "endpoint_check": snapshot.endpoint_check,
+        "error": snapshot.error,
+        "config_path": snapshot.config_path,
+        "data_dir": snapshot.data_dir,
+        "socket_path": snapshot.socket_path,
+        "api_key_env": snapshot.api_key_env,
+        "config_exists": snapshot.config_exists,
+        "daemon_reachable": snapshot.daemon_reachable,
     }))
     .map_err(|err| OberonError::Storage(err.to_string()))?;
 
     Ok(CliOutput {
         stdout,
         stderr: String::new(),
-        exit_code,
+        exit_code: snapshot.exit_code,
         stdout_emitted: false,
         stderr_emitted: false,
     })
@@ -1085,8 +1120,8 @@ mod tests {
     use oberon4_daemon::{DaemonApp, DaemonIpcClient, DaemonRuntime, serve_unix_socket};
 
     use super::{
-        BinaryLaunchTarget, CliApp, CliCommand, parse_command, resolve_binary_launch_target,
-        run_cli,
+        BinaryLaunchTarget, CliApp, CliCommand, default_data_dir, default_socket_path,
+        parse_command, resolve_binary_launch_target, run_cli,
     };
 
     fn env_lock() -> &'static Mutex<()> {
@@ -1171,12 +1206,25 @@ mod tests {
         let mut app = CliApp::default();
         let output = app.run(CliCommand::Doctor { json: true });
         let value: serde_json::Value = serde_json::from_str(&output.stdout).unwrap();
+        let expected_data_dir = default_data_dir();
+        let expected_config_path = expected_data_dir.join("config.toml");
+        let expected_socket_path = default_socket_path();
 
         assert_eq!(output.exit_code, 3);
         assert_eq!(value["running"], false);
         assert_eq!(value["ready"], false);
         assert_eq!(value["endpoint_check"], "fail");
         assert_eq!(value["error"], "daemon is not running");
+        assert_eq!(value["data_dir"], expected_data_dir.display().to_string());
+        assert_eq!(value["config_path"], expected_config_path.display().to_string());
+        assert_eq!(value["socket_path"], expected_socket_path.display().to_string());
+        assert_eq!(value["api_key_env"], "OPENAI_API_KEY");
+        assert_eq!(value["config_exists"], expected_config_path.exists());
+        assert_eq!(value["daemon_reachable"], false);
+        assert!(
+            !output.stdout.contains("test-key"),
+            "doctor JSON must not leak secret values"
+        );
     }
 
     #[test]
@@ -1191,6 +1239,8 @@ mod tests {
         assert_eq!(value["ready"], true);
         assert_eq!(value["endpoint_check"], "pass");
         assert!(value["error"].is_null());
+        assert_eq!(value["api_key_env"], "OPENAI_API_KEY");
+        assert_eq!(value["daemon_reachable"], true);
     }
 
     #[test]
@@ -1355,6 +1405,18 @@ mod tests {
         assert_eq!(value["ready"], true);
         assert_eq!(value["endpoint_check"], "pass");
         assert!(value["error"].is_null());
+        assert_eq!(value["api_key_env"], "OPENAI_API_KEY");
+        let expected_data_dir = std::env::var_os("OBERON4_DATA_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(default_data_dir);
+        let expected_config_path = expected_data_dir.join("config.toml");
+        assert_eq!(value["config_exists"], expected_config_path.exists());
+        assert_eq!(value["daemon_reachable"], true);
+        assert_eq!(
+            value["socket_path"],
+            socket_path.display().to_string(),
+            "doctor JSON should report the effective daemon socket path"
+        );
 
         let stop = DaemonIpcClient::new(&socket_path)
             .send(&DaemonCommand::Shutdown)
@@ -1391,6 +1453,7 @@ mod tests {
         assert_eq!(value["running"], false);
         assert_eq!(value["ready"], false);
         assert_eq!(value["endpoint_check"], "fail");
+        assert_eq!(value["daemon_reachable"], false);
         assert!(
             value["error"]
                 .as_str()
