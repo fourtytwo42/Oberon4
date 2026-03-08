@@ -13,7 +13,7 @@ use oberon4_core::{
     OberonError, PendingOAuthFlow, SecretStore, StoredAccount, TokenBundle,
 };
 
-pub const OPENAI_CLIENT_ID: &str = "openai-desktop";
+pub const OPENAI_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 pub const OPENAI_AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
 pub const OPENAI_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 pub const OPENAI_SCOPE: &str = "openid profile email offline_access";
@@ -348,13 +348,14 @@ impl OAuthFlowManager {
         let expires_at_unix = now_unix.saturating_add(self.config.state_ttl.as_secs());
         let return_to = sanitize_return_to(return_to)?;
         let authorization_url = format!(
-            "{}?client_id={}&response_type=code&redirect_uri={}&scope={}&state={}&code_challenge={}&code_challenge_method=S256{}",
+            "{}?client_id={}&response_type=code&redirect_uri={}&scope={}&state={}&code_challenge={}&code_challenge_method=S256{}{}",
             self.config.authorize_url,
             url_encode(&self.config.client_id),
             url_encode(&redirect_uri),
             url_encode(&self.config.scope),
             url_encode(&oauth_state),
             url_encode(&code_challenge),
+            provider_authorization_extras(self.config.provider),
             if let Some(return_to) = return_to.as_deref() {
                 format!("&return_to={}", url_encode(return_to))
             } else {
@@ -630,6 +631,15 @@ fn provider_label(provider: OAuthProviderKind) -> &'static str {
     }
 }
 
+fn provider_authorization_extras(provider: OAuthProviderKind) -> &'static str {
+    match provider {
+        OAuthProviderKind::OpenAi => {
+            "&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=pi"
+        }
+        OAuthProviderKind::Anthropic => "",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -690,8 +700,23 @@ mod tests {
             .unwrap();
 
         assert_eq!(start.provider, OAuthProviderKind::OpenAi);
+        assert!(start.authorization_url.contains(&format!(
+            "client_id={}",
+            super::OPENAI_CLIENT_ID
+        )));
         assert!(start.authorization_url.contains("code_challenge="));
         assert!(start.authorization_url.contains("state="));
+        assert!(
+            start
+                .authorization_url
+                .contains("id_token_add_organizations=true")
+        );
+        assert!(
+            start
+                .authorization_url
+                .contains("codex_cli_simplified_flow=true")
+        );
+        assert!(start.authorization_url.contains("originator=pi"));
         assert!(
             start
                 .authorization_url
@@ -1010,7 +1035,10 @@ mod tests {
             let request = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
             assert!(request.starts_with("POST /token HTTP/1.1"));
             assert!(request.contains("grant_type=authorization_code"));
-            assert!(request.contains("client_id=openai-desktop"));
+            assert!(request.contains(&format!(
+                "client_id={}",
+                super::OPENAI_CLIENT_ID
+            )));
             assert!(request.contains("code=code-123"));
             assert!(request.contains("code_verifier=verifier-123"));
 
