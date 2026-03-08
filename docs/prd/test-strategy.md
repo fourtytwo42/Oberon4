@@ -24,10 +24,12 @@ Gate behavior:
 - optional live verification remains opt-in through `RUN_LIVE_ENDPOINT_SMOKE=1` and `RUN_LIVE_DAEMON_SMOKE=1`
 - optional PTY TUI verification remains opt-in through `RUN_TUI_PTY_SMOKE=1`
 - optional live repair-loop verification remains opt-in through `RUN_LIVE_LOCAL_SMOKE=1 bash scripts/repair-loop.sh`
+- optional remediation remains opt-in through `RUN_REPAIR_REMEDIATE=1 bash scripts/repair-loop.sh`
 - machine-readable diagnostics are available through `oberon4 doctor --json` and should be used by automation when diagnosis output needs stable parsing; the JSON now includes runtime metadata (`config_path`, `data_dir`, `socket_path`, `api_key_env`, `config_exists`, `daemon_reachable`) plus control-plane checks (`version_check`, `models_check`, `auth_check`, `diagnostics_check`, `available_models`, `endpoint_version`, `auth_summary`, `diagnostics_summary`, `last_error`)
 - when `endpoint.api_key_env` is configured and the shell env is unset, `doctor` and `doctor --json` should best-effort materialize `env.<api_key_env>` from the local Oberon4 secret store for the current process only
 - failed gate or local-live runs write a troubleshooting bundle under `artifacts/failures/<timestamp>-<entrypoint>-<pid>/`
 - repair-loop runs write machine-readable stage logs and `summary.json` under `artifacts/repair-loop/<timestamp>-<pid>/`
+- failure bundles now include `logs-tail.txt`, `request-summary.txt`, and `evidence-summary.json` in addition to the existing doctor/config/runtime artifacts
 
 ## 2.1 Optional Live Hotspot Smoke
 Use this when a real LLM Hotspot universal endpoint is available and you want live-provider evidence in addition to deterministic tests.
@@ -57,6 +59,7 @@ Rules:
 - prefer `scripts/live-local-smoke.sh` when validating the known local LLM Hotspot environment because it also checks `doctor --json`, requires control-plane checks to pass, writes a machine-readable run summary, and can source the configured bearer env from the local Oberon4 secret store
 - if the gate or local live wrapper fails, inspect the emitted bundle in `artifacts/failures/` before re-running so diagnosis uses the original failure context
 - prefer `scripts/repair-loop.sh` as the first local recovery command because it runs `doctor --json`, the strict gate, PTY smoke, and optionally the live-local wrapper in one fixed order
+- if the initial `doctor --json` stage fails and local recovery is appropriate, use `RUN_REPAIR_REMEDIATE=1 bash scripts/repair-loop.sh` to attempt a local rebuild plus daemon restart before re-running diagnosis
 - use `scripts/prune-artifacts.sh --dry-run` to review stale runtime evidence before removing old bundles
 
 ## 3. Coverage Expectations by Requirement
@@ -77,3 +80,4 @@ Rules:
 - include command outputs for required test scopes
 - treat `.live-manual/`, `artifacts/failures/`, `artifacts/repair-loop/`, and `artifacts/live-local-smoke/` as ephemeral runtime evidence, not review artifacts to commit
 - config, session, and secret-store changes require fixture-backed compatibility coverage for additive legacy shapes
+- account metadata persistence changes require fixture-backed compatibility coverage for additive legacy registry shapes

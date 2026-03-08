@@ -52,8 +52,54 @@ cat > "${MOCK_BIN}/cargo" <<'SH'
 #!/usr/bin/bash
 set -euo pipefail
 ORDER_FILE="${ORDER_FILE:?}"
+DOCTOR_COUNTER_FILE="${DOCTOR_COUNTER_FILE:?}"
+count_doctor_call() {
+  local count=0
+  if [[ -f "${DOCTOR_COUNTER_FILE}" ]]; then
+    count="$(cat "${DOCTOR_COUNTER_FILE}")"
+  fi
+  count="$((count + 1))"
+  printf '%s' "${count}" > "${DOCTOR_COUNTER_FILE}"
+  printf '%s' "${count}"
+}
+if [[ "${1:-}" == "build" ]]; then
+  printf 'remediation_build\n' >>"${ORDER_FILE}"
+  if [[ "${MOCK_REMEDIATE_BUILD_FAIL:-0}" == "1" ]]; then
+    echo "mock remediation build failed" >&2
+    exit 1
+  fi
+  echo "mock build ok"
+  exit 0
+fi
+if [[ "${1:-}" == "run" && "${2:-}" == "-p" && "${3:-}" == "oberon4-cli" && "${4:-}" == "--" && "${5:-}" == "daemon" ]]; then
+  case "${6:-}" in
+    stop)
+      printf 'remediation_daemon_stop\n' >>"${ORDER_FILE}"
+      if [[ "${MOCK_REMEDIATE_STOP_FAIL:-0}" == "1" ]]; then
+        echo "mock daemon stop failed" >&2
+        exit 1
+      fi
+      echo "daemon stopped"
+      exit 0
+      ;;
+    start)
+      printf 'remediation_daemon_start\n' >>"${ORDER_FILE}"
+      if [[ "${MOCK_REMEDIATE_START_FAIL:-0}" == "1" ]]; then
+        echo "mock daemon start failed" >&2
+        exit 1
+      fi
+      echo "daemon started"
+      exit 0
+      ;;
+  esac
+fi
 if [[ "${1:-}" == "run" && "${2:-}" == "-p" && "${3:-}" == "oberon4-cli" && "${4:-}" == "--" && "${5:-}" == "doctor" && "${6:-}" == "--json" ]]; then
   printf 'doctor_json\n' >>"${ORDER_FILE}"
+  call_number="$(count_doctor_call)"
+  if [[ "${MOCK_DOCTOR_FAIL_ONCE:-0}" == "1" && "${call_number}" == "1" ]]; then
+    echo '{"running":false,"ready":false,"endpoint_check":"fail","error":"mock-doctor-fail-once","version_check":"fail","models_check":"skip","auth_check":"skip","diagnostics_check":"skip"}'
+    exit 1
+  fi
   if [[ "${MOCK_DOCTOR_FAIL:-0}" == "1" ]]; then
     echo '{"running":false,"ready":false,"endpoint_check":"fail","error":"mock-doctor-fail","version_check":"fail","models_check":"skip","auth_check":"skip","diagnostics_check":"skip"}'
     exit 1
@@ -94,6 +140,12 @@ switch (expr) {
   case "failure_bundle_path":
     value = summary.failure_bundle_path;
     break;
+  case "remediation_attempted":
+    value = summary.remediation_attempted;
+    break;
+  case "remediation_status":
+    value = summary.remediation_status;
+    break;
   case "stages.doctor_json":
     value = summary.stages.find((s) => s.name === "doctor_json")?.status;
     break;
@@ -121,8 +173,10 @@ run_repair() {
   local output_file="$1"
   shift
   : > "${ORDER_FILE}"
+  printf '0' > "${TMP_DIR}/doctor-count"
   env PATH="${MOCK_BIN}:$PATH" \
     ORDER_FILE="${ORDER_FILE}" \
+    DOCTOR_COUNTER_FILE="${TMP_DIR}/doctor-count" \
     REPAIR_LOOP_LOG_DIR="${LOG_ROOT}" \
     "$@" bash "${REPAIR_SCRIPT}" >"${output_file}" 2>&1
 }
@@ -144,6 +198,8 @@ assert_contains "${ORDER_FILE}" "oberon4_gate"
 assert_contains "${ORDER_FILE}" "tui_pty_smoke"
 [[ "$(summary_value "${SUCCESS_SUMMARY}" status)" == "pass" ]] || exit 1
 [[ "$(summary_value "${SUCCESS_SUMMARY}" run_live_local_smoke)" == "false" ]] || exit 1
+[[ "$(summary_value "${SUCCESS_SUMMARY}" remediation_attempted)" == "false" ]] || exit 1
+[[ "$(summary_value "${SUCCESS_SUMMARY}" remediation_status)" == "not_requested" ]] || exit 1
 [[ "$(summary_value "${SUCCESS_SUMMARY}" stages.doctor_json)" == "pass" ]] || exit 1
 [[ "$(summary_value "${SUCCESS_SUMMARY}" stages.oberon4_gate)" == "pass" ]] || exit 1
 [[ "$(summary_value "${SUCCESS_SUMMARY}" stages.tui_pty_smoke)" == "pass" ]] || exit 1
@@ -193,5 +249,33 @@ DOCTOR_FAIL_SUMMARY="${DOCTOR_FAIL_RUN_DIR}/summary.json"
 [[ "$(summary_value "${DOCTOR_FAIL_SUMMARY}" stages.oberon4_gate)" == "pending" ]] || exit 1
 [[ "$(summary_value "${DOCTOR_FAIL_SUMMARY}" failure_bundle_path)" == "null" ]] || exit 1
 assert_contains "${DOCTOR_FAIL_OUTPUT}" "[repair-loop] stage=doctor_json status=fail log=${DOCTOR_FAIL_RUN_DIR}/doctor_json.log"
+
+REMEDIATE_SUCCESS_OUTPUT="${TMP_DIR}/remediate-success.out"
+run_repair "${REMEDIATE_SUCCESS_OUTPUT}" RUN_REPAIR_REMEDIATE=1 MOCK_DOCTOR_FAIL_ONCE=1
+REMEDIATE_SUCCESS_RUN_DIR="$(latest_run_dir)"
+REMEDIATE_SUCCESS_SUMMARY="${REMEDIATE_SUCCESS_RUN_DIR}/summary.json"
+[[ -f "${REMEDIATE_SUCCESS_RUN_DIR}/remediation.log" ]] || { echo "missing remediation.log" >&2; exit 1; }
+[[ "$(summary_value "${REMEDIATE_SUCCESS_SUMMARY}" remediation_attempted)" == "true" ]] || exit 1
+[[ "$(summary_value "${REMEDIATE_SUCCESS_SUMMARY}" remediation_status)" == "pass" ]] || exit 1
+[[ "$(summary_value "${REMEDIATE_SUCCESS_SUMMARY}" stages.doctor_json)" == "pass" ]] || exit 1
+assert_contains "${REMEDIATE_SUCCESS_OUTPUT}" "[repair-loop] stage=doctor_json status=pass remediation=pass"
+assert_contains "${ORDER_FILE}" "remediation_build"
+assert_contains "${ORDER_FILE}" "remediation_daemon_stop"
+assert_contains "${ORDER_FILE}" "remediation_daemon_start"
+assert_contains "${REMEDIATE_SUCCESS_RUN_DIR}/remediation.log" "[repair-loop] remediation step=build"
+assert_contains "${REMEDIATE_SUCCESS_RUN_DIR}/remediation.log" "[repair-loop] remediation step=doctor_json"
+
+REMEDIATE_FAIL_OUTPUT="${TMP_DIR}/remediate-fail.out"
+if run_repair "${REMEDIATE_FAIL_OUTPUT}" RUN_REPAIR_REMEDIATE=1 MOCK_DOCTOR_FAIL=1 MOCK_REMEDIATE_START_FAIL=1; then
+  echo "expected repair loop failure when remediation fails" >&2
+  exit 1
+fi
+REMEDIATE_FAIL_RUN_DIR="$(latest_run_dir)"
+REMEDIATE_FAIL_SUMMARY="${REMEDIATE_FAIL_RUN_DIR}/summary.json"
+[[ "$(summary_value "${REMEDIATE_FAIL_SUMMARY}" remediation_attempted)" == "true" ]] || exit 1
+[[ "$(summary_value "${REMEDIATE_FAIL_SUMMARY}" remediation_status)" == "fail" ]] || exit 1
+[[ "$(summary_value "${REMEDIATE_FAIL_SUMMARY}" stages.doctor_json)" == "fail" ]] || exit 1
+assert_contains "${REMEDIATE_FAIL_OUTPUT}" "[repair-loop] stage=doctor_json status=fail log=${REMEDIATE_FAIL_RUN_DIR}/doctor_json.log"
+assert_contains "${REMEDIATE_FAIL_RUN_DIR}/remediation.log" "[repair-loop] remediation step=daemon_start"
 
 echo "test-repair-loop.sh: PASS"

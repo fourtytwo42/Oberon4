@@ -17,6 +17,7 @@ Use this checklist only after automated gates through `EG-P8` are green.
 ## Automated Preconditions
 - [ ] `bash scripts/repair-loop.sh`
   - if this fails, inspect `artifacts/repair-loop/<timestamp>-<pid>/summary.json`
+  - inspect any referenced `failure_bundle_path` before reproducing manually
 - [ ] `GATE_MODE=strict bash scripts/oberon4-gate.sh`
   - if this fails, inspect `artifacts/failures/<timestamp>-oberon4-gate-<pid>/`
 - [ ] `cargo run -p oberon4-cli -- doctor --json`
@@ -28,6 +29,8 @@ Use this checklist only after automated gates through `EG-P8` are green.
   - if this fails, inspect `artifacts/failures/<timestamp>-live-local-smoke-<pid>/`
 - [ ] `RUN_LIVE_LOCAL_SMOKE=1 bash scripts/repair-loop.sh`
   - if this fails, inspect `artifacts/repair-loop/<timestamp>-<pid>/summary.json` and the referenced `failure_bundle_path`
+- [ ] optional local remediation: `RUN_REPAIR_REMEDIATE=1 bash scripts/repair-loop.sh`
+  - use this only after diagnosis-only repair fails and local restart/rebuild is acceptable
 
 ## Manual Smoke Flow
 ### CLI
@@ -76,4 +79,5 @@ Use this checklist only after automated gates through `EG-P8` are green.
 - [ ] any defects discovered are recorded before release
 - [ ] any failed automated precondition has an associated bundle in `artifacts/failures/` for follow-up diagnosis
 - [ ] failed bundles include `daemon-runtime.txt` and any available `daemon-out.log` / `daemon-err.log` before manual daemon investigation starts
+- [ ] failed bundles include `logs-tail.txt`, `request-summary.txt`, and `evidence-summary.json` before manual log hunting starts
 - [ ] runtime evidence directories (`.live-manual/`, `artifacts/failures/`, `artifacts/repair-loop/`, `artifacts/live-local-smoke/`) are treated as ephemeral and not staged for release commits
