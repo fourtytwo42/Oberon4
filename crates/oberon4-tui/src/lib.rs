@@ -4067,7 +4067,7 @@ pub fn parse_tui_command(input: &str) -> Result<TuiCommand, OberonError> {
         "/quit" => Ok(TuiCommand::Quit),
         "/status" => Ok(TuiCommand::Status),
         "/sessions" => Ok(TuiCommand::Sessions),
-        "/settings" | "/setteings" => Ok(TuiCommand::Settings),
+        "/settings" => Ok(TuiCommand::Settings),
         "/accounts" => Ok(TuiCommand::Accounts),
         "/diagnostics" => Ok(TuiCommand::Diagnostics),
         "/more" => Ok(TuiCommand::More),
@@ -4079,9 +4079,7 @@ pub fn parse_tui_command(input: &str) -> Result<TuiCommand, OberonError> {
         "/save" => require_argument(rest, "/save").map(TuiCommand::Save),
         "/load" => require_argument(rest, "/load").map(TuiCommand::Load),
         "/fork" => require_argument(rest, "/fork").map(TuiCommand::Fork),
-        _ => Err(OberonError::Validation(
-            "unsupported TUI command. Use /help".to_string(),
-        )),
+        _ => Err(OberonError::Validation(unsupported_command_message(command))),
     }
 }
 
@@ -4107,6 +4105,63 @@ fn canonical_tui_command(command: &str) -> &str {
         "/fork" | "/copy" => "/fork",
         _ => command,
     }
+}
+
+fn unsupported_command_message(command: &str) -> String {
+    if let Some(suggestion) = suggest_tui_command(command) {
+        format!("unsupported TUI command. Did you mean {suggestion}? Use /help")
+    } else {
+        "unsupported TUI command. Use /help".to_string()
+    }
+}
+
+fn suggest_tui_command(command: &str) -> Option<&'static str> {
+    let normalized = command.trim().to_ascii_lowercase();
+    if !normalized.starts_with('/') {
+        return None;
+    }
+
+    let mut best: Option<(&'static str, usize)> = None;
+    for (candidate, _) in COMMAND_CATALOG {
+        let distance = edit_distance(&normalized, candidate);
+        let threshold = normalized
+            .len()
+            .max(candidate.len())
+            .clamp(2, 4);
+        let shared_prefix = normalized
+            .chars()
+            .zip(candidate.chars())
+            .take_while(|(left, right)| left == right)
+            .count();
+        if distance <= threshold && shared_prefix >= 2 {
+            match best {
+                Some((_, best_distance)) if distance >= best_distance => {}
+                _ => best = Some((candidate, distance)),
+            }
+        }
+    }
+
+    best.map(|(candidate, _)| candidate)
+}
+
+fn edit_distance(left: &str, right: &str) -> usize {
+    let left: Vec<char> = left.chars().collect();
+    let right: Vec<char> = right.chars().collect();
+    let mut previous: Vec<usize> = (0..=right.len()).collect();
+    let mut current = vec![0; right.len() + 1];
+
+    for (i, left_char) in left.iter().enumerate() {
+        current[0] = i + 1;
+        for (j, right_char) in right.iter().enumerate() {
+            let substitution_cost = if left_char == right_char { 0 } else { 1 };
+            current[j + 1] = (previous[j + 1] + 1)
+                .min(current[j] + 1)
+                .min(previous[j] + substitution_cost);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+
+    previous[right.len()]
 }
 
 pub fn status_line(config: &AppConfig) -> String {
@@ -4716,6 +4771,21 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "validation failed: unsupported TUI command. Use /help"
+        );
+    }
+
+    #[test]
+    fn fuzzy_unknown_commands_offer_suggestions() {
+        let err = parse_tui_command("/settngs").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "validation failed: unsupported TUI command. Did you mean /settings? Use /help"
+        );
+
+        let err = parse_tui_command("/sesions").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "validation failed: unsupported TUI command. Did you mean /sessions? Use /help"
         );
     }
 
