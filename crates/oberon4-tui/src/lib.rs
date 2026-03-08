@@ -3140,7 +3140,7 @@ fn parse_heading(line: &str) -> Option<&str> {
 
 fn parse_list_item(line: &str) -> Option<&str> {
     let trimmed = line.trim_start();
-    for prefix in ["- ", "* ", "+ "] {
+    for prefix in ["- ", "* ", "+ ", "• "] {
         if let Some(rest) = trimmed.strip_prefix(prefix) {
             return Some(rest);
         }
@@ -5045,6 +5045,26 @@ mod tests {
             .collect();
 
         assert!(!flattened.contains("**"));
+        assert!(lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .any(|span| span.content.contains("Word Association")
+                && span.style.add_modifier.contains(Modifier::BOLD)));
+    }
+
+    #[test]
+    fn assistant_markdown_strips_bold_markers_for_bulleted_game_list_shape() {
+        let lines = format_assistant_markdown(
+            "• **Word Association** — I say a word, you respond with the first word that comes to mind.",
+        );
+        let flattened: String = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect();
+
+        assert!(!flattened.contains("**"));
+        assert!(flattened.contains("• "));
         assert!(lines
             .iter()
             .flat_map(|line| line.spans.iter())
