@@ -392,7 +392,7 @@ impl TuiApp {
                 let status = self.runtime.status()?;
                 Ok(TuiResponse {
                     output: format!(
-                        "running={} endpoint={} model={} active_account={}",
+                        "running={} request_endpoint={} model={} oberon4_account={}",
                         status.running,
                         status.endpoint_base_url,
                         status.model,
@@ -599,7 +599,7 @@ impl DaemonBackedTuiApp {
                 match self.client.send(&oberon4_core::DaemonCommand::GetStatus)? {
                     oberon4_core::DaemonEvent::Status { status } => Ok(TuiResponse {
                         output: format!(
-                            "running={} endpoint={} model={} active_account={}",
+                            "running={} request_endpoint={} model={} oberon4_account={}",
                             status.running,
                             status.endpoint_base_url,
                             status.model,
@@ -2844,7 +2844,7 @@ fn render_header(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
     };
     let header_lines = Text::from(vec![Line::styled(
         format!(
-            " Oberon4 | {} | daemon={} | {} | model={} | account={} | session={}{} | {} ",
+            " Oberon4 | request={} | daemon={} | {} | model={} | oberon4-account={} | session={}{} | {} ",
             shell.status_snapshot.endpoint,
             if shell.status_snapshot.running {
                 "running"
@@ -3124,10 +3124,13 @@ fn render_status_workspace(frame: &mut Frame, area: Rect, shell: &TuiShellState)
     let lines = Text::from(vec![
         Line::raw(format!("activity: {}", shell.activity_label())),
         Line::raw(format!("status: {}", shell.status())),
-        Line::raw(format!("endpoint: {}", shell.status_snapshot.endpoint)),
+        Line::raw(format!(
+            "request endpoint: {}",
+            shell.status_snapshot.endpoint
+        )),
         Line::raw(format!("model: {}", shell.status_snapshot.model)),
         Line::raw(format!(
-            "active account: {}",
+            "oberon4 account: {}",
             shell.status_snapshot.active_account
         )),
         Line::raw(format!("session: {}", shell.session_title_for_header())),
@@ -3494,9 +3497,16 @@ fn print_inline_workspace(
             )?;
             write_inline_line(
                 stdout,
-                &format!("  endpoint: {}", shell.status_snapshot.endpoint),
+                &format!("  request endpoint: {}", shell.status_snapshot.endpoint),
             )?;
             write_inline_line(stdout, &format!("  model: {}", shell.status_snapshot.model))?;
+            write_inline_line(
+                stdout,
+                &format!(
+                    "  oberon4 account: {}",
+                    shell.status_snapshot.active_account
+                ),
+            )?;
             write_inline_line(
                 stdout,
                 &format!("  session: {}", shell.session_title_for_header()),
@@ -4345,6 +4355,8 @@ mod tests {
         let config = app.handle_command(TuiCommand::Config).unwrap();
 
         assert!(status.output.contains("running=false"));
+        assert!(status.output.contains("request_endpoint="));
+        assert!(status.output.contains("oberon4_account="));
         assert!(config.output.contains("<redacted>"));
     }
 
