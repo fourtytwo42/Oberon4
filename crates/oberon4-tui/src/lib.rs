@@ -5,7 +5,7 @@ use std::{
     process::{Command, Stdio},
     sync::mpsc::{self, Receiver, TryRecvError},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use crossterm::{
@@ -17,7 +17,7 @@ use oberon4_auth::AccountRegistry;
 use oberon4_core::{
     AppConfig, ChatMessage, ChatProvider, ChatRole, ChatToolCallDelta, InMemoryConfigStore,
     InMemorySessionStore, OAuthProviderKind, OberonError, SavedSession, SessionId, SessionStore,
-    SessionSummary,
+    SessionSummary, StoredAccount,
 };
 use oberon4_daemon::{DaemonIpcClient, DaemonRuntime, LifecycleState};
 use oberon4_provider_openai::{FakeTransport, OpenAiCompatibleClient, RetryPolicy};
@@ -27,7 +27,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Text},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +36,10 @@ pub enum TuiCommand {
     Quit,
     Status,
     Sessions,
+    Settings,
+    Accounts,
+    Diagnostics,
+    More,
     Config,
     Model(String),
     Endpoint(String),
@@ -70,16 +74,75 @@ enum ActivityState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SidePanelTab {
-    Status,
-    Sessions,
-    Help,
+enum FocusTarget {
+    Composer,
+    Menu,
+    List,
+    Form,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FocusTarget {
-    Composer,
+enum Workspace {
+    Chat,
     Sessions,
+    Settings,
+    Status,
+    Help,
+    Accounts,
+    Diagnostics,
+    Reserved,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AccountActionMode {
+    Manage,
+    Activate,
+    Disable,
+    Disconnect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FormAction {
+    Model,
+    Endpoint,
+    SystemPrompt,
+    RequestTimeout,
+    MaxRetries,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionSidebarItem {
+    CurrentChat,
+    Saved(usize),
+    NewSession,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScreenRoute {
+    ChatRoot,
+    SessionsRoot,
+    SettingsRoot,
+    SettingsProvider,
+    SettingsOpenAiOAuth,
+    SettingsAnthropicOAuth,
+    SettingsModelForm,
+    SettingsEndpointForm,
+    SettingsSystemPromptForm,
+    SettingsRuntime,
+    SettingsRuntimeTimeoutForm,
+    SettingsRuntimeRetriesForm,
+    StatusRoot,
+    HelpRoot,
+    AccountsRoot,
+    AccountList {
+        provider: OAuthProviderKind,
+        action: AccountActionMode,
+    },
+    AccountDetail {
+        provider: OAuthProviderKind,
+    },
+    DiagnosticsRoot,
+    ReservedRoot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -103,16 +166,23 @@ pub struct TuiShellState {
     activity: ActivityState,
     should_quit: bool,
     transcript: Vec<UiLine>,
-    side_panel_tab: SidePanelTab,
-    side_panel_visible: bool,
-    overlay_visible: bool,
+    workspace: Workspace,
+    screen_stack: Vec<ScreenRoute>,
     focus: FocusTarget,
     sessions: Vec<SessionSummary>,
     session_index: usize,
-    current_session: Option<String>,
+    accounts: Vec<StoredAccount>,
+    account_index: usize,
+    menu_index: usize,
+    current_session_id: Option<String>,
+    current_session_title: Option<String>,
     baseline_signature: Option<String>,
     status_snapshot: StatusSnapshot,
+    config_snapshot: AppConfig,
+    form_action: Option<FormAction>,
+    diagnostics_endpoint_health: String,
     autocomplete: Option<AutocompleteState>,
+    render_tick: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -120,13 +190,16 @@ pub struct TuiLaunchOptions {
     pub no_alt_screen: bool,
 }
 
-const PANEL_SPLIT_WIDTH: u16 = 120;
 const FOOTER_HEIGHT: u16 = 5;
-const COMMAND_CATALOG: [(&str, bool); 12] = [
+const COMMAND_CATALOG: [(&str, bool); 16] = [
     ("/help", false),
     ("/quit", false),
     ("/status", false),
     ("/sessions", false),
+    ("/settings", false),
+    ("/accounts", false),
+    ("/diagnostics", false),
+    ("/more", false),
     ("/config", false),
     ("/model", true),
     ("/endpoint", true),
@@ -136,13 +209,14 @@ const COMMAND_CATALOG: [(&str, bool); 12] = [
     ("/load", true),
     ("/fork", true),
 ];
-const EXTENDED_HELP: &str = "/help /quit /status /sessions /config /model <name> /endpoint <url> /system <text> /clear /save <name> /load <name> /fork <name>";
+const EXTENDED_HELP: &str = "/help /quit /status /sessions /settings /accounts /diagnostics /more /config /model <name> /endpoint <url> /system <text> /clear /save <name> /load <name> /fork <name>";
+const SESSION_SIDEBAR_WIDTH: u16 = 18;
+const SESSION_VISIBLE_WIDTH: usize = 12;
 
 struct PendingSubmission {
     receiver: Receiver<AsyncUiEvent>,
     started_at: Instant,
     timeout: Duration,
-    status_line_index: Option<usize>,
     assistant_line_index: usize,
     tool_line_indices: BTreeMap<usize, usize>,
     tool_state: BTreeMap<usize, (String, String)>,
@@ -200,16 +274,23 @@ impl Default for TuiShellState {
             activity: ActivityState::Idle,
             should_quit: false,
             transcript: Vec::new(),
-            side_panel_tab: SidePanelTab::Status,
-            side_panel_visible: true,
-            overlay_visible: false,
+            workspace: Workspace::Chat,
+            screen_stack: vec![ScreenRoute::ChatRoot],
             focus: FocusTarget::Composer,
             sessions: Vec::new(),
             session_index: 0,
-            current_session: None,
+            accounts: Vec::new(),
+            account_index: 0,
+            menu_index: 0,
+            current_session_id: None,
+            current_session_title: None,
             baseline_signature: None,
             status_snapshot: StatusSnapshot::default(),
+            config_snapshot: AppConfig::default(),
+            form_action: None,
+            diagnostics_endpoint_health: "unknown".to_string(),
             autocomplete: None,
+            render_tick: 0,
         }
     }
 }
@@ -242,7 +323,23 @@ impl TuiApp {
                 should_quit: true,
             }),
             TuiCommand::Sessions => Ok(TuiResponse {
-                output: "sessions panel opened".to_string(),
+                output: "sessions workspace opened".to_string(),
+                should_quit: false,
+            }),
+            TuiCommand::Settings => Ok(TuiResponse {
+                output: "settings workspace opened".to_string(),
+                should_quit: false,
+            }),
+            TuiCommand::Accounts => Ok(TuiResponse {
+                output: "accounts workspace opened".to_string(),
+                should_quit: false,
+            }),
+            TuiCommand::Diagnostics => Ok(TuiResponse {
+                output: "diagnostics workspace opened".to_string(),
+                should_quit: false,
+            }),
+            TuiCommand::More => Ok(TuiResponse {
+                output: "more workspace opened".to_string(),
                 should_quit: false,
             }),
             TuiCommand::Status => {
@@ -433,7 +530,23 @@ impl DaemonBackedTuiApp {
                 should_quit: true,
             }),
             TuiCommand::Sessions => Ok(TuiResponse {
-                output: "sessions panel opened".to_string(),
+                output: "sessions workspace opened".to_string(),
+                should_quit: false,
+            }),
+            TuiCommand::Settings => Ok(TuiResponse {
+                output: "settings workspace opened".to_string(),
+                should_quit: false,
+            }),
+            TuiCommand::Accounts => Ok(TuiResponse {
+                output: "accounts workspace opened".to_string(),
+                should_quit: false,
+            }),
+            TuiCommand::Diagnostics => Ok(TuiResponse {
+                output: "diagnostics workspace opened".to_string(),
+                should_quit: false,
+            }),
+            TuiCommand::More => Ok(TuiResponse {
+                output: "more workspace opened".to_string(),
                 should_quit: false,
             }),
             TuiCommand::Status => {
@@ -574,6 +687,92 @@ impl DaemonBackedTuiApp {
                 sort_sessions(&mut summaries);
                 Ok(summaries)
             }
+            event => Err(protocol_error_inner(event)),
+        }
+    }
+
+    pub fn list_accounts(&self) -> Result<Vec<StoredAccount>, OberonError> {
+        match self
+            .client
+            .send(&oberon4_core::DaemonCommand::ListAccounts)?
+        {
+            oberon4_core::DaemonEvent::AccountsListed { mut accounts } => {
+                accounts.sort_by(|left, right| {
+                    left.provider
+                        .cmp(&right.provider)
+                        .then_with(|| left.label.cmp(&right.label))
+                        .then_with(|| left.id.cmp(&right.id))
+                });
+                Ok(accounts)
+            }
+            event => Err(protocol_error_inner(event)),
+        }
+    }
+
+    pub fn connect_account(&self, provider: OAuthProviderKind) -> Result<String, OberonError> {
+        match self
+            .client
+            .send(&oberon4_core::DaemonCommand::ConnectAccount { provider })?
+        {
+            oberon4_core::DaemonEvent::OAuthStarted { url, .. } => Ok(url),
+            event => Err(protocol_error_inner(event)),
+        }
+    }
+
+    pub fn activate_account(
+        &self,
+        provider: OAuthProviderKind,
+        account_id: &str,
+    ) -> Result<String, OberonError> {
+        match self
+            .client
+            .send(&oberon4_core::DaemonCommand::ActivateAccount {
+                provider,
+                account_id: account_id.to_string(),
+            })? {
+            oberon4_core::DaemonEvent::Ack { message } => Ok(message),
+            event => Err(protocol_error_inner(event)),
+        }
+    }
+
+    pub fn disable_account(
+        &self,
+        provider: OAuthProviderKind,
+        account_id: &str,
+    ) -> Result<String, OberonError> {
+        match self
+            .client
+            .send(&oberon4_core::DaemonCommand::DisableAccount {
+                provider,
+                account_id: account_id.to_string(),
+            })? {
+            oberon4_core::DaemonEvent::Ack { message } => Ok(message),
+            event => Err(protocol_error_inner(event)),
+        }
+    }
+
+    pub fn disconnect_account(
+        &self,
+        provider: OAuthProviderKind,
+        account_id: &str,
+    ) -> Result<String, OberonError> {
+        match self
+            .client
+            .send(&oberon4_core::DaemonCommand::DisconnectAccount {
+                provider,
+                account_id: account_id.to_string(),
+            })? {
+            oberon4_core::DaemonEvent::Ack { message } => Ok(message),
+            event => Err(protocol_error_inner(event)),
+        }
+    }
+
+    pub fn endpoint_health(&self) -> Result<String, OberonError> {
+        match self
+            .client
+            .send(&oberon4_core::DaemonCommand::EndpointHealth)?
+        {
+            oberon4_core::DaemonEvent::Ack { message } => Ok(message),
             event => Err(protocol_error_inner(event)),
         }
     }
@@ -754,30 +953,105 @@ impl TuiShellState {
         }
     }
 
-    fn show_tab(&mut self, tab: SidePanelTab, terminal_width: u16) {
-        self.side_panel_tab = tab;
-        if terminal_width >= PANEL_SPLIT_WIDTH {
-            self.side_panel_visible = true;
-            self.overlay_visible = false;
-        } else {
-            self.overlay_visible = true;
-            self.side_panel_visible = false;
+    fn current_route(&self) -> ScreenRoute {
+        self.screen_stack
+            .last()
+            .copied()
+            .unwrap_or(ScreenRoute::ChatRoot)
+    }
+
+    fn workspace_title(&self) -> &'static str {
+        match self.workspace {
+            Workspace::Chat => "Chat",
+            Workspace::Sessions => "Sessions",
+            Workspace::Settings => "Settings",
+            Workspace::Status => "Status",
+            Workspace::Help => "Help",
+            Workspace::Accounts => "Accounts",
+            Workspace::Diagnostics => "Diagnostics",
+            Workspace::Reserved => "More",
         }
-        self.focus = if matches!(tab, SidePanelTab::Sessions) {
-            FocusTarget::Sessions
-        } else {
-            FocusTarget::Composer
+    }
+
+    fn root_route(workspace: Workspace) -> ScreenRoute {
+        match workspace {
+            Workspace::Chat => ScreenRoute::ChatRoot,
+            Workspace::Sessions => ScreenRoute::SessionsRoot,
+            Workspace::Settings => ScreenRoute::SettingsRoot,
+            Workspace::Status => ScreenRoute::StatusRoot,
+            Workspace::Help => ScreenRoute::HelpRoot,
+            Workspace::Accounts => ScreenRoute::AccountsRoot,
+            Workspace::Diagnostics => ScreenRoute::DiagnosticsRoot,
+            Workspace::Reserved => ScreenRoute::ReservedRoot,
+        }
+    }
+
+    fn set_workspace(&mut self, workspace: Workspace) {
+        self.workspace = workspace;
+        self.screen_stack = vec![Self::root_route(workspace)];
+        self.menu_index = 0;
+        self.form_action = None;
+        self.focus = match workspace {
+            Workspace::Chat => FocusTarget::Composer,
+            Workspace::Sessions => FocusTarget::List,
+            Workspace::Status
+            | Workspace::Help
+            | Workspace::Diagnostics
+            | Workspace::Reserved
+            | Workspace::Settings
+            | Workspace::Accounts => FocusTarget::Menu,
         };
     }
 
-    pub fn handle_escape(&mut self) {
+    fn push_route(&mut self, route: ScreenRoute, focus: FocusTarget) {
+        self.screen_stack.push(route);
+        self.focus = focus;
+        self.menu_index = 0;
+        self.form_action = match route {
+            ScreenRoute::SettingsModelForm => Some(FormAction::Model),
+            ScreenRoute::SettingsEndpointForm => Some(FormAction::Endpoint),
+            ScreenRoute::SettingsSystemPromptForm => Some(FormAction::SystemPrompt),
+            ScreenRoute::SettingsRuntimeTimeoutForm => Some(FormAction::RequestTimeout),
+            ScreenRoute::SettingsRuntimeRetriesForm => Some(FormAction::MaxRetries),
+            _ => None,
+        };
+    }
+
+    fn route_for_command(command: &TuiCommand) -> Option<Workspace> {
+        match command {
+            TuiCommand::Help => Some(Workspace::Help),
+            TuiCommand::Status => Some(Workspace::Status),
+            TuiCommand::Sessions => Some(Workspace::Sessions),
+            TuiCommand::Settings | TuiCommand::Config => Some(Workspace::Settings),
+            TuiCommand::Accounts => Some(Workspace::Accounts),
+            TuiCommand::Diagnostics => Some(Workspace::Diagnostics),
+            TuiCommand::More => Some(Workspace::Reserved),
+            _ => None,
+        }
+    }
+
+    fn handle_escape(&mut self) {
         if self.autocomplete.is_some() {
             self.autocomplete = None;
             return;
         }
-        if self.overlay_visible {
-            self.overlay_visible = false;
-            self.focus = FocusTarget::Composer;
+        if matches!(self.focus, FocusTarget::Form) && !self.input.is_empty() {
+            self.input.clear();
+            self.status = "form cleared".to_string();
+            return;
+        }
+        if self.screen_stack.len() > 1 {
+            self.screen_stack.pop();
+            self.form_action = None;
+            self.focus = match self.current_route() {
+                ScreenRoute::ChatRoot => FocusTarget::Composer,
+                ScreenRoute::SessionsRoot | ScreenRoute::AccountList { .. } => FocusTarget::List,
+                _ => FocusTarget::Menu,
+            };
+            return;
+        }
+        if !matches!(self.workspace, Workspace::Chat) {
+            self.set_workspace(Workspace::Chat);
             return;
         }
         if !self.input.is_empty() {
@@ -827,13 +1101,30 @@ impl TuiShellState {
         trimmed != selected || command_requires_argument(selected)
     }
 
-    pub fn move_session_selection(&mut self, delta: isize) {
-        if self.sessions.is_empty() {
+    fn move_selection(current: &mut usize, len: usize, delta: isize) {
+        if len == 0 {
             return;
         }
-        let len = self.sessions.len() as isize;
-        let next = (self.session_index as isize + delta).clamp(0, len - 1);
-        self.session_index = next as usize;
+        let next = (*current as isize + delta).clamp(0, len as isize - 1);
+        *current = next as usize;
+    }
+
+    pub fn move_session_selection(&mut self, delta: isize) {
+        let len = self.session_sidebar_items().len();
+        Self::move_selection(&mut self.session_index, len, delta);
+    }
+
+    pub fn move_account_selection(&mut self, delta: isize) {
+        let len = self
+            .accounts_for_current_route()
+            .map(|accounts| accounts.len())
+            .unwrap_or(0);
+        Self::move_selection(&mut self.account_index, len, delta);
+    }
+
+    pub fn move_menu_selection(&mut self, delta: isize) {
+        let len = self.menu_items().len();
+        Self::move_selection(&mut self.menu_index, len, delta);
     }
 
     fn set_activity(&mut self, activity: ActivityState, status: impl Into<String>) {
@@ -841,7 +1132,7 @@ impl TuiShellState {
         self.status = status.into();
     }
 
-    pub fn refresh_sidebar(&mut self, app: &DaemonBackedTuiApp) {
+    pub fn refresh_runtime_data(&mut self, app: &DaemonBackedTuiApp) {
         if let Ok(snapshot) = app.load_status_snapshot() {
             self.status_snapshot = snapshot;
         }
@@ -851,10 +1142,24 @@ impl TuiShellState {
                 self.session_index = self.sessions.len().saturating_sub(1);
             }
         }
+        if let Ok(accounts) = app.list_accounts() {
+            self.accounts = accounts;
+        }
+        if let Ok(config) = app.load_config() {
+            self.config_snapshot = config;
+        }
+        if let Ok(health) = app.endpoint_health() {
+            self.diagnostics_endpoint_health = health;
+        }
     }
 
-    pub fn mark_loaded_session(&mut self, session: Option<String>) {
-        self.current_session = session;
+    pub fn mark_loaded_session(
+        &mut self,
+        session_id: Option<String>,
+        session_title: Option<String>,
+    ) {
+        self.current_session_id = session_id;
+        self.current_session_title = session_title;
         self.baseline_signature = Some(transcript_signature(&self.transcript));
     }
 
@@ -890,19 +1195,514 @@ impl TuiShellState {
         }
     }
 
+    fn menu_items(&self) -> Vec<&'static str> {
+        match self.current_route() {
+            ScreenRoute::SettingsRoot => vec![
+                "Provider",
+                "OpenAI OAuth",
+                "Anthropic OAuth",
+                "Model",
+                "Endpoint",
+                "System Prompt",
+                "Runtime",
+                "Back to Chat",
+            ],
+            ScreenRoute::SettingsProvider => vec!["OpenAI-compatible", "Back"],
+            ScreenRoute::SettingsOpenAiOAuth | ScreenRoute::SettingsAnthropicOAuth => vec![
+                "Connect",
+                "List Accounts",
+                "Activate Account",
+                "Disable Account",
+                "Disconnect Account",
+                "Back",
+            ],
+            ScreenRoute::SettingsRuntime => {
+                vec!["Request Timeout", "Max Retries", "Toggle Streaming", "Back"]
+            }
+            ScreenRoute::AccountsRoot => vec!["OpenAI Accounts", "Anthropic Accounts", "Back"],
+            ScreenRoute::AccountDetail { .. } => {
+                vec!["Activate", "Disable", "Disconnect", "Back"]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn accounts_for_current_route(&self) -> Option<Vec<&StoredAccount>> {
+        let provider = match self.current_route() {
+            ScreenRoute::AccountList { provider, .. } | ScreenRoute::AccountDetail { provider } => {
+                provider
+            }
+            _ => return None,
+        };
+        Some(
+            self.accounts
+                .iter()
+                .filter(|account| account.provider == provider)
+                .collect(),
+        )
+    }
+
+    fn current_account(&self) -> Option<&StoredAccount> {
+        let accounts = self.accounts_for_current_route()?;
+        accounts.get(self.account_index).copied()
+    }
+
+    fn open_route_for_command(&mut self, command: &TuiCommand) {
+        if let Some(workspace) = Self::route_for_command(command) {
+            if matches!(workspace, Workspace::Sessions) {
+                self.set_workspace(workspace);
+                self.session_index = 0;
+            } else {
+                self.set_workspace(workspace);
+            }
+        }
+    }
+
+    fn open_form(&mut self, action: FormAction, value: String, route: ScreenRoute) {
+        self.input = value;
+        self.autocomplete = None;
+        self.push_route(route, FocusTarget::Form);
+        self.form_action = Some(action);
+    }
+
+    fn session_title_for_header(&self) -> &str {
+        self.current_session_title
+            .as_deref()
+            .or(self.current_session_id.as_deref())
+            .unwrap_or("unsaved")
+    }
+
+    fn current_chat_sidebar_title(&self) -> String {
+        self.current_session_title
+            .clone()
+            .or_else(|| self.current_session_id.clone())
+            .unwrap_or_else(|| "current chat".to_string())
+    }
+
+    fn session_sidebar_items(&self) -> Vec<SessionSidebarItem> {
+        let mut items = vec![SessionSidebarItem::CurrentChat];
+        for (index, session) in self.sessions.iter().enumerate() {
+            if self.current_session_id.as_deref() == Some(session.id.as_str()) {
+                continue;
+            }
+            items.push(SessionSidebarItem::Saved(index));
+        }
+        items.push(SessionSidebarItem::NewSession);
+        items
+    }
+
+    fn sync_loaded_session_from_id(&mut self, session_id: &str) {
+        if let Some(session) = self
+            .sessions
+            .iter()
+            .find(|session| session.id.as_str() == session_id)
+        {
+            self.mark_loaded_session(
+                Some(session.id.as_str().to_string()),
+                Some(session.title.clone()),
+            );
+        } else {
+            self.mark_loaded_session(Some(session_id.to_string()), Some(session_id.to_string()));
+        }
+    }
+
+    fn session_title_from_exchange(prompt: &str, assistant: &str) -> String {
+        let source = if assistant.trim().is_empty() {
+            prompt
+        } else {
+            assistant
+        };
+        let normalized = source
+            .lines()
+            .next()
+            .unwrap_or(source)
+            .replace("```", " ")
+            .split_whitespace()
+            .take(6)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let trimmed = normalized.trim();
+        if trimmed.is_empty() {
+            "New chat".to_string()
+        } else {
+            trimmed.to_string()
+        }
+    }
+
+    fn session_storage_id(title: &str) -> String {
+        let slug = title
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() {
+                    ch.to_ascii_lowercase()
+                } else {
+                    '-'
+                }
+            })
+            .collect::<String>()
+            .split('-')
+            .filter(|segment| !segment.is_empty())
+            .take(4)
+            .collect::<Vec<_>>()
+            .join("-");
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        if slug.is_empty() {
+            format!("chat-{nonce}")
+        } else {
+            format!("{slug}-{nonce}")
+        }
+    }
+
+    fn autosave_current_session(
+        &mut self,
+        app: &mut DaemonBackedTuiApp,
+        prompt: &str,
+        assistant: &str,
+    ) -> Result<(), OberonError> {
+        let (session_id, session_title) = match (
+            self.current_session_id.clone(),
+            self.current_session_title.clone(),
+        ) {
+            (Some(id), Some(title)) => (id, title),
+            (Some(id), None) => (id.clone(), id),
+            (None, _) => {
+                let title = Self::session_title_from_exchange(prompt, assistant);
+                let id = Self::session_storage_id(&title);
+                (id, title)
+            }
+        };
+
+        let session = SavedSession {
+            summary: SessionSummary {
+                id: SessionId::new(session_id.clone()),
+                title: session_title.clone(),
+                provider: oberon4_core::ChatProviderKind::OpenAiCompatible,
+                model: app.load_config()?.endpoint.model,
+            },
+            messages: app.transcript.clone(),
+        };
+
+        match app
+            .client
+            .send(&oberon4_core::DaemonCommand::SaveSession { session })?
+        {
+            oberon4_core::DaemonEvent::SessionLoaded { .. } => {
+                self.mark_loaded_session(Some(session_id), Some(session_title));
+                Ok(())
+            }
+            event => Err(protocol_error_inner(event)),
+        }
+    }
+
+    fn apply_form(&mut self, app: &mut DaemonBackedTuiApp) -> Result<bool, OberonError> {
+        let value = self.input.trim().to_string();
+        let Some(action) = self.form_action else {
+            return Ok(false);
+        };
+        match action {
+            FormAction::Model if !value.is_empty() => {
+                app.handle_input(&format!("/model {value}"))?;
+                self.config_snapshot.endpoint.model = value.clone();
+                self.set_activity(ActivityState::Idle, format!("model set to {value}"));
+            }
+            FormAction::Endpoint if !value.is_empty() => {
+                app.handle_input(&format!("/endpoint {value}"))?;
+                self.config_snapshot.endpoint.base_url = value.clone();
+                self.set_activity(ActivityState::Idle, format!("endpoint set to {value}"));
+            }
+            FormAction::SystemPrompt => {
+                app.handle_input(&format!("/system {value}"))?;
+                self.set_activity(ActivityState::Idle, "system prompt updated");
+            }
+            FormAction::RequestTimeout if !value.is_empty() => {
+                let parsed = value.parse::<u64>().map_err(|err| {
+                    OberonError::Validation(format!("invalid request timeout: {err}"))
+                })?;
+                let mut config = app.load_config()?;
+                config.runtime.request_timeout_ms = parsed;
+                app.save_config(config.clone())?;
+                self.config_snapshot = config;
+                self.set_activity(
+                    ActivityState::Idle,
+                    format!("request timeout set to {parsed}"),
+                );
+            }
+            FormAction::MaxRetries if !value.is_empty() => {
+                let parsed = value.parse::<u8>().map_err(|err| {
+                    OberonError::Validation(format!("invalid max retries: {err}"))
+                })?;
+                let mut config = app.load_config()?;
+                config.runtime.max_retries = parsed;
+                app.save_config(config.clone())?;
+                self.config_snapshot = config;
+                self.set_activity(ActivityState::Idle, format!("max retries set to {parsed}"));
+            }
+            _ => {
+                self.set_activity(ActivityState::Idle, "form value was empty");
+            }
+        }
+        self.input.clear();
+        self.screen_stack.pop();
+        self.form_action = None;
+        self.focus = FocusTarget::Menu;
+        self.refresh_runtime_data(app);
+        Ok(true)
+    }
+
+    fn activate_current_menu_item(
+        &mut self,
+        app: &mut DaemonBackedTuiApp,
+    ) -> Result<bool, OberonError> {
+        match self.current_route() {
+            ScreenRoute::SettingsRoot => match self.menu_index {
+                0 => self.push_route(ScreenRoute::SettingsProvider, FocusTarget::Menu),
+                1 => self.push_route(ScreenRoute::SettingsOpenAiOAuth, FocusTarget::Menu),
+                2 => self.push_route(ScreenRoute::SettingsAnthropicOAuth, FocusTarget::Menu),
+                3 => self.open_form(
+                    FormAction::Model,
+                    self.config_snapshot.endpoint.model.clone(),
+                    ScreenRoute::SettingsModelForm,
+                ),
+                4 => self.open_form(
+                    FormAction::Endpoint,
+                    self.config_snapshot.endpoint.base_url.clone(),
+                    ScreenRoute::SettingsEndpointForm,
+                ),
+                5 => self.open_form(
+                    FormAction::SystemPrompt,
+                    String::new(),
+                    ScreenRoute::SettingsSystemPromptForm,
+                ),
+                6 => self.push_route(ScreenRoute::SettingsRuntime, FocusTarget::Menu),
+                7 => self.set_workspace(Workspace::Chat),
+                _ => {}
+            },
+            ScreenRoute::SettingsProvider => match self.menu_index {
+                0 => self.set_activity(ActivityState::Idle, "OpenAI-compatible provider is active"),
+                _ => {
+                    self.screen_stack.pop();
+                }
+            },
+            ScreenRoute::SettingsOpenAiOAuth | ScreenRoute::SettingsAnthropicOAuth => {
+                let provider = if matches!(self.current_route(), ScreenRoute::SettingsOpenAiOAuth) {
+                    OAuthProviderKind::OpenAi
+                } else {
+                    OAuthProviderKind::Anthropic
+                };
+                match self.menu_index {
+                    0 => {
+                        let url = app.connect_account(provider)?;
+                        self.set_activity(ActivityState::Idle, format!("connect via {url}"));
+                        self.refresh_runtime_data(app);
+                    }
+                    1 => self.push_route(
+                        ScreenRoute::AccountList {
+                            provider,
+                            action: AccountActionMode::Manage,
+                        },
+                        FocusTarget::List,
+                    ),
+                    2 => self.push_route(
+                        ScreenRoute::AccountList {
+                            provider,
+                            action: AccountActionMode::Activate,
+                        },
+                        FocusTarget::List,
+                    ),
+                    3 => self.push_route(
+                        ScreenRoute::AccountList {
+                            provider,
+                            action: AccountActionMode::Disable,
+                        },
+                        FocusTarget::List,
+                    ),
+                    4 => self.push_route(
+                        ScreenRoute::AccountList {
+                            provider,
+                            action: AccountActionMode::Disconnect,
+                        },
+                        FocusTarget::List,
+                    ),
+                    _ => {
+                        self.screen_stack.pop();
+                    }
+                }
+            }
+            ScreenRoute::SettingsRuntime => match self.menu_index {
+                0 => self.open_form(
+                    FormAction::RequestTimeout,
+                    self.config_snapshot.runtime.request_timeout_ms.to_string(),
+                    ScreenRoute::SettingsRuntimeTimeoutForm,
+                ),
+                1 => self.open_form(
+                    FormAction::MaxRetries,
+                    self.config_snapshot.runtime.max_retries.to_string(),
+                    ScreenRoute::SettingsRuntimeRetriesForm,
+                ),
+                2 => {
+                    let mut config = app.load_config()?;
+                    config.runtime.stream_responses = !config.runtime.stream_responses;
+                    app.save_config(config.clone())?;
+                    self.config_snapshot = config.clone();
+                    self.set_activity(
+                        ActivityState::Idle,
+                        format!(
+                            "streaming {}",
+                            if config.runtime.stream_responses {
+                                "enabled"
+                            } else {
+                                "disabled"
+                            }
+                        ),
+                    );
+                }
+                _ => {
+                    self.screen_stack.pop();
+                }
+            },
+            ScreenRoute::AccountsRoot => match self.menu_index {
+                0 => self.push_route(
+                    ScreenRoute::AccountList {
+                        provider: OAuthProviderKind::OpenAi,
+                        action: AccountActionMode::Manage,
+                    },
+                    FocusTarget::List,
+                ),
+                1 => self.push_route(
+                    ScreenRoute::AccountList {
+                        provider: OAuthProviderKind::Anthropic,
+                        action: AccountActionMode::Manage,
+                    },
+                    FocusTarget::List,
+                ),
+                _ => self.set_workspace(Workspace::Chat),
+            },
+            ScreenRoute::AccountDetail { provider } => {
+                if let Some(account_id) = self.current_account().map(|account| account.id.clone()) {
+                    match self.menu_index {
+                        0 => self.set_activity(
+                            ActivityState::Idle,
+                            app.activate_account(provider, &account_id)?,
+                        ),
+                        1 => self.set_activity(
+                            ActivityState::Idle,
+                            app.disable_account(provider, &account_id)?,
+                        ),
+                        2 => self.set_activity(
+                            ActivityState::Idle,
+                            app.disconnect_account(provider, &account_id)?,
+                        ),
+                        _ => {
+                            self.screen_stack.pop();
+                            return Ok(true);
+                        }
+                    }
+                    self.refresh_runtime_data(app);
+                } else {
+                    self.set_activity(ActivityState::Error, "no account selected");
+                }
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    fn activate_current_list_item(
+        &mut self,
+        app: &mut DaemonBackedTuiApp,
+    ) -> Result<bool, OberonError> {
+        match self.current_route() {
+            ScreenRoute::SessionsRoot => {
+                if let Some(item) = self.session_sidebar_items().get(self.session_index).copied() {
+                    match item {
+                        SessionSidebarItem::CurrentChat => {
+                            self.set_workspace(Workspace::Chat);
+                            self.focus = FocusTarget::Composer;
+                            self.set_activity(ActivityState::Idle, "current chat selected");
+                            return Ok(true);
+                        }
+                        SessionSidebarItem::Saved(index) => {
+                            if let Some(session) = self.sessions.get(index) {
+                                let name = session.id.as_str().to_string();
+                                let response =
+                                    app.handle_command(TuiCommand::Load(name.clone()))?;
+                                self.set_activity(ActivityState::Idle, response.output);
+                                self.sync_loaded_session_from_id(&name);
+                                self.transcript = app
+                                    .transcript()
+                                    .iter()
+                                    .map(|message| UiLine {
+                                        role: role_label(message.role).to_string(),
+                                        content: message.content.clone(),
+                                    })
+                                    .collect();
+                                self.refresh_runtime_data(app);
+                                self.set_workspace(Workspace::Chat);
+                                self.focus = FocusTarget::Composer;
+                                return Ok(true);
+                            }
+                        }
+                        SessionSidebarItem::NewSession => {
+                            self.transcript.clear();
+                            app.transcript.clear();
+                            self.current_session_id = None;
+                            self.current_session_title = None;
+                            self.baseline_signature = None;
+                            self.set_workspace(Workspace::Chat);
+                            self.focus = FocusTarget::Composer;
+                            self.set_activity(ActivityState::Idle, "new session opened");
+                            return Ok(true);
+                        }
+                    }
+                }
+            }
+            ScreenRoute::AccountList { provider, action } => {
+                if let Some(account) = self.current_account().cloned() {
+                    match action {
+                        AccountActionMode::Manage => {
+                            self.push_route(
+                                ScreenRoute::AccountDetail { provider },
+                                FocusTarget::Menu,
+                            );
+                            return Ok(true);
+                        }
+                        AccountActionMode::Activate => {
+                            self.set_activity(
+                                ActivityState::Idle,
+                                app.activate_account(provider, &account.id)?,
+                            );
+                        }
+                        AccountActionMode::Disable => {
+                            self.set_activity(
+                                ActivityState::Idle,
+                                app.disable_account(provider, &account.id)?,
+                            );
+                        }
+                        AccountActionMode::Disconnect => {
+                            self.set_activity(
+                                ActivityState::Idle,
+                                app.disconnect_account(provider, &account.id)?,
+                            );
+                        }
+                    }
+                    self.refresh_runtime_data(app);
+                    return Ok(true);
+                }
+            }
+            _ => {}
+        }
+        Ok(false)
+    }
+
     pub fn submit(&mut self, app: &mut DaemonBackedTuiApp) -> Result<(), OberonError> {
         let input = std::mem::take(&mut self.input);
         self.autocomplete = None;
         let trimmed = input.trim();
         if trimmed.is_empty() {
             self.set_activity(ActivityState::Idle, "Input was empty");
-            return Ok(());
-        }
-
-        if trimmed == "/sessions" {
-            self.show_tab(SidePanelTab::Sessions, PANEL_SPLIT_WIDTH.saturating_sub(1));
-            self.refresh_sidebar(app);
-            self.set_activity(ActivityState::Idle, "sessions panel opened");
             return Ok(());
         }
 
@@ -919,10 +1719,35 @@ impl TuiShellState {
             None
         };
 
-        if matches!(command, Some(TuiCommand::Help)) {
-            self.show_tab(SidePanelTab::Help, PANEL_SPLIT_WIDTH.saturating_sub(1));
-        } else if matches!(command, Some(TuiCommand::Status)) {
-            self.show_tab(SidePanelTab::Status, PANEL_SPLIT_WIDTH.saturating_sub(1));
+        if let Some(command) = command.as_ref() {
+            self.open_route_for_command(command);
+            if matches!(
+                command,
+                TuiCommand::Help
+                    | TuiCommand::Status
+                    | TuiCommand::Sessions
+                    | TuiCommand::Settings
+                    | TuiCommand::Accounts
+                    | TuiCommand::Diagnostics
+                    | TuiCommand::More
+                    | TuiCommand::Config
+            ) {
+                self.refresh_runtime_data(app);
+                self.set_activity(
+                    ActivityState::Idle,
+                    match command {
+                        TuiCommand::Help => "help workspace opened",
+                        TuiCommand::Status => "status workspace opened",
+                        TuiCommand::Sessions => "sessions workspace opened",
+                        TuiCommand::Settings | TuiCommand::Config => "settings workspace opened",
+                        TuiCommand::Accounts => "accounts workspace opened",
+                        TuiCommand::Diagnostics => "diagnostics workspace opened",
+                        TuiCommand::More => "more workspace opened",
+                        _ => "workspace opened",
+                    },
+                );
+                return Ok(());
+            }
         }
 
         match command {
@@ -951,12 +1776,14 @@ impl TuiShellState {
                 });
             }
             match command {
-                Some(TuiCommand::Save(name)) => self.mark_loaded_session(Some(name)),
-                Some(TuiCommand::Load(name)) => self.mark_loaded_session(Some(name)),
+                Some(TuiCommand::Save(name)) => {
+                    self.mark_loaded_session(Some(name.clone()), Some(name))
+                }
+                Some(TuiCommand::Load(name)) => self.sync_loaded_session_from_id(&name),
                 Some(TuiCommand::Clear) => {}
                 _ => {}
             }
-            self.refresh_sidebar(app);
+            self.refresh_runtime_data(app);
             return Ok(());
         }
 
@@ -967,7 +1794,7 @@ impl TuiShellState {
             });
         }
 
-        self.refresh_sidebar(app);
+        self.refresh_runtime_data(app);
 
         Ok(())
     }
@@ -980,7 +1807,7 @@ pub fn run_terminal_ui() -> Result<(), OberonError> {
 pub fn run_terminal_ui_with_options(options: TuiLaunchOptions) -> Result<(), OberonError> {
     let mut app = DaemonBackedTuiApp::default();
     let mut shell = TuiShellState::default();
-    shell.refresh_sidebar(&app);
+    shell.refresh_runtime_data(&app);
     let mut terminal = init_terminal(options)?;
 
     let result = run_terminal_loop(&mut terminal, &mut app, &mut shell);
@@ -1012,6 +1839,7 @@ fn run_terminal_loop(
         terminal
             .draw(|frame| render_terminal(frame, shell))
             .map_err(|err| OberonError::Storage(format!("tui draw failed: {err}")))?;
+        shell.render_tick = shell.render_tick.wrapping_add(1);
 
         if shell.should_quit() {
             return Ok(());
@@ -1039,36 +1867,53 @@ fn run_terminal_loop(
                 shell.set_activity(ActivityState::Idle, "quitting");
             }
             KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                let width = terminal
-                    .size()
-                    .map_err(|err| OberonError::Storage(format!("tui size lookup failed: {err}")))?
-                    .width;
-                shell.show_tab(SidePanelTab::Sessions, width);
-                shell.refresh_sidebar(app);
-                shell.set_activity(ActivityState::Idle, "sessions panel opened");
+                shell.set_workspace(Workspace::Sessions);
+                shell.refresh_runtime_data(app);
+                shell.set_activity(ActivityState::Idle, "sessions workspace opened");
             }
             KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                shell.insert_newline();
+                if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
+                    shell.insert_newline();
+                }
             }
-            KeyCode::Char(ch) => shell.push_input_char(ch),
-            KeyCode::Backspace => shell.backspace(),
-            KeyCode::Tab => shell.cycle_autocomplete(),
-            KeyCode::Up if matches!(shell.focus, FocusTarget::Sessions) => {
-                shell.move_session_selection(-1)
+            KeyCode::Char(ch) => {
+                if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
+                    shell.push_input_char(ch)
+                }
             }
-            KeyCode::Down if matches!(shell.focus, FocusTarget::Sessions) => {
-                shell.move_session_selection(1)
+            KeyCode::Backspace => {
+                if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
+                    shell.backspace();
+                }
             }
+            KeyCode::Tab if matches!(shell.focus, FocusTarget::Composer) => {
+                shell.cycle_autocomplete()
+            }
+            KeyCode::Up => match shell.focus {
+                FocusTarget::Menu => shell.move_menu_selection(-1),
+                FocusTarget::List => match shell.current_route() {
+                    ScreenRoute::SessionsRoot => shell.move_session_selection(-1),
+                    ScreenRoute::AccountList { .. } => shell.move_account_selection(-1),
+                    _ => {}
+                },
+                _ => {}
+            },
+            KeyCode::Down => match shell.focus {
+                FocusTarget::Menu => shell.move_menu_selection(1),
+                FocusTarget::List => match shell.current_route() {
+                    ScreenRoute::SessionsRoot => shell.move_session_selection(1),
+                    ScreenRoute::AccountList { .. } => shell.move_account_selection(1),
+                    _ => {}
+                },
+                _ => {}
+            },
             KeyCode::Enter => {
-                if matches!(shell.focus, FocusTarget::Sessions)
-                    && !shell.sessions.is_empty()
-                    && pending_submission.is_none()
-                {
-                    let name = shell.sessions[shell.session_index].id.as_str().to_string();
-                    shell.input = format!("/load {name}");
-                    shell.overlay_visible = false;
-                    shell.focus = FocusTarget::Composer;
-                    shell.submit(app)?;
+                if matches!(shell.focus, FocusTarget::Menu) {
+                    shell.activate_current_menu_item(app)?;
+                } else if matches!(shell.focus, FocusTarget::List) {
+                    shell.activate_current_list_item(app)?;
+                } else if matches!(shell.focus, FocusTarget::Form) {
+                    shell.apply_form(app)?;
                 } else if shell.input.trim().starts_with('/')
                     && shell.input.trim() == shell.input.trim_end()
                     && !shell.input.contains(' ')
@@ -1110,7 +1955,23 @@ fn handle_pending_local_command(shell: &mut TuiShellState) -> Result<bool, Obero
             should_quit: false,
         },
         TuiCommand::Sessions => TuiResponse {
-            output: "sessions panel opened".to_string(),
+            output: "sessions workspace opened".to_string(),
+            should_quit: false,
+        },
+        TuiCommand::Settings | TuiCommand::Config => TuiResponse {
+            output: "settings workspace opened".to_string(),
+            should_quit: false,
+        },
+        TuiCommand::Accounts => TuiResponse {
+            output: "accounts workspace opened".to_string(),
+            should_quit: false,
+        },
+        TuiCommand::Diagnostics => TuiResponse {
+            output: "diagnostics workspace opened".to_string(),
+            should_quit: false,
+        },
+        TuiCommand::More => TuiResponse {
+            output: "more workspace opened".to_string(),
             should_quit: false,
         },
         TuiCommand::Quit => TuiResponse {
@@ -1133,6 +1994,7 @@ fn handle_pending_local_command(shell: &mut TuiShellState) -> Result<bool, Obero
             content: response.output,
         });
     }
+    shell.open_route_for_command(&command);
     Ok(true)
 }
 
@@ -1163,11 +2025,6 @@ fn start_async_submit(
         role: "user".to_string(),
         content: trimmed,
     });
-    shell.transcript.push(UiLine {
-        role: "status".to_string(),
-        content: "waiting on provider response...".to_string(),
-    });
-    let status_line_index = shell.transcript.len() - 1;
     shell.transcript.push(UiLine {
         role: "assistant".to_string(),
         content: "...".to_string(),
@@ -1211,30 +2068,10 @@ fn start_async_submit(
         receiver,
         started_at: Instant::now(),
         timeout,
-        status_line_index: Some(status_line_index),
         assistant_line_index,
         tool_line_indices: BTreeMap::new(),
         tool_state: BTreeMap::new(),
     }))
-}
-
-fn retire_pending_status_line(shell: &mut TuiShellState, pending: &mut PendingSubmission) {
-    let Some(index) = pending.status_line_index.take() else {
-        return;
-    };
-    if index >= shell.transcript.len() {
-        return;
-    }
-
-    shell.transcript.remove(index);
-    if pending.assistant_line_index > index {
-        pending.assistant_line_index -= 1;
-    }
-    for line_index in pending.tool_line_indices.values_mut() {
-        if *line_index > index {
-            *line_index -= 1;
-        }
-    }
 }
 
 fn has_trailing_user_line(transcript: &[UiLine], content: &str) -> bool {
@@ -1280,7 +2117,6 @@ fn handle_async_ui_event(
     match event {
         AsyncUiEvent::TextDelta(content) => {
             if let Some(pending) = pending_submission.as_mut() {
-                retire_pending_status_line(shell, pending);
                 if let Some(line) = shell.transcript.get_mut(pending.assistant_line_index) {
                     if line.content == "..." {
                         line.content.clear();
@@ -1292,7 +2128,6 @@ fn handle_async_ui_event(
         }
         AsyncUiEvent::ToolCallDelta(delta) => {
             if let Some(pending) = pending_submission.as_mut() {
-                retire_pending_status_line(shell, pending);
                 let line_index = if let Some(index) = pending.tool_line_indices.get(&delta.index) {
                     *index
                 } else {
@@ -1312,17 +2147,16 @@ fn handle_async_ui_event(
         }
         AsyncUiEvent::Complete { prompt, message } => {
             let pending = pending_submission.take();
-            if let Some(mut pending) = pending {
-                retire_pending_status_line(shell, &mut pending);
+            if let Some(pending) = pending {
                 finalize_streamed_assistant(shell, &pending, &message);
             }
             app.apply_successful_prompt(&prompt, message.clone());
+            let _ = shell.autosave_current_session(app, &prompt, &message.content);
             shell.set_activity(ActivityState::Idle, "response complete");
-            shell.refresh_sidebar(app);
+            shell.refresh_runtime_data(app);
         }
         AsyncUiEvent::Failed(err) => {
-            if let Some(mut pending) = pending_submission.take() {
-                retire_pending_status_line(shell, &mut pending);
+            if let Some(pending) = pending_submission.take() {
                 if let Some(line) = shell.transcript.get_mut(pending.assistant_line_index) {
                     line.role = "error".to_string();
                     line.content = err.to_string();
@@ -1334,7 +2168,7 @@ fn handle_async_ui_event(
                 }
             }
             shell.set_activity(ActivityState::Error, err.to_string());
-            shell.refresh_sidebar(app);
+            shell.refresh_runtime_data(app);
         }
     }
 }
@@ -1386,7 +2220,7 @@ fn finalize_streamed_assistant(
 fn render_terminal(frame: &mut Frame, shell: &TuiShellState) {
     let area = frame.size();
     let [header, body, footer] = Layout::vertical([
-        Constraint::Length(3),
+        Constraint::Length(4),
         Constraint::Min(5),
         Constraint::Length(FOOTER_HEIGHT),
     ])
@@ -1396,17 +2230,19 @@ fn render_terminal(frame: &mut Frame, shell: &TuiShellState) {
     render_body(frame, body, shell);
     render_footer(frame, footer, shell);
 
-    let cursor_lines = composer_lines(shell.input());
-    let last_line = cursor_lines.last().cloned().unwrap_or_default();
-    let cursor_y = footer
-        .y
-        .saturating_add(1 + cursor_lines.len().saturating_sub(1) as u16);
-    let cursor_x = footer.x.saturating_add(1 + last_line.len() as u16);
-    frame.set_cursor(cursor_x, cursor_y);
+    if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
+        let cursor_lines = composer_lines(shell.input());
+        let last_line = cursor_lines.last().cloned().unwrap_or_default();
+        let cursor_y = footer
+            .y
+            .saturating_add(1 + cursor_lines.len().saturating_sub(1) as u16);
+        let cursor_x = footer.x.saturating_add(1 + last_line.len() as u16);
+        frame.set_cursor(cursor_x, cursor_y);
+    }
 }
 
 fn render_header(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
-    let session = shell.current_session.as_deref().unwrap_or("unsaved");
+    let session = shell.session_title_for_header();
     let dirty = if shell.is_dirty() { "*" } else { "" };
     let header_lines = Text::from(vec![
         Line::styled(
@@ -1416,7 +2252,8 @@ fn render_header(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
                 .add_modifier(Modifier::BOLD),
         ),
         Line::raw(format!(
-            "daemon={} activity={} endpoint={} model={} account={} session={}{}",
+            "workspace={} daemon={} activity={} endpoint={} model={} account={} session={}{}",
+            shell.workspace_title(),
             if shell.status_snapshot.running {
                 "running"
             } else {
@@ -1436,36 +2273,41 @@ fn render_header(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
 }
 
 fn render_body(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
-    let transcript_area;
-    let panel_area;
-    if area.width >= PANEL_SPLIT_WIDTH {
-        let [left, right] =
-            Layout::horizontal([Constraint::Percentage(68), Constraint::Percentage(32)])
-                .areas(area);
-        transcript_area = left;
-        panel_area = Some(right);
-    } else {
-        transcript_area = area;
-        panel_area = None;
+    match shell.workspace {
+        Workspace::Chat => render_chat_workspace(frame, area, shell, false),
+        Workspace::Sessions => render_chat_workspace(frame, area, shell, true),
+        Workspace::Settings => render_settings_workspace(frame, area, shell),
+        Workspace::Status => render_status_workspace(frame, area, shell),
+        Workspace::Help => render_help_workspace(frame, area, shell),
+        Workspace::Accounts => render_accounts_workspace(frame, area, shell),
+        Workspace::Diagnostics => render_diagnostics_workspace(frame, area, shell),
+        Workspace::Reserved => render_reserved_workspace(frame, area, shell),
     }
+}
 
-    render_transcript(frame, transcript_area, shell);
-
-    if let Some(panel_area) = panel_area {
-        if shell.side_panel_visible {
-            render_side_panel(frame, panel_area, shell);
-        }
-    } else if shell.overlay_visible {
-        let popup = centered_rect(area, 80, 70);
-        frame.render_widget(Clear, popup);
-        render_side_panel(frame, popup, shell);
+fn render_chat_workspace(
+    frame: &mut Frame,
+    area: Rect,
+    shell: &TuiShellState,
+    show_sessions: bool,
+) {
+    if show_sessions && shell.session_sidebar_items().len() > 1 {
+        let [sidebar, main] = Layout::horizontal([
+            Constraint::Length(SESSION_SIDEBAR_WIDTH),
+            Constraint::Min(20),
+        ])
+        .areas(area);
+        render_sessions_sidebar(frame, sidebar, shell);
+        render_transcript(frame, main, shell);
+    } else {
+        render_transcript(frame, area, shell);
     }
 }
 
 fn render_transcript(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
     let transcript_lines: Vec<Line<'static>> = if shell.transcript().is_empty() {
         vec![Line::raw(
-            "No messages yet. Type text to chat, /sessions to browse saved chats, or /help for commands.",
+            "No messages yet. Type text to chat or /help for commands.",
         )]
     } else {
         shell
@@ -1480,99 +2322,330 @@ fn render_transcript(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
     frame.render_widget(transcript, area);
 }
 
-fn render_side_panel(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
-    let [tabs_area, content_area] =
-        Layout::vertical([Constraint::Length(3), Constraint::Min(5)]).areas(area);
-    let titles = vec!["Status", "Sessions", "Help"];
-    let selected = match shell.side_panel_tab {
-        SidePanelTab::Status => 0,
-        SidePanelTab::Sessions => 1,
-        SidePanelTab::Help => 2,
-    };
-    let tabs = Tabs::new(titles)
-        .select(selected)
-        .block(Block::default().borders(Borders::ALL).title("Panel"))
-        .highlight_style(
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        );
-    frame.render_widget(tabs, tabs_area);
+fn render_sessions_sidebar(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
+    let items: Vec<ListItem<'static>> = shell
+        .session_sidebar_items()
+        .into_iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let selected = index == shell.session_index;
+            let title = match item {
+                SessionSidebarItem::CurrentChat => shell.current_chat_sidebar_title(),
+                SessionSidebarItem::Saved(session_index) => shell
+                    .sessions
+                    .get(session_index)
+                    .map(|session| session.title.clone())
+                    .unwrap_or_else(|| "missing".to_string()),
+                SessionSidebarItem::NewSession => "new session".to_string(),
+            };
+            let visible = compact_session_title(&title, selected, shell.render_tick);
+            let style = if selected {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            ListItem::new(Line::styled(visible, style))
+        })
+        .collect();
+    frame.render_widget(
+        List::new(items).block(Block::default().borders(Borders::ALL).title("Sessions")),
+        area,
+    );
+}
 
-    match shell.side_panel_tab {
-        SidePanelTab::Status => {
-            let lines = Text::from(vec![
-                Line::raw(format!("activity: {}", shell.activity_label())),
-                Line::raw(format!("status: {}", shell.status())),
-                Line::raw(format!("endpoint: {}", shell.status_snapshot.endpoint)),
-                Line::raw(format!("model: {}", shell.status_snapshot.model)),
-                Line::raw(format!(
-                    "active account: {}",
-                    shell.status_snapshot.active_account
-                )),
-                Line::raw(format!(
-                    "session: {}",
-                    shell.current_session.as_deref().unwrap_or("unsaved")
-                )),
-                Line::raw(format!("dirty: {}", shell.is_dirty())),
-            ]);
+fn render_settings_workspace(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
+    let route = shell.current_route();
+    match route {
+        ScreenRoute::SettingsRoot
+        | ScreenRoute::SettingsProvider
+        | ScreenRoute::SettingsOpenAiOAuth
+        | ScreenRoute::SettingsAnthropicOAuth
+        | ScreenRoute::SettingsRuntime => {
+            let title = match route {
+                ScreenRoute::SettingsRoot => "Settings",
+                ScreenRoute::SettingsProvider => "Provider",
+                ScreenRoute::SettingsOpenAiOAuth => "OpenAI OAuth",
+                ScreenRoute::SettingsAnthropicOAuth => "Anthropic OAuth",
+                ScreenRoute::SettingsRuntime => "Runtime",
+                _ => unreachable!(),
+            };
+            let items = shell
+                .menu_items()
+                .into_iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    let prefix = if index == shell.menu_index { ">" } else { " " };
+                    ListItem::new(format!("{prefix} {item}"))
+                })
+                .collect::<Vec<_>>();
             frame.render_widget(
-                Paragraph::new(lines)
-                    .block(Block::default().borders(Borders::ALL).title("Status"))
-                    .wrap(Wrap { trim: false }),
-                content_area,
+                List::new(items).block(Block::default().borders(Borders::ALL).title(title)),
+                area,
             );
         }
-        SidePanelTab::Sessions => {
-            let items: Vec<ListItem<'static>> = if shell.sessions.is_empty() {
-                vec![ListItem::new("No saved sessions")]
-            } else {
-                shell
-                    .sessions
-                    .iter()
-                    .enumerate()
-                    .map(|(index, session)| {
-                        let prefix = if index == shell.session_index {
-                            ">"
-                        } else {
-                            " "
-                        };
-                        ListItem::new(format!("{prefix} {} ({})", session.title, session.model))
-                    })
-                    .collect()
+        ScreenRoute::SettingsModelForm
+        | ScreenRoute::SettingsEndpointForm
+        | ScreenRoute::SettingsSystemPromptForm
+        | ScreenRoute::SettingsRuntimeTimeoutForm
+        | ScreenRoute::SettingsRuntimeRetriesForm => {
+            let lines = match route {
+                ScreenRoute::SettingsModelForm => vec![
+                    Line::raw("Set the active model."),
+                    Line::raw(format!("current: {}", shell.config_snapshot.endpoint.model)),
+                ],
+                ScreenRoute::SettingsEndpointForm => vec![
+                    Line::raw("Set the endpoint base URL."),
+                    Line::raw(format!(
+                        "current: {}",
+                        shell.config_snapshot.endpoint.base_url
+                    )),
+                ],
+                ScreenRoute::SettingsSystemPromptForm => {
+                    vec![Line::raw("Set the current session system prompt.")]
+                }
+                ScreenRoute::SettingsRuntimeTimeoutForm => vec![
+                    Line::raw("Set request timeout (ms)."),
+                    Line::raw(format!(
+                        "current: {}",
+                        shell.config_snapshot.runtime.request_timeout_ms
+                    )),
+                ],
+                ScreenRoute::SettingsRuntimeRetriesForm => vec![
+                    Line::raw("Set max retries."),
+                    Line::raw(format!(
+                        "current: {}",
+                        shell.config_snapshot.runtime.max_retries
+                    )),
+                ],
+                _ => unreachable!(),
             };
             frame.render_widget(
-                List::new(items).block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title("Sessions (Ctrl+R, Up/Down, Enter)"),
-                ),
-                content_area,
+                Paragraph::new(Text::from(lines))
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title("Settings Form"),
+                    )
+                    .wrap(Wrap { trim: false }),
+                area,
             );
         }
-        SidePanelTab::Help => {
-            frame.render_widget(
-                Paragraph::new(Text::from(vec![
-                    Line::raw(EXTENDED_HELP),
-                    Line::raw("Enter send | Ctrl+J newline | Tab autocomplete"),
-                    Line::raw("Ctrl+R sessions | Esc close/clear/quit"),
-                ]))
-                .block(Block::default().borders(Borders::ALL).title("Help"))
-                .wrap(Wrap { trim: false }),
-                content_area,
-            );
+        ScreenRoute::AccountList { .. } | ScreenRoute::AccountDetail { .. } => {
+            render_accounts_workspace(frame, area, shell)
         }
+        _ => render_status_workspace(frame, area, shell),
     }
+}
+
+fn render_status_workspace(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
+    let lines = Text::from(vec![
+        Line::raw(format!("activity: {}", shell.activity_label())),
+        Line::raw(format!("status: {}", shell.status())),
+        Line::raw(format!("endpoint: {}", shell.status_snapshot.endpoint)),
+        Line::raw(format!("model: {}", shell.status_snapshot.model)),
+        Line::raw(format!(
+            "active account: {}",
+            shell.status_snapshot.active_account
+        )),
+        Line::raw(format!("session: {}", shell.session_title_for_header())),
+        Line::raw(format!("dirty: {}", shell.is_dirty())),
+        Line::raw(format!(
+            "request timeout: {}",
+            shell.config_snapshot.runtime.request_timeout_ms
+        )),
+        Line::raw(format!(
+            "streaming: {}",
+            shell.config_snapshot.runtime.stream_responses
+        )),
+    ]);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title("Status"))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn render_help_workspace(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
+    let [top, bottom] = Layout::vertical([Constraint::Length(7), Constraint::Min(5)]).areas(area);
+    frame.render_widget(
+        Paragraph::new(Text::from(vec![
+            Line::raw("/sessions    browse chats"),
+            Line::raw("/settings    open settings"),
+            Line::raw("/status      show status"),
+            Line::raw("/accounts    manage accounts"),
+            Line::raw("/diagnostics show diagnostics"),
+            Line::raw("/more        extra tools"),
+        ]))
+        .block(Block::default().borders(Borders::ALL).title("Navigation"))
+        .wrap(Wrap { trim: false }),
+        top,
+    );
+    frame.render_widget(
+        Paragraph::new(Text::from(vec![
+            Line::raw(EXTENDED_HELP),
+            Line::raw("Up/Down navigate menus and lists."),
+            Line::raw("Enter opens or activates."),
+            Line::raw("Esc always backs out one level before clearing/quitting."),
+            Line::raw(format!("current status: {}", shell.status())),
+        ]))
+        .block(Block::default().borders(Borders::ALL).title("Help"))
+        .wrap(Wrap { trim: false }),
+        bottom,
+    );
+}
+
+fn render_accounts_workspace(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
+    match shell.current_route() {
+        ScreenRoute::AccountsRoot => {
+            let items = shell
+                .menu_items()
+                .into_iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    let prefix = if index == shell.menu_index { ">" } else { " " };
+                    ListItem::new(format!("{prefix} {item}"))
+                })
+                .collect::<Vec<_>>();
+            frame.render_widget(
+                List::new(items).block(Block::default().borders(Borders::ALL).title("Accounts")),
+                area,
+            );
+        }
+        ScreenRoute::AccountList { provider, action } => {
+            let title = match action {
+                AccountActionMode::Manage => "Accounts",
+                AccountActionMode::Activate => "Activate Account",
+                AccountActionMode::Disable => "Disable Account",
+                AccountActionMode::Disconnect => "Disconnect Account",
+            };
+            let items = shell
+                .accounts_for_current_route()
+                .unwrap_or_default()
+                .into_iter()
+                .enumerate()
+                .map(|(index, account)| {
+                    let prefix = if index == shell.account_index {
+                        ">"
+                    } else {
+                        " "
+                    };
+                    ListItem::new(format!(
+                        "{prefix} {} [{}]",
+                        account.label,
+                        match account.state {
+                            oberon4_core::AccountState::Active => "active",
+                            oberon4_core::AccountState::Disabled => "disabled",
+                        }
+                    ))
+                })
+                .collect::<Vec<_>>();
+            frame.render_widget(
+                List::new(if items.is_empty() {
+                    vec![ListItem::new("No accounts")]
+                } else {
+                    items
+                })
+                .block(Block::default().borders(Borders::ALL).title(format!(
+                    "{} ({})",
+                    title,
+                    provider_name_for_oauth(provider)
+                ))),
+                area,
+            );
+        }
+        ScreenRoute::AccountDetail { provider } => {
+            let account = shell.current_account();
+            let mut lines = vec![Line::raw(format!(
+                "provider: {}",
+                provider_name_for_oauth(provider)
+            ))];
+            if let Some(account) = account {
+                lines.push(Line::raw(format!("label: {}", account.label)));
+                lines.push(Line::raw(format!("id: {}", account.id)));
+                lines.push(Line::raw(format!(
+                    "state: {}",
+                    match account.state {
+                        oberon4_core::AccountState::Active => "active",
+                        oberon4_core::AccountState::Disabled => "disabled",
+                    }
+                )));
+            }
+            let menu = shell
+                .menu_items()
+                .into_iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    let prefix = if index == shell.menu_index { ">" } else { " " };
+                    Line::raw(format!("{prefix} {item}"))
+                })
+                .collect::<Vec<_>>();
+            lines.extend(menu);
+            frame.render_widget(
+                Paragraph::new(Text::from(lines))
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title("Account Detail"),
+                    )
+                    .wrap(Wrap { trim: false }),
+                area,
+            );
+        }
+        _ => render_status_workspace(frame, area, shell),
+    }
+}
+
+fn render_diagnostics_workspace(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
+    frame.render_widget(
+        Paragraph::new(Text::from(vec![
+            Line::raw(format!(
+                "endpoint health: {}",
+                shell.diagnostics_endpoint_health
+            )),
+            Line::raw(format!("activity: {}", shell.activity_label())),
+            Line::raw(format!("status: {}", shell.status())),
+            Line::raw(format!("endpoint: {}", shell.status_snapshot.endpoint)),
+            Line::raw(format!("model: {}", shell.status_snapshot.model)),
+        ]))
+        .block(Block::default().borders(Borders::ALL).title("Diagnostics"))
+        .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn render_reserved_workspace(frame: &mut Frame, area: Rect, _shell: &TuiShellState) {
+    frame.render_widget(
+        Paragraph::new("Reserved workspace. Future tools and views will live here.")
+            .block(Block::default().borders(Borders::ALL).title("More"))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
 }
 
 fn render_footer(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
     let [input_area, hint_area] =
         Layout::vertical([Constraint::Length(4), Constraint::Length(1)]).areas(area);
-    let input = Paragraph::new(shell.input())
-        .block(Block::default().borders(Borders::ALL).title("Composer"))
-        .wrap(Wrap { trim: false });
+    let input_title = match shell.focus {
+        FocusTarget::Composer => "Composer",
+        FocusTarget::Form => "Editor",
+        _ => "Workspace",
+    };
     frame.render_widget(Clear, input_area);
-    frame.render_widget(input, input_area);
+    if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
+        let input = Paragraph::new(shell.input())
+            .block(Block::default().borders(Borders::ALL).title(input_title))
+            .wrap(Wrap { trim: false });
+        frame.render_widget(input, input_area);
+    } else {
+        frame.render_widget(
+            Paragraph::new(format!("{} workspace", shell.workspace_title()))
+                .block(Block::default().borders(Borders::ALL).title(input_title)),
+            input_area,
+        );
+    }
 
     if let Some(autocomplete) = shell.autocomplete.as_ref() {
         let suggestion = autocomplete
@@ -1585,10 +2658,12 @@ fn render_footer(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
             hint_area,
         );
     } else {
-        frame.render_widget(
-            Paragraph::new("Enter send | Ctrl+J newline | Tab command autocomplete | Ctrl+R sessions | Esc close/clear/quit"),
-            hint_area,
-        );
+        let hint = if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
+            "Enter apply/send | Ctrl+J newline | Tab autocomplete | Esc back/clear/quit"
+        } else {
+            "Up/Down navigate | Enter select | Esc back | /sessions list"
+        };
+        frame.render_widget(Paragraph::new(hint), hint_area);
     }
 }
 
@@ -1636,6 +2711,10 @@ pub fn parse_tui_command(input: &str) -> Result<TuiCommand, OberonError> {
         "/quit" => Ok(TuiCommand::Quit),
         "/status" => Ok(TuiCommand::Status),
         "/sessions" => Ok(TuiCommand::Sessions),
+        "/settings" => Ok(TuiCommand::Settings),
+        "/accounts" => Ok(TuiCommand::Accounts),
+        "/diagnostics" => Ok(TuiCommand::Diagnostics),
+        "/more" => Ok(TuiCommand::More),
         "/config" => Ok(TuiCommand::Config),
         "/model" => require_argument(rest, "/model").map(TuiCommand::Model),
         "/endpoint" => require_argument(rest, "/endpoint").map(TuiCommand::Endpoint),
@@ -1699,20 +2778,34 @@ fn composer_lines(input: &str) -> Vec<&str> {
     }
 }
 
-fn centered_rect(area: Rect, width_percent: u16, height_percent: u16) -> Rect {
-    let [_top, middle, _bottom] = Layout::vertical([
-        Constraint::Percentage((100_u16.saturating_sub(height_percent)) / 2),
-        Constraint::Percentage(height_percent),
-        Constraint::Percentage(100_u16.saturating_sub(height_percent).div_ceil(2)),
-    ])
-    .areas(area);
-    let [_left, center, _right] = Layout::horizontal([
-        Constraint::Percentage((100_u16.saturating_sub(width_percent)) / 2),
-        Constraint::Percentage(width_percent),
-        Constraint::Percentage(100_u16.saturating_sub(width_percent).div_ceil(2)),
-    ])
-    .areas(middle);
-    center
+fn provider_name_for_oauth(provider: OAuthProviderKind) -> &'static str {
+    match provider {
+        OAuthProviderKind::OpenAi => "OpenAI",
+        OAuthProviderKind::Anthropic => "Anthropic",
+    }
+}
+
+fn compact_session_title(title: &str, selected: bool, tick: u64) -> String {
+    let normalized = title.trim();
+    if normalized.is_empty() {
+        return "untitled".to_string();
+    }
+    let chars = normalized.chars().collect::<Vec<_>>();
+    if chars.len() <= SESSION_VISIBLE_WIDTH {
+        return normalized.to_string();
+    }
+    if !selected {
+        return chars[..SESSION_VISIBLE_WIDTH].iter().collect();
+    }
+    let mut marquee = chars.clone();
+    marquee.extend("   ".chars());
+    marquee.extend(chars.iter().copied());
+    let offset = ((tick / 4) as usize) % (chars.len() + 3);
+    marquee
+        .into_iter()
+        .skip(offset)
+        .take(SESSION_VISIBLE_WIDTH)
+        .collect()
 }
 
 fn redacted_config_json(config: &AppConfig) -> Result<String, OberonError> {
@@ -1881,16 +2974,16 @@ mod tests {
     };
 
     use super::{
-        AsyncUiEvent, BinaryLaunchTarget, DaemonBackedTuiApp, FocusTarget, PANEL_SPLIT_WIDTH,
-        PendingSubmission, SidePanelTab, TuiApp, TuiCommand, TuiShellState, UiLine,
+        AsyncUiEvent, BinaryLaunchTarget, DaemonBackedTuiApp, FocusTarget, PendingSubmission,
+        ScreenRoute, TuiApp, TuiCommand, TuiShellState, UiLine, Workspace,
         finalize_streamed_assistant, handle_async_ui_event, handle_pending_local_command,
         handle_pending_timeout, parse_tui_command, resolve_binary_launch_target,
         start_async_submit, status_line,
     };
     use oberon4_auth::{AccountRegistry, InMemoryAccountMetadataStore};
     use oberon4_core::{
-        AppConfig, ChatMessage, ChatRole, FakeChatProvider, FakeOAuthProvider,
-        InMemorySecretStore, OAuthProviderKind,
+        AppConfig, ChatMessage, ChatRole, FakeChatProvider, FakeOAuthProvider, InMemorySecretStore,
+        OAuthProviderKind, SessionId, SessionSummary,
     };
     use oberon4_daemon::{DaemonApp, DaemonIpcClient, DaemonRuntime, serve_unix_socket};
 
@@ -1907,6 +3000,10 @@ mod tests {
         assert_eq!(
             parse_tui_command("/sessions").unwrap(),
             TuiCommand::Sessions
+        );
+        assert_eq!(
+            parse_tui_command("/settings").unwrap(),
+            TuiCommand::Settings
         );
         assert_eq!(
             parse_tui_command("/model o4-mini").unwrap(),
@@ -2160,23 +3257,62 @@ mod tests {
     }
 
     #[test]
-    fn shell_session_panel_tracks_layout_and_dirty_state() {
+    fn shell_workspace_escape_returns_to_chat_composer() {
         let mut shell = TuiShellState::default();
-        shell.show_tab(SidePanelTab::Sessions, PANEL_SPLIT_WIDTH);
-        assert!(shell.side_panel_visible);
-        assert!(!shell.overlay_visible);
-        assert!(matches!(shell.focus, FocusTarget::Sessions));
+        shell.set_workspace(Workspace::Settings);
+        shell.push_route(ScreenRoute::SettingsRuntime, FocusTarget::Menu);
+        assert!(matches!(shell.workspace, Workspace::Settings));
+        assert!(matches!(
+            shell.current_route(),
+            ScreenRoute::SettingsRuntime
+        ));
 
-        shell.show_tab(SidePanelTab::Sessions, PANEL_SPLIT_WIDTH - 1);
-        assert!(!shell.side_panel_visible);
-        assert!(shell.overlay_visible);
+        shell.handle_escape();
+        assert!(matches!(shell.current_route(), ScreenRoute::SettingsRoot));
+        assert!(matches!(shell.focus, FocusTarget::Menu));
+
+        shell.handle_escape();
+        assert!(matches!(shell.focus, FocusTarget::Composer));
+        assert!(matches!(shell.workspace, Workspace::Chat));
+    }
+
+    #[test]
+    fn shell_session_navigation_uses_list_focus() {
+        let mut shell = TuiShellState::default();
+        shell.set_workspace(Workspace::Sessions);
+        shell.sessions = vec![
+            SessionSummary {
+                id: SessionId::new("first"),
+                title: "first".to_string(),
+                provider: oberon4_core::ChatProviderKind::OpenAiCompatible,
+                model: "gpt-5.1-codex-mini".to_string(),
+            },
+            SessionSummary {
+                id: SessionId::new("second"),
+                title: "second".to_string(),
+                provider: oberon4_core::ChatProviderKind::OpenAiCompatible,
+                model: "gpt-5.1-codex-mini".to_string(),
+            },
+        ];
+
+        shell.move_session_selection(1);
+
+        assert!(matches!(shell.focus, FocusTarget::List));
+        assert_eq!(shell.session_index, 1);
+    }
+
+    #[test]
+    fn shell_workspace_tracks_dirty_state() {
+        let mut shell = TuiShellState::default();
+        shell.set_workspace(Workspace::Sessions);
+        assert!(matches!(shell.focus, FocusTarget::List));
 
         shell.transcript.push(UiLine {
             role: "user".to_string(),
             content: "hello".to_string(),
         });
         assert!(shell.is_dirty());
-        shell.mark_loaded_session(Some("demo".to_string()));
+        shell.mark_loaded_session(Some("demo".to_string()), Some("demo".to_string()));
         assert!(!shell.is_dirty());
         shell.transcript.push(UiLine {
             role: "assistant".to_string(),
@@ -2221,8 +3357,8 @@ mod tests {
         }
         shell.submit(&mut app).unwrap();
 
-        assert!(shell.status().contains("/help"));
-        assert_eq!(shell.transcript()[0].role, "system");
+        assert_eq!(shell.status(), "help workspace opened");
+        assert!(matches!(shell.workspace, Workspace::Help));
 
         let client = DaemonIpcClient::new(&socket_path);
         let _ = client.send(&oberon4_core::DaemonCommand::Shutdown).unwrap();
@@ -2265,8 +3401,10 @@ mod tests {
         };
         shell.submit(&mut app).unwrap();
 
-        assert_eq!(shell.status(), "sessions panel opened");
-        assert!(matches!(shell.side_panel_tab, SidePanelTab::Sessions));
+        assert_eq!(shell.status(), "sessions workspace opened");
+        assert!(matches!(shell.workspace, Workspace::Sessions));
+        assert!(matches!(shell.focus, FocusTarget::List));
+        assert_eq!(shell.session_sidebar_items().len(), 2);
 
         let client = DaemonIpcClient::new(&socket_path);
         let _ = client.send(&oberon4_core::DaemonCommand::Shutdown).unwrap();
@@ -2315,13 +3453,8 @@ mod tests {
         assert_eq!(shell.status(), "waiting on provider response...");
         assert_eq!(shell.transcript()[0].role, "user");
         assert_eq!(shell.transcript()[0].content, "hello");
-        assert_eq!(shell.transcript()[1].role, "status");
-        assert_eq!(
-            shell.transcript()[1].content,
-            "waiting on provider response..."
-        );
-        assert_eq!(shell.transcript()[2].role, "assistant");
-        assert_eq!(shell.transcript()[2].content, "...");
+        assert_eq!(shell.transcript()[1].role, "assistant");
+        assert_eq!(shell.transcript()[1].content, "...");
 
         shell.push_input_char('x');
 
@@ -2364,7 +3497,6 @@ mod tests {
             receiver: mpsc::channel().1,
             started_at: Instant::now(),
             timeout: Duration::from_secs(1),
-            status_line_index: None,
             assistant_line_index: 0,
             tool_line_indices: BTreeMap::new(),
             tool_state: BTreeMap::new(),
@@ -2446,7 +3578,6 @@ mod tests {
             receiver,
             started_at: Instant::now() - Duration::from_secs(2),
             timeout: Duration::from_millis(10),
-            status_line_index: None,
             assistant_line_index: 0,
             tool_line_indices: BTreeMap::new(),
             tool_state: BTreeMap::new(),

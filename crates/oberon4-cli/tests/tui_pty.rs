@@ -375,10 +375,9 @@ fn tui_pty_initial_render_and_quit() {
 
     let mut harness = PtyHarness::spawn(&cli, &data_dir, &socket_path, &[]);
     harness.wait_for_text("Oberon4 TUI", Duration::from_secs(5));
-    harness.wait_for_text("activity: idle", Duration::from_secs(5));
-    harness.wait_for_text("/sessions to browse saved chats", Duration::from_secs(5));
+    harness.wait_for_text("workspace=Chat", Duration::from_secs(5));
     harness.wait_for_text(
-        "Enter send | Ctrl+J newline | Tab command autocomplete | Ctrl+R sessions | Esc close/clear/quit",
+        "Enter apply/send | Ctrl+J newline | Tab autocomplete | Esc back/clear/quit",
         Duration::from_secs(5),
     );
 
@@ -409,10 +408,30 @@ fn tui_pty_command_and_prompt_flow() {
 
     let mut harness = PtyHarness::spawn(&cli, &data_dir, &socket_path, &[]);
     harness.wait_for_text("Oberon4 TUI", Duration::from_secs(5));
-    harness.wait_for_text("activity: idle", Duration::from_secs(5));
+    harness.wait_for_text("workspace=Chat", Duration::from_secs(5));
+
+    harness.send_line("/settings");
+    harness.wait_for_text("workspace=Settings", Duration::from_secs(5));
+    harness.wait_for_text("OpenAI OAuth", Duration::from_secs(5));
+
+    harness.send_bytes(&[27]);
+    harness.wait_for_text("workspace=Chat", Duration::from_secs(5));
+
+    harness.send_line("/status");
+    harness.wait_for_text("workspace=Status", Duration::from_secs(5));
+    harness.wait_for_text("request timeout:", Duration::from_secs(5));
+
+    harness.send_bytes(&[27]);
+    harness.wait_for_text("workspace=Chat", Duration::from_secs(5));
+
+    harness.send_line("/help");
+    harness.wait_for_text("workspace=Help", Duration::from_secs(5));
+    harness.wait_for_text("/sessions    browse chats", Duration::from_secs(5));
+
+    harness.send_bytes(&[27]);
+    harness.wait_for_text("workspace=Chat", Duration::from_secs(5));
 
     harness.send_line("say hello from pty");
-    harness.wait_for_text("waiting on provider response...", Duration::from_secs(5));
     harness.wait_for_text("pty smoke ok", Duration::from_secs(5));
 
     harness.send_line("/save smoke");
@@ -421,13 +440,14 @@ fn tui_pty_command_and_prompt_flow() {
     harness.send_line("/fork smoke-copy");
     harness.wait_for_text("forked session smoke-copy", Duration::from_secs(5));
 
-    harness.send_bytes(&[18]);
-    harness.wait_for_text("Sessions (Ctrl+R, Up/Down, Enter)", Duration::from_secs(5));
-    harness.wait_for_text("smoke", Duration::from_secs(5));
-    harness.wait_for_text("smoke-copy", Duration::from_secs(5));
+    harness.send_line("/sessions");
+    harness.wait_for_text("workspace=Sessions", Duration::from_secs(5));
     harness.send_bytes(b"\x1b[B");
     harness.send_bytes(b"\r");
-    harness.wait_for_text("loaded session", Duration::from_secs(5));
+    harness.wait_for_text("workspace=Chat", Duration::from_secs(5));
+    let screen = harness.screen_contents();
+    assert!(!screen.contains("command: /load"));
+    assert!(!screen.contains("loaded session"));
 
     harness.send_bytes(&[3]);
     harness.wait_for_exit();
@@ -453,7 +473,7 @@ fn tui_pty_inline_mode_preserves_render_without_alt_screen() {
     let mut harness = PtyHarness::spawn(&cli, &data_dir, &socket_path, &["--no-alt-screen"]);
     harness.wait_for_text("Oberon4 TUI", Duration::from_secs(5));
     harness.wait_for_text("Overview", Duration::from_secs(5));
-    harness.wait_for_text("Composer", Duration::from_secs(5));
+    harness.wait_for_text("workspace=Chat", Duration::from_secs(5));
 
     let _ = mock_server.base_url;
 

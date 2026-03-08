@@ -82,7 +82,7 @@ Build a local-first, modular agent host with:
   - `AC-008.7`: all CLI commands return deterministic exit codes and sanitized errors.
 
 - `FR-009` TUI command surface
-  - `AC-009.1`: TUI supports `/help`, `/quit`, `/status`, and `/sessions`.
+  - `AC-009.1`: TUI supports `/help`, `/quit`, `/status`, `/sessions`, `/settings`, `/accounts`, `/diagnostics`, and `/more`.
   - `AC-009.2`: TUI supports `/config` to show effective runtime configuration.
   - `AC-009.3`: TUI supports `/model <name>` to switch active model for the session.
   - `AC-009.4`: TUI supports `/endpoint <url>` to override endpoint for the session.
@@ -90,8 +90,8 @@ Build a local-first, modular agent host with:
   - `AC-009.6`: TUI supports `/clear` to clear the visible transcript buffer.
   - `AC-009.7`: TUI supports `/save <name>`, `/load <name>`, and `/fork <name>` for session persistence and branching.
   - `AC-009.8`: invalid or unsupported TUI commands fail with explicit help text and no state corruption.
-  - `AC-009.9`: TUI shows a persistent status bar, transcript pane, contextual side panel, and composer help row without requiring daemon contract changes.
-  - `AC-009.10`: TUI supports multiline drafting (`Ctrl+J`), recent-session browser (`Ctrl+R`), slash-command autocomplete (`Tab`), and ordered `Esc` close/clear/quit handling.
+  - `AC-009.9`: TUI uses a chat-first layout with transcript + composer as the default surface, a session browser that opens from `/sessions`, and full-pane menu screens for settings, status, help, accounts, diagnostics, and reserved future tools without requiring daemon contract changes.
+  - `AC-009.10`: TUI supports multiline drafting (`Ctrl+J`), slash-command autocomplete (`Tab`), ordered `Esc` back/clear/quit handling, automatic session titling on first exchange, and session selection that returns focus to chat input.
 
 ## 5. Non-Functional Requirements
 - `NFR-001` Reliability: no panics on malformed endpoint responses.
@@ -202,9 +202,19 @@ Build a local-first, modular agent host with:
 - `/quit`
   - exits the TUI cleanly
 - `/status`
-  - shows daemon status, active endpoint, model, and account summary
+  - opens the full-pane status workspace
+- `/sessions`
+  - opens the chat session browser; when multiple sessions exist it shows a left-side session list and loads the selected session on `Enter`
+- `/settings`
+  - opens the full-pane settings workspace
+- `/accounts`
+  - opens the full-pane account-management workspace
+- `/diagnostics`
+  - opens the full-pane diagnostics workspace
+- `/more`
+  - opens the reserved full-pane tools workspace
 - `/config`
-  - shows effective runtime configuration with secrets redacted
+  - redirects to the settings workspace while preserving redacted config views
 - `/model <name>`
   - switches the active model for the current session
 - `/endpoint <url>`
@@ -217,6 +227,12 @@ Build a local-first, modular agent host with:
   - saves the current session transcript and local session metadata
 - `/load <name>`
   - loads a previously saved session transcript and metadata
+- `Ctrl+J`
+  - inserts a newline in the composer without sending
+- `Tab`
+  - cycles slash-command autocomplete when the current draft begins with `/`
+- `Esc`
+  - backs out of the current menu, form, or session browser before returning to chat, then clears draft, then quits on an empty composer
 
 ### 8.4 Command Contract Rules
 - CLI commands must return deterministic exit codes and sanitized errors.

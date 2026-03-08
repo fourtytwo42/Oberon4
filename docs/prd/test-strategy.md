@@ -77,9 +77,9 @@ Rules:
 
 ## 3. Coverage Expectations by Requirement
 - `FR-001`: lifecycle tests (start, health, graceful stop)
-- `FR-002`: command parsing + render output tests plus PTY smoke for the real `/help`, `/status`, prompt, `/save`, `/load`, `/quit` path
-  - include unit coverage for slash autocomplete, multiline composer behavior, session-browser state transitions, `/fork`, and `Esc` precedence
-  - include PTY coverage for the real status bar/layout render, prompt round-trip, session browser, save/fork/load path, and `--no-alt-screen` launch mode
+- `FR-002`: command parsing + render output tests plus PTY smoke for the real slash-command chat flow and `/help`, `/status`, `/sessions`, `/settings`, prompt, `/save`, `/load`, `/quit` path
+  - include unit coverage for screen-stack `Esc` precedence, slash autocomplete, multiline composer behavior, session-browser state transitions, `/fork`, auto-titled session persistence, and settings/account menu actions
+  - include PTY coverage for the chat-first render, session-browser sidebar behavior, prompt round-trip, `/sessions`, `/settings`, `/status`, `/help`, save/fork/load path, and `--no-alt-screen` launch mode
 - `FR-003`: endpoint config validation + mapping tests + timeout tests
 - `FR-004`: crate API contract tests
 - `FR-005`: tray adapter tests for action mapping and unsupported platform fallback
