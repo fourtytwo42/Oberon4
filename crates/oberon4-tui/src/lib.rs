@@ -192,6 +192,9 @@ struct AutocompleteState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TuiShellState {
     input: String,
+    input_history: Vec<String>,
+    input_history_index: Option<usize>,
+    input_history_scratch: Option<String>,
     status: String,
     activity: ActivityState,
     should_quit: bool,
@@ -328,6 +331,9 @@ impl Default for TuiShellState {
     fn default() -> Self {
         Self {
             input: String::new(),
+            input_history: Vec::new(),
+            input_history_index: None,
+            input_history_scratch: None,
             status: "ready".to_string(),
             activity: ActivityState::Idle,
             should_quit: false,
@@ -1060,19 +1066,76 @@ impl TuiShellState {
     }
 
     pub fn push_input_char(&mut self, ch: char) {
+        self.clear_history_navigation_if_active();
         self.input.push(ch);
         self.focus = FocusTarget::Composer;
         self.refresh_autocomplete();
     }
 
     pub fn backspace(&mut self) {
+        self.clear_history_navigation_if_active();
         let _ = self.input.pop();
         self.refresh_autocomplete();
     }
 
     pub fn insert_newline(&mut self) {
+        self.clear_history_navigation_if_active();
         self.input.push('\n');
         self.refresh_autocomplete();
+    }
+
+    fn push_input_history_entry(&mut self, value: &str) {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        self.input_history.push(trimmed.to_string());
+        self.reset_input_history_navigation();
+    }
+
+    fn reset_input_history_navigation(&mut self) {
+        self.input_history_index = None;
+        self.input_history_scratch = None;
+    }
+
+    fn clear_history_navigation_if_active(&mut self) {
+        if self.input_history_index.is_some() {
+            self.input_history_index = None;
+            self.input_history_scratch = None;
+        }
+    }
+
+    fn recall_input_history_older(&mut self) -> bool {
+        if self.input_history.is_empty() {
+            return false;
+        }
+        let next_index = match self.input_history_index {
+            Some(index) => index.saturating_sub(1),
+            None => {
+                self.input_history_scratch = Some(self.input.clone());
+                self.input_history.len().saturating_sub(1)
+            }
+        };
+        self.input_history_index = Some(next_index);
+        self.input = self.input_history[next_index].clone();
+        self.refresh_autocomplete();
+        true
+    }
+
+    fn recall_input_history_newer(&mut self) -> bool {
+        let Some(index) = self.input_history_index else {
+            return false;
+        };
+        if index + 1 < self.input_history.len() {
+            let next_index = index + 1;
+            self.input_history_index = Some(next_index);
+            self.input = self.input_history[next_index].clone();
+        } else {
+            self.input_history_index = None;
+            self.input = self.input_history_scratch.take().unwrap_or_default();
+        }
+        self.refresh_autocomplete();
+        true
     }
 
     pub fn activity_label(&self) -> &'static str {
@@ -2118,6 +2181,7 @@ impl TuiShellState {
         };
 
         if let Some(command) = command.as_ref() {
+            self.push_input_history_entry(trimmed);
             self.open_route_for_command(command);
             if matches!(
                 command,
@@ -2148,6 +2212,7 @@ impl TuiShellState {
             }
         }
 
+        self.push_input_history_entry(trimmed);
         match command {
             Some(TuiCommand::New) => self.activity = ActivityState::Idle,
             Some(TuiCommand::Save(_)) => self.activity = ActivityState::Saving,
@@ -2473,6 +2538,9 @@ fn run_inline_terminal_loop(
                     }
                     rerender_workspace = true;
                 }
+                FocusTarget::Composer if matches!(shell.workspace, Workspace::Chat) => {
+                    rerender_workspace = shell.recall_input_history_older();
+                }
                 _ => {}
             },
             KeyCode::Down => match shell.focus {
@@ -2494,6 +2562,9 @@ fn run_inline_terminal_loop(
                         _ => {}
                     }
                     rerender_workspace = true;
+                }
+                FocusTarget::Composer if matches!(shell.workspace, Workspace::Chat) => {
+                    rerender_workspace = shell.recall_input_history_newer();
                 }
                 _ => {}
             },
@@ -2682,10 +2753,8 @@ fn run_terminal_loop(
                             }
                             _ => {}
                         },
-                        FocusTarget::Composer
-                            if matches!(shell.workspace, Workspace::Chat | Workspace::Sessions) =>
-                        {
-                            shell.scroll_transcript_by(-1);
+                        FocusTarget::Composer if matches!(shell.workspace, Workspace::Chat) => {
+                            shell.recall_input_history_older();
                         }
                         _ => {}
                     },
@@ -2703,10 +2772,8 @@ fn run_terminal_loop(
                             }
                             _ => {}
                         },
-                        FocusTarget::Composer
-                            if matches!(shell.workspace, Workspace::Chat | Workspace::Sessions) =>
-                        {
-                            shell.scroll_transcript_by(1);
+                        FocusTarget::Composer if matches!(shell.workspace, Workspace::Chat) => {
+                            shell.recall_input_history_newer();
                         }
                         _ => {}
                     },
@@ -3808,7 +3875,7 @@ fn render_help_workspace(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
     frame.render_widget(
         Paragraph::new(Text::from(vec![
             Line::raw(EXTENDED_HELP),
-            Line::raw("Up/Down navigate menus and lists."),
+            Line::raw("Up/Down recall prompt history in composer; navigate menus and lists elsewhere."),
             Line::raw("Enter opens or activates."),
             Line::raw("Esc always backs out one level before clearing/quitting."),
             Line::raw(format!("current status: {}", shell.status())),
@@ -3981,7 +4048,7 @@ fn render_footer(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
         );
     } else {
         let hint = if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
-            "/new /help /sessions /settings /status /accounts /diagnostics /more /quit"
+            "/new /help /sessions /settings /status /accounts /diagnostics /more /quit | Up/Down history"
         } else if matches!(shell.workspace, Workspace::Sessions) {
             "Type to filter | Up/Down preview | Enter open | Esc clear/back"
         } else {
@@ -5352,6 +5419,40 @@ mod tests {
     }
 
     #[test]
+    fn composer_history_recalls_latest_and_restores_scratch_draft() {
+        let mut shell = TuiShellState::default();
+        shell.push_input_history_entry("first");
+        shell.push_input_history_entry("second");
+        shell.input = "draft".to_string();
+
+        assert!(shell.recall_input_history_older());
+        assert_eq!(shell.input(), "second");
+
+        assert!(shell.recall_input_history_older());
+        assert_eq!(shell.input(), "first");
+
+        assert!(shell.recall_input_history_newer());
+        assert_eq!(shell.input(), "second");
+
+        assert!(shell.recall_input_history_newer());
+        assert_eq!(shell.input(), "draft");
+    }
+
+    #[test]
+    fn typing_after_history_recall_exits_history_navigation() {
+        let mut shell = TuiShellState::default();
+        shell.push_input_history_entry("first");
+        shell.input = "draft".to_string();
+
+        assert!(shell.recall_input_history_older());
+        assert_eq!(shell.input(), "first");
+
+        shell.push_input_char('!');
+        assert_eq!(shell.input(), "first!");
+        assert!(shell.input_history_index.is_none());
+    }
+
+    #[test]
     fn shell_workspace_escape_returns_to_chat_composer() {
         let mut shell = TuiShellState::default();
         shell.set_workspace(Workspace::Settings);
@@ -5596,6 +5697,56 @@ mod tests {
 
         assert_eq!(shell.status(), "help overlay opened");
         assert!(matches!(shell.workspace, Workspace::Help));
+
+        let client = DaemonIpcClient::new(&socket_path);
+        let _ = client.send(&oberon4_core::DaemonCommand::Shutdown).unwrap();
+        handle.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn submit_adds_prompts_and_commands_to_input_history() {
+        let socket_path = std::env::temp_dir().join(format!(
+            "oberon4-tui-shell-history-test-{}.sock",
+            std::process::id()
+        ));
+        let thread_socket = socket_path.clone();
+        let handle = thread::spawn(move || {
+            let app = DaemonApp::new(
+                DaemonRuntime::default(),
+                FakeChatProvider {
+                    reply: "daemon reply".to_string(),
+                },
+                FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
+                FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+                AccountRegistry::default(),
+                InMemorySecretStore::default(),
+                InMemoryAccountMetadataStore::default(),
+            );
+            serve_unix_socket(&thread_socket, app)
+        });
+
+        for _ in 0..20 {
+            if socket_path.exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+
+        let mut app = DaemonBackedTuiApp::new(DaemonIpcClient::new(&socket_path));
+        let mut shell = TuiShellState {
+            input: "hello there".to_string(),
+            ..TuiShellState::default()
+        };
+        shell.submit(&mut app).unwrap();
+        shell.input = "/help".to_string();
+        shell.submit(&mut app).unwrap();
+        shell.input = "   ".to_string();
+        shell.submit(&mut app).unwrap();
+
+        assert_eq!(
+            shell.input_history,
+            vec!["hello there".to_string(), "/help".to_string()]
+        );
 
         let client = DaemonIpcClient::new(&socket_path);
         let _ = client.send(&oberon4_core::DaemonCommand::Shutdown).unwrap();

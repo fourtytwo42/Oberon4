@@ -413,6 +413,10 @@ fn tui_pty_command_and_prompt_flow() {
     harness.wait_for_text("Transcript", Duration::from_secs(5));
     harness.wait_for_text("Sessions", Duration::from_secs(5));
 
+    harness.send_line("say hello from pty");
+    harness.wait_for_text("say hello from pty", Duration::from_secs(5));
+    harness.wait_for_text("pty smoke ok", Duration::from_secs(5));
+
     harness.send_line("/settings");
     harness.wait_for_text("Settings", Duration::from_secs(5));
     harness.wait_for_text("OpenAI OAuth", Duration::from_secs(5));
@@ -433,9 +437,6 @@ fn tui_pty_command_and_prompt_flow() {
 
     harness.send_bytes(&[27]);
     harness.wait_for_text("Composer", Duration::from_secs(5));
-
-    harness.send_line("say hello from pty");
-    harness.wait_for_text("pty smoke ok", Duration::from_secs(5));
 
     harness.send_line("/save smoke");
     harness.wait_for_text("saved session smoke", Duration::from_secs(5));
