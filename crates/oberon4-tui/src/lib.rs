@@ -4060,6 +4060,7 @@ pub fn parse_tui_command(input: &str) -> Result<TuiCommand, OberonError> {
     let mut parts = trimmed.splitn(2, ' ');
     let command = parts.next().unwrap_or_default();
     let rest = parts.next().unwrap_or("").trim();
+    let command = canonical_tui_command(command);
 
     match command {
         "/help" => Ok(TuiCommand::Help),
@@ -4081,6 +4082,30 @@ pub fn parse_tui_command(input: &str) -> Result<TuiCommand, OberonError> {
         _ => Err(OberonError::Validation(
             "unsupported TUI command. Use /help".to_string(),
         )),
+    }
+}
+
+fn canonical_tui_command(command: &str) -> &str {
+    match command.to_ascii_lowercase().as_str() {
+        "/help" | "/halp" | "/commands" => "/help",
+        "/quit" | "/exit" | "/close" => "/quit",
+        "/status" | "/stat" | "/stats" => "/status",
+        "/sessions" | "/session" | "/sessoins" | "/sessons" => "/sessions",
+        "/settings" | "/setting" | "/setings" | "/settigns" | "/setteings" => "/settings",
+        "/accounts" | "/account" | "/acounts" | "/accouts" => "/accounts",
+        "/diagnostics" | "/diagnostic" | "/diag" | "/diags" | "/diagnositcs" => {
+            "/diagnostics"
+        }
+        "/more" | "/menu" => "/more",
+        "/config" | "/cfg" | "/configuration" => "/config",
+        "/model" | "/models" => "/model",
+        "/endpoint" | "/endpiont" | "/url" => "/endpoint",
+        "/system" | "/prompt" | "/sytem" => "/system",
+        "/clear" | "/cls" => "/clear",
+        "/save" | "/store" => "/save",
+        "/load" | "/open" => "/load",
+        "/fork" | "/copy" => "/fork",
+        _ => command,
     }
 }
 
@@ -4645,8 +4670,13 @@ mod tests {
     #[test]
     fn parses_supported_commands() {
         assert_eq!(parse_tui_command("/help").unwrap(), TuiCommand::Help);
+        assert_eq!(parse_tui_command("/halp").unwrap(), TuiCommand::Help);
         assert_eq!(
             parse_tui_command("/sessions").unwrap(),
+            TuiCommand::Sessions
+        );
+        assert_eq!(
+            parse_tui_command("/sessoins").unwrap(),
             TuiCommand::Sessions
         );
         assert_eq!(
@@ -4656,6 +4686,15 @@ mod tests {
         assert_eq!(
             parse_tui_command("/setteings").unwrap(),
             TuiCommand::Settings
+        );
+        assert_eq!(parse_tui_command("/exit").unwrap(), TuiCommand::Quit);
+        assert_eq!(
+            parse_tui_command("/diagnositcs").unwrap(),
+            TuiCommand::Diagnostics
+        );
+        assert_eq!(
+            parse_tui_command("/account").unwrap(),
+            TuiCommand::Accounts
         );
         assert_eq!(
             parse_tui_command("/model o4-mini").unwrap(),
