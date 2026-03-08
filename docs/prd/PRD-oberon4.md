@@ -73,8 +73,8 @@ Build a local-first, modular agent host with:
 
 - `FR-008` CLI command surface
   - `AC-008.1`: CLI exposes `daemon start`, `daemon stop`, and `daemon status`.
-  - `AC-008.2`: CLI exposes `tui` to launch the interactive terminal UI.
-  - `AC-008.2a`: CLI exposes `tui --no-alt-screen` to run the TUI without switching to the terminal alternate screen.
+  - `AC-008.2`: CLI exposes `tui` to launch the interactive terminal UI in inline scrollback-native mode.
+  - `AC-008.2a`: CLI exposes `tui --fullscreen` for the structured full-screen workspace UI and keeps `tui --no-alt-screen` as a backward-compatible alias for inline mode.
   - `AC-008.3`: CLI exposes `config show` and `config set <key> <value>` for endpoint/model/runtime configuration.
   - `AC-008.4`: CLI exposes `endpoint test` to validate the configured OpenAI-compatible endpoint.
   - `AC-008.5`: CLI exposes one-shot `chat --message <text>` execution for scripting and smoke checks.
@@ -168,7 +168,9 @@ Build a local-first, modular agent host with:
 - `oberon4 daemon status`
   - prints daemon status, pid when available, uptime, and endpoint health summary
 - `oberon4 tui`
-  - launches the interactive terminal UI and connects to the local daemon
+  - launches the interactive terminal UI in inline scrollback-native mode and connects to the local daemon
+- `oberon4 tui --fullscreen`
+  - launches the structured full-screen workspace UI explicitly
 - `oberon4 config show`
   - prints effective runtime configuration with secrets redacted
 - `oberon4 config set <key> <value>`
@@ -204,15 +206,15 @@ Build a local-first, modular agent host with:
 - `/status`
   - opens the full-pane status workspace
 - `/sessions`
-  - opens the chat session browser; when multiple sessions exist it shows a left-side session list and loads the selected session on `Enter`
+  - opens the chat session browser in the active terminal flow and loads the selected session on `Enter`
 - `/settings`
-  - opens the full-pane settings workspace
+  - opens the settings menu in the active terminal flow
 - `/accounts`
-  - opens the full-pane account-management workspace
+  - opens the account-management menu in the active terminal flow
 - `/diagnostics`
-  - opens the full-pane diagnostics workspace
+  - opens the diagnostics menu in the active terminal flow
 - `/more`
-  - opens the reserved full-pane tools workspace
+  - opens the reserved tools menu in the active terminal flow
 - `/config`
   - redirects to the settings workspace while preserving redacted config views
 - `/model <name>`

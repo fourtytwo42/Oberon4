@@ -66,8 +66,9 @@ Use this checklist only after automated gates through `EG-P8` are green.
 
 ### TUI
 - [ ] automated PTY smoke: `bash scripts/tui-pty-smoke.sh`
-  - covers the chat-first render, `/sessions`, `/settings`, `/status`, `/help`, prompt send, `/save`, `/fork`, `/load`, `/quit`, and `oberon4 tui --no-alt-screen`
+  - covers the default inline chat render, `/sessions`, `/settings`, `/status`, `/help`, prompt send, `/save`, `/fork`, `/load`, `/quit`, and explicit `oberon4 tui --fullscreen`
 - [ ] manual TUI spot-check only for anything not covered by PTY smoke
+  - verify `cargo run -p oberon4-cli -- tui` uses normal terminal scrollback with no sticky overview/header block
   - verify `/config`
   - verify `/sessions`
   - verify `/settings`

@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    io,
+    io::{self, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::mpsc::{self, Receiver, TryRecvError},
@@ -9,9 +9,16 @@ use std::{
 };
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    cursor::{MoveTo, MoveToColumn},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+        MouseEventKind,
+    },
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{
+        Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
+        enable_raw_mode,
+    },
 };
 use oberon4_auth::AccountRegistry;
 use oberon4_core::{
@@ -27,7 +34,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Text},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear as WidgetClear, List, ListItem, Paragraph, Wrap},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,11 +190,13 @@ pub struct TuiShellState {
     diagnostics_endpoint_health: String,
     autocomplete: Option<AutocompleteState>,
     render_tick: u64,
+    transcript_scroll: u16,
+    transcript_follow: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TuiLaunchOptions {
-    pub no_alt_screen: bool,
+    pub fullscreen: bool,
 }
 
 const FOOTER_HEIGHT: u16 = 5;
@@ -291,6 +300,8 @@ impl Default for TuiShellState {
             diagnostics_endpoint_health: "unknown".to_string(),
             autocomplete: None,
             render_tick: 0,
+            transcript_scroll: 0,
+            transcript_follow: true,
         }
     }
 }
@@ -1132,6 +1143,21 @@ impl TuiShellState {
         self.status = status.into();
     }
 
+    fn scroll_transcript_by(&mut self, delta: i32) {
+        self.transcript_follow = false;
+        let next = (self.transcript_scroll as i32 + delta).max(0) as u16;
+        self.transcript_scroll = next;
+    }
+
+    fn scroll_transcript_to_top(&mut self) {
+        self.transcript_follow = false;
+        self.transcript_scroll = 0;
+    }
+
+    fn scroll_transcript_to_bottom(&mut self) {
+        self.transcript_follow = true;
+    }
+
     pub fn refresh_runtime_data(&mut self, app: &DaemonBackedTuiApp) {
         if let Ok(snapshot) = app.load_status_snapshot() {
             self.status_snapshot = snapshot;
@@ -1616,11 +1642,16 @@ impl TuiShellState {
     ) -> Result<bool, OberonError> {
         match self.current_route() {
             ScreenRoute::SessionsRoot => {
-                if let Some(item) = self.session_sidebar_items().get(self.session_index).copied() {
+                if let Some(item) = self
+                    .session_sidebar_items()
+                    .get(self.session_index)
+                    .copied()
+                {
                     match item {
                         SessionSidebarItem::CurrentChat => {
                             self.set_workspace(Workspace::Chat);
                             self.focus = FocusTarget::Composer;
+                            self.scroll_transcript_to_bottom();
                             self.set_activity(ActivityState::Idle, "current chat selected");
                             return Ok(true);
                         }
@@ -1642,6 +1673,7 @@ impl TuiShellState {
                                 self.refresh_runtime_data(app);
                                 self.set_workspace(Workspace::Chat);
                                 self.focus = FocusTarget::Composer;
+                                self.scroll_transcript_to_bottom();
                                 return Ok(true);
                             }
                         }
@@ -1653,6 +1685,7 @@ impl TuiShellState {
                             self.baseline_signature = None;
                             self.set_workspace(Workspace::Chat);
                             self.focus = FocusTarget::Composer;
+                            self.scroll_transcript_to_bottom();
                             self.set_activity(ActivityState::Idle, "new session opened");
                             return Ok(true);
                         }
@@ -1711,6 +1744,7 @@ impl TuiShellState {
                 role: "user".to_string(),
                 content: trimmed.to_string(),
             });
+            self.scroll_transcript_to_bottom();
         }
 
         let command = if trimmed.starts_with('/') {
@@ -1764,6 +1798,7 @@ impl TuiShellState {
         if trimmed.starts_with('/') {
             if trimmed == "/clear" {
                 self.transcript.clear();
+                self.scroll_transcript_to_bottom();
             }
             self.transcript.push(UiLine {
                 role: "system".to_string(),
@@ -1792,6 +1827,7 @@ impl TuiShellState {
                 role: role_label(last.role).to_string(),
                 content: last.content.clone(),
             });
+            self.scroll_transcript_to_bottom();
         }
 
         self.refresh_runtime_data(app);
@@ -1808,11 +1844,180 @@ pub fn run_terminal_ui_with_options(options: TuiLaunchOptions) -> Result<(), Obe
     let mut app = DaemonBackedTuiApp::default();
     let mut shell = TuiShellState::default();
     shell.refresh_runtime_data(&app);
-    let mut terminal = init_terminal(options)?;
+    if options.fullscreen {
+        let mut terminal = init_fullscreen_terminal()?;
+        let result = run_terminal_loop(&mut terminal, &mut app, &mut shell);
+        restore_fullscreen_terminal(&mut terminal)?;
+        result
+    } else {
+        let mut stdout = init_inline_terminal()?;
+        let result = run_inline_terminal_loop(&mut stdout, &mut app, &mut shell);
+        restore_inline_terminal(&mut stdout)?;
+        result
+    }
+}
 
-    let result = run_terminal_loop(&mut terminal, &mut app, &mut shell);
-    restore_terminal(&mut terminal, options)?;
-    result
+fn init_inline_terminal() -> Result<io::Stdout, OberonError> {
+    enable_raw_mode()
+        .map_err(|err| OberonError::Storage(format!("enable raw mode failed: {err}")))?;
+    Ok(io::stdout())
+}
+
+fn write_inline_line(stdout: &mut io::Stdout, line: &str) -> Result<(), OberonError> {
+    stdout
+        .write_all(line.as_bytes())
+        .map_err(|err| OberonError::Storage(format!("inline write failed: {err}")))?;
+    stdout
+        .write_all(b"\r\n")
+        .map_err(|err| OberonError::Storage(format!("inline write failed: {err}")))?;
+    Ok(())
+}
+
+fn restore_inline_terminal(stdout: &mut io::Stdout) -> Result<(), OberonError> {
+    execute!(stdout, MoveToColumn(0), Clear(ClearType::CurrentLine))
+        .map_err(|err| OberonError::Storage(format!("inline terminal cleanup failed: {err}")))?;
+    disable_raw_mode()
+        .map_err(|err| OberonError::Storage(format!("disable raw mode failed: {err}")))?;
+    Ok(())
+}
+
+fn run_inline_terminal_loop(
+    stdout: &mut io::Stdout,
+    app: &mut DaemonBackedTuiApp,
+    shell: &mut TuiShellState,
+) -> Result<(), OberonError> {
+    sync_shell_transcript_from_app(shell, app);
+    print_inline_home_screen(stdout, shell)?;
+    redraw_inline_prompt(stdout, shell)?;
+
+    loop {
+        if shell.should_quit() {
+            writeln!(stdout).map_err(|err| {
+                OberonError::Storage(format!("inline terminal write failed: {err}"))
+            })?;
+            stdout
+                .flush()
+                .map_err(|err| OberonError::Storage(format!("stdout flush failed: {err}")))?;
+            return Ok(());
+        }
+
+        let event = event::read()
+            .map_err(|err| OberonError::Storage(format!("tui event read failed: {err}")))?;
+        let Event::Key(key) = event else {
+            continue;
+        };
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
+
+        let mut rerender_workspace = false;
+        let previous_workspace = shell.workspace;
+        match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                shell.should_quit = true;
+                shell.set_activity(ActivityState::Idle, "quitting");
+            }
+            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                shell.set_workspace(Workspace::Sessions);
+                shell.refresh_runtime_data(app);
+                shell.set_activity(ActivityState::Idle, "sessions opened");
+                rerender_workspace = true;
+            }
+            KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
+                    shell.insert_newline();
+                }
+            }
+            KeyCode::Char(ch) => {
+                if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
+                    shell.push_input_char(ch);
+                }
+            }
+            KeyCode::Backspace => {
+                if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
+                    shell.backspace();
+                }
+            }
+            KeyCode::Tab if matches!(shell.focus, FocusTarget::Composer) => {
+                shell.cycle_autocomplete();
+            }
+            KeyCode::Up => match shell.focus {
+                FocusTarget::Menu => {
+                    shell.move_menu_selection(-1);
+                    rerender_workspace = true;
+                }
+                FocusTarget::List => {
+                    match shell.current_route() {
+                        ScreenRoute::SessionsRoot => shell.move_session_selection(-1),
+                        ScreenRoute::AccountList { .. } => shell.move_account_selection(-1),
+                        _ => {}
+                    }
+                    rerender_workspace = true;
+                }
+                _ => {}
+            },
+            KeyCode::Down => match shell.focus {
+                FocusTarget::Menu => {
+                    shell.move_menu_selection(1);
+                    rerender_workspace = true;
+                }
+                FocusTarget::List => {
+                    match shell.current_route() {
+                        ScreenRoute::SessionsRoot => shell.move_session_selection(1),
+                        ScreenRoute::AccountList { .. } => shell.move_account_selection(1),
+                        _ => {}
+                    }
+                    rerender_workspace = true;
+                }
+                _ => {}
+            },
+            KeyCode::Enter => {
+                if matches!(shell.focus, FocusTarget::Menu) {
+                    shell.activate_current_menu_item(app)?;
+                    rerender_workspace = !matches!(shell.workspace, Workspace::Chat);
+                } else if matches!(shell.focus, FocusTarget::List) {
+                    shell.activate_current_list_item(app)?;
+                    rerender_workspace = !matches!(shell.workspace, Workspace::Chat);
+                } else if matches!(shell.focus, FocusTarget::Form) {
+                    shell.apply_form(app)?;
+                    print_inline_status(stdout, shell)?;
+                    rerender_workspace = !matches!(shell.workspace, Workspace::Chat);
+                } else if shell.input.trim().starts_with('/')
+                    && shell.input.trim() == shell.input.trim_end()
+                    && !shell.input.contains(' ')
+                    && shell.should_accept_autocomplete_on_enter()
+                    && shell.accept_autocomplete()
+                {
+                    redraw_inline_prompt(stdout, shell)?;
+                    continue;
+                } else {
+                    submit_inline_input(stdout, app, shell)?;
+                    rerender_workspace = !matches!(shell.workspace, Workspace::Chat);
+                }
+            }
+            KeyCode::Esc => {
+                let previous_workspace = shell.workspace;
+                let previous_route = shell.current_route();
+                let previous_should_quit = shell.should_quit;
+                shell.handle_escape();
+                if shell.should_quit && !previous_should_quit {
+                    continue;
+                }
+                rerender_workspace = !matches!(shell.workspace, Workspace::Chat)
+                    || !matches!(previous_workspace, Workspace::Chat)
+                    || shell.current_route() != previous_route;
+            }
+            _ => {}
+        }
+
+        if matches!(shell.workspace, Workspace::Chat) && !matches!(previous_workspace, Workspace::Chat)
+        {
+            print_inline_transcript(stdout, shell)?;
+        } else if rerender_workspace {
+            print_inline_workspace(stdout, shell)?;
+        }
+        redraw_inline_prompt(stdout, shell)?;
+    }
 }
 
 fn run_terminal_loop(
@@ -1851,88 +2056,128 @@ fn run_terminal_loop(
             continue;
         }
 
-        let Event::Key(key) = event::read()
+        match event::read()
             .map_err(|err| OberonError::Storage(format!("tui event read failed: {err}")))?
-        else {
-            continue;
-        };
+        {
+            Event::Key(key) => {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
 
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
-
-        match key.code {
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                shell.should_quit = true;
-                shell.set_activity(ActivityState::Idle, "quitting");
-            }
-            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                shell.set_workspace(Workspace::Sessions);
-                shell.refresh_runtime_data(app);
-                shell.set_activity(ActivityState::Idle, "sessions workspace opened");
-            }
-            KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
-                    shell.insert_newline();
-                }
-            }
-            KeyCode::Char(ch) => {
-                if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
-                    shell.push_input_char(ch)
-                }
-            }
-            KeyCode::Backspace => {
-                if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
-                    shell.backspace();
-                }
-            }
-            KeyCode::Tab if matches!(shell.focus, FocusTarget::Composer) => {
-                shell.cycle_autocomplete()
-            }
-            KeyCode::Up => match shell.focus {
-                FocusTarget::Menu => shell.move_menu_selection(-1),
-                FocusTarget::List => match shell.current_route() {
-                    ScreenRoute::SessionsRoot => shell.move_session_selection(-1),
-                    ScreenRoute::AccountList { .. } => shell.move_account_selection(-1),
-                    _ => {}
-                },
-                _ => {}
-            },
-            KeyCode::Down => match shell.focus {
-                FocusTarget::Menu => shell.move_menu_selection(1),
-                FocusTarget::List => match shell.current_route() {
-                    ScreenRoute::SessionsRoot => shell.move_session_selection(1),
-                    ScreenRoute::AccountList { .. } => shell.move_account_selection(1),
-                    _ => {}
-                },
-                _ => {}
-            },
-            KeyCode::Enter => {
-                if matches!(shell.focus, FocusTarget::Menu) {
-                    shell.activate_current_menu_item(app)?;
-                } else if matches!(shell.focus, FocusTarget::List) {
-                    shell.activate_current_list_item(app)?;
-                } else if matches!(shell.focus, FocusTarget::Form) {
-                    shell.apply_form(app)?;
-                } else if shell.input.trim().starts_with('/')
-                    && shell.input.trim() == shell.input.trim_end()
-                    && !shell.input.contains(' ')
-                    && shell.should_accept_autocomplete_on_enter()
-                    && shell.accept_autocomplete()
-                {
-                    shell.set_activity(ActivityState::Idle, "command completed");
-                } else if pending_submission.is_some() {
-                    if !handle_pending_local_command(shell)? {
-                        shell.set_activity(
-                            ActivityState::Running,
-                            "request in flight; wait, or press Esc/Ctrl+C to quit",
-                        );
+                match key.code {
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        shell.should_quit = true;
+                        shell.set_activity(ActivityState::Idle, "quitting");
                     }
-                } else if let Some(pending) = start_async_submit(app, shell)? {
-                    pending_submission = Some(pending);
+                    KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        shell.set_workspace(Workspace::Sessions);
+                        shell.refresh_runtime_data(app);
+                        shell.set_activity(ActivityState::Idle, "sessions workspace opened");
+                    }
+                    KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
+                            shell.insert_newline();
+                        }
+                    }
+                    KeyCode::Char(ch) => {
+                        if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
+                            shell.push_input_char(ch)
+                        }
+                    }
+                    KeyCode::Backspace => {
+                        if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
+                            shell.backspace();
+                        }
+                    }
+                    KeyCode::Tab if matches!(shell.focus, FocusTarget::Composer) => {
+                        shell.cycle_autocomplete()
+                    }
+                    KeyCode::Up => match shell.focus {
+                        FocusTarget::Menu => shell.move_menu_selection(-1),
+                        FocusTarget::List => match shell.current_route() {
+                            ScreenRoute::SessionsRoot => shell.move_session_selection(-1),
+                            ScreenRoute::AccountList { .. } => shell.move_account_selection(-1),
+                            _ => {}
+                        },
+                        FocusTarget::Composer
+                            if matches!(shell.workspace, Workspace::Chat | Workspace::Sessions) =>
+                        {
+                            shell.scroll_transcript_by(-1);
+                        }
+                        _ => {}
+                    },
+                    KeyCode::Down => match shell.focus {
+                        FocusTarget::Menu => shell.move_menu_selection(1),
+                        FocusTarget::List => match shell.current_route() {
+                            ScreenRoute::SessionsRoot => shell.move_session_selection(1),
+                            ScreenRoute::AccountList { .. } => shell.move_account_selection(1),
+                            _ => {}
+                        },
+                        FocusTarget::Composer
+                            if matches!(shell.workspace, Workspace::Chat | Workspace::Sessions) =>
+                        {
+                            shell.scroll_transcript_by(1);
+                        }
+                        _ => {}
+                    },
+                    KeyCode::PageUp
+                        if matches!(shell.workspace, Workspace::Chat | Workspace::Sessions) =>
+                    {
+                        shell.scroll_transcript_by(-10);
+                    }
+                    KeyCode::PageDown
+                        if matches!(shell.workspace, Workspace::Chat | Workspace::Sessions) =>
+                    {
+                        shell.scroll_transcript_by(10);
+                    }
+                    KeyCode::Home
+                        if matches!(shell.workspace, Workspace::Chat | Workspace::Sessions) =>
+                    {
+                        shell.scroll_transcript_to_top();
+                    }
+                    KeyCode::End
+                        if matches!(shell.workspace, Workspace::Chat | Workspace::Sessions) =>
+                    {
+                        shell.scroll_transcript_to_bottom();
+                    }
+                    KeyCode::Enter => {
+                        if matches!(shell.focus, FocusTarget::Menu) {
+                            shell.activate_current_menu_item(app)?;
+                        } else if matches!(shell.focus, FocusTarget::List) {
+                            shell.activate_current_list_item(app)?;
+                        } else if matches!(shell.focus, FocusTarget::Form) {
+                            shell.apply_form(app)?;
+                        } else if shell.input.trim().starts_with('/')
+                            && shell.input.trim() == shell.input.trim_end()
+                            && !shell.input.contains(' ')
+                            && shell.should_accept_autocomplete_on_enter()
+                            && shell.accept_autocomplete()
+                        {
+                            shell.set_activity(ActivityState::Idle, "command completed");
+                        } else if pending_submission.is_some() {
+                            if !handle_pending_local_command(shell)? {
+                                shell.set_activity(
+                                    ActivityState::Running,
+                                    "request in flight; wait, or press Esc/Ctrl+C to quit",
+                                );
+                            }
+                        } else if let Some(pending) = start_async_submit(app, shell)? {
+                            pending_submission = Some(pending);
+                        }
+                    }
+                    KeyCode::Esc => shell.handle_escape(),
+                    _ => {}
                 }
             }
-            KeyCode::Esc => shell.handle_escape(),
+            Event::Mouse(mouse)
+                if matches!(shell.workspace, Workspace::Chat | Workspace::Sessions) =>
+            {
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => shell.scroll_transcript_by(-3),
+                    MouseEventKind::ScrollDown => shell.scroll_transcript_by(3),
+                    _ => {}
+                }
+            }
             _ => {}
         }
     }
@@ -1988,11 +2233,13 @@ fn handle_pending_local_command(shell: &mut TuiShellState) -> Result<bool, Obero
         role: "system".to_string(),
         content: format!("command: {trimmed}"),
     });
+    shell.scroll_transcript_to_bottom();
     if !response.output.is_empty() {
         shell.transcript.push(UiLine {
             role: "status".to_string(),
             content: response.output,
         });
+        shell.scroll_transcript_to_bottom();
     }
     shell.open_route_for_command(&command);
     Ok(true)
@@ -2029,6 +2276,7 @@ fn start_async_submit(
         role: "assistant".to_string(),
         content: "...".to_string(),
     });
+    shell.scroll_transcript_to_bottom();
     let assistant_line_index = shell.transcript.len() - 1;
     shell.set_activity(
         ActivityState::WaitingOnProvider,
@@ -2122,6 +2370,7 @@ fn handle_async_ui_event(
                         line.content.clear();
                     }
                     line.content.push_str(&content);
+                    shell.scroll_transcript_to_bottom();
                     shell.set_activity(ActivityState::Streaming, "streaming response...");
                 }
             }
@@ -2142,6 +2391,7 @@ fn handle_async_ui_event(
                 let content = merge_tool_ui_delta(&mut pending.tool_state, delta);
                 if let Some(line) = shell.transcript.get_mut(line_index) {
                     line.content = content;
+                    shell.scroll_transcript_to_bottom();
                 }
             }
         }
@@ -2167,6 +2417,7 @@ fn handle_async_ui_event(
                     });
                 }
             }
+            shell.scroll_transcript_to_bottom();
             shell.set_activity(ActivityState::Error, err.to_string());
             shell.refresh_runtime_data(app);
         }
@@ -2305,21 +2556,81 @@ fn render_chat_workspace(
 }
 
 fn render_transcript(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
-    let transcript_lines: Vec<Line<'static>> = if shell.transcript().is_empty() {
-        vec![Line::raw(
-            "No messages yet. Type text to chat or /help for commands.",
-        )]
+    let wrapped_lines = transcript_visible_lines(area, shell);
+    let transcript = Paragraph::new(Text::from(wrapped_lines))
+        .block(Block::default().borders(Borders::ALL).title("Transcript"))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(transcript, area);
+}
+
+fn transcript_scroll_offset(area: Rect, lines: &[String]) -> u16 {
+    let inner_height = area.height.saturating_sub(2) as usize;
+    if inner_height == 0 {
+        return 0;
+    }
+
+    let inner_width = area.width.saturating_sub(2).max(1) as usize;
+    let total_rows = lines
+        .iter()
+        .map(|text| {
+            text.split('\n')
+                .map(|segment| {
+                    let width = segment.chars().count().max(1);
+                    width.div_ceil(inner_width)
+                })
+                .sum::<usize>()
+        })
+        .sum::<usize>();
+
+    total_rows
+        .saturating_sub(inner_height)
+        .min(u16::MAX as usize) as u16
+}
+
+fn transcript_visible_lines(area: Rect, shell: &TuiShellState) -> Vec<Line<'static>> {
+    let raw_lines: Vec<String> = if shell.transcript().is_empty() {
+        vec!["No messages yet. Type text to chat or /help for commands.".to_string()]
     } else {
         shell
             .transcript()
             .iter()
-            .map(|line| Line::raw(format!("[{}] {}", line.role, line.content)))
+            .map(|line| format!("[{}] {}", line.role, line.content))
             .collect()
     };
-    let transcript = Paragraph::new(Text::from(transcript_lines))
-        .block(Block::default().borders(Borders::ALL).title("Transcript"))
-        .wrap(Wrap { trim: false });
-    frame.render_widget(transcript, area);
+
+    let inner_width = area.width.saturating_sub(2).max(1) as usize;
+    let mut wrapped = Vec::new();
+    for line in raw_lines {
+        for segment in line.split('\n') {
+            let chars = segment.chars().collect::<Vec<_>>();
+            if chars.is_empty() {
+                wrapped.push(String::new());
+                continue;
+            }
+            for chunk in chars.chunks(inner_width) {
+                wrapped.push(chunk.iter().collect::<String>());
+            }
+        }
+    }
+
+    let inner_height = area.height.saturating_sub(2) as usize;
+    if inner_height == 0 {
+        return Vec::new();
+    }
+
+    let max_scroll = transcript_scroll_offset(area, &wrapped);
+    let scroll = if shell.transcript_follow {
+        max_scroll
+    } else {
+        shell.transcript_scroll.min(max_scroll)
+    } as usize;
+
+    wrapped
+        .into_iter()
+        .skip(scroll)
+        .take(inner_height)
+        .map(Line::raw)
+        .collect()
 }
 
 fn render_sessions_sidebar(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
@@ -2633,7 +2944,7 @@ fn render_footer(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
         FocusTarget::Form => "Editor",
         _ => "Workspace",
     };
-    frame.render_widget(Clear, input_area);
+    frame.render_widget(WidgetClear, input_area);
     if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
         let input = Paragraph::new(shell.input())
             .block(Block::default().borders(Borders::ALL).title(input_title))
@@ -2659,36 +2970,356 @@ fn render_footer(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
         );
     } else {
         let hint = if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
-            "Enter apply/send | Ctrl+J newline | Tab autocomplete | Esc back/clear/quit"
+            "Enter apply/send | Ctrl+J newline | Up/Down or mouse wheel scroll | Home/End jump | Esc back/clear/quit"
         } else {
-            "Up/Down navigate | Enter select | Esc back | /sessions list"
+            "Up/Down navigate | Enter select | mouse wheel scroll | Home/End jump | Esc back"
         };
         frame.render_widget(Paragraph::new(hint), hint_area);
     }
 }
 
-fn init_terminal(
-    options: TuiLaunchOptions,
-) -> Result<Terminal<CrosstermBackend<io::Stdout>>, OberonError> {
+fn print_inline_banner(stdout: &mut io::Stdout) -> Result<(), OberonError> {
+    write_inline_line(stdout, "Oberon4 TUI")?;
+    write_inline_line(
+        stdout,
+        "Inline mode. Use /help for commands. Use /sessions to switch chats.",
+    )?;
+    write_inline_line(stdout, "")?;
+    stdout
+        .flush()
+        .map_err(|err| OberonError::Storage(format!("stdout flush failed: {err}")))?;
+    Ok(())
+}
+
+fn print_inline_transcript(
+    stdout: &mut io::Stdout,
+    shell: &TuiShellState,
+) -> Result<(), OberonError> {
+    write_inline_line(stdout, "Transcript")?;
+    if shell.transcript.is_empty() {
+        write_inline_line(stdout, "  (empty)")?;
+    } else {
+        for line in &shell.transcript {
+            write_inline_line(stdout, &format!("[{}] {}", line.role, line.content))?;
+        }
+    }
+    write_inline_line(stdout, "")?;
+    stdout
+        .flush()
+        .map_err(|err| OberonError::Storage(format!("stdout flush failed: {err}")))?;
+    Ok(())
+}
+
+fn print_inline_home_screen(
+    stdout: &mut io::Stdout,
+    shell: &TuiShellState,
+) -> Result<(), OberonError> {
+    execute!(stdout, MoveTo(0, 0), Clear(ClearType::All))
+        .map_err(|err| OberonError::Storage(format!("inline screen clear failed: {err}")))?;
+    print_inline_banner(stdout)?;
+    print_inline_status(stdout, shell)?;
+    print_inline_transcript(stdout, shell)?;
+    Ok(())
+}
+
+fn print_inline_status(stdout: &mut io::Stdout, shell: &TuiShellState) -> Result<(), OberonError> {
+    if shell.status().trim().is_empty() {
+        return Ok(());
+    }
+    write_inline_line(stdout, &format!("[status] {}", shell.status()))?;
+    stdout
+        .flush()
+        .map_err(|err| OberonError::Storage(format!("stdout flush failed: {err}")))?;
+    Ok(())
+}
+
+fn redraw_inline_prompt(stdout: &mut io::Stdout, shell: &TuiShellState) -> Result<(), OberonError> {
+    execute!(stdout, MoveToColumn(0), Clear(ClearType::CurrentLine))
+        .map_err(|err| OberonError::Storage(format!("inline prompt clear failed: {err}")))?;
+    let label = match shell.focus {
+        FocusTarget::Form => "edit",
+        _ => "you",
+    };
+    write!(stdout, "{label}> {}", shell.input())
+        .map_err(|err| OberonError::Storage(format!("inline prompt write failed: {err}")))?;
+    stdout
+        .flush()
+        .map_err(|err| OberonError::Storage(format!("stdout flush failed: {err}")))?;
+    Ok(())
+}
+
+fn print_inline_workspace(
+    stdout: &mut io::Stdout,
+    shell: &TuiShellState,
+) -> Result<(), OberonError> {
+    write_inline_line(stdout, "")?;
+    match shell.current_route() {
+        ScreenRoute::SessionsRoot => {
+            write_inline_line(stdout, "Sessions")?;
+            for (index, item) in shell.session_sidebar_items().iter().enumerate() {
+                let prefix = if index == shell.session_index {
+                    ">"
+                } else {
+                    " "
+                };
+                let title = match item {
+                    SessionSidebarItem::CurrentChat => shell.current_chat_sidebar_title(),
+                    SessionSidebarItem::Saved(saved_index) => shell
+                        .sessions
+                        .get(*saved_index)
+                        .map(|session| session.title.clone())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    SessionSidebarItem::NewSession => "new session".to_string(),
+                };
+                write_inline_line(stdout, &format!("{prefix} {title}"))?;
+            }
+        }
+        ScreenRoute::SettingsRoot
+        | ScreenRoute::SettingsProvider
+        | ScreenRoute::SettingsOpenAiOAuth
+        | ScreenRoute::SettingsAnthropicOAuth
+        | ScreenRoute::SettingsRuntime
+        | ScreenRoute::AccountsRoot
+        | ScreenRoute::AccountDetail { .. } => {
+            write_inline_line(stdout, shell.workspace_title())?;
+            for (index, item) in shell.menu_items().iter().enumerate() {
+                let prefix = if index == shell.menu_index { ">" } else { " " };
+                write_inline_line(stdout, &format!("{prefix} {item}"))?;
+            }
+        }
+        ScreenRoute::AccountList { provider, .. } => {
+            write_inline_line(
+                stdout,
+                &format!("Accounts ({})", provider_name_for_oauth(provider)),
+            )?;
+            let accounts = shell.accounts_for_current_route().unwrap_or_default();
+            if accounts.is_empty() {
+                write_inline_line(stdout, "  No accounts")?;
+            } else {
+                for (index, account) in accounts.iter().enumerate() {
+                    let prefix = if index == shell.account_index {
+                        ">"
+                    } else {
+                        " "
+                    };
+                    write_inline_line(
+                        stdout,
+                        &format!("{prefix} {} [{}]", account.label, account.id),
+                    )?;
+                }
+            }
+        }
+        ScreenRoute::StatusRoot => {
+            write_inline_line(stdout, "Status")?;
+            write_inline_line(
+                stdout,
+                &format!(
+                    "  daemon: {}",
+                    if shell.status_snapshot.running {
+                        "running"
+                    } else {
+                        "stopped"
+                    }
+                ),
+            )?;
+            write_inline_line(
+                stdout,
+                &format!("  endpoint: {}", shell.status_snapshot.endpoint),
+            )?;
+            write_inline_line(stdout, &format!("  model: {}", shell.status_snapshot.model))?;
+            write_inline_line(
+                stdout,
+                &format!("  session: {}", shell.session_title_for_header()),
+            )?;
+        }
+        ScreenRoute::HelpRoot => {
+            write_inline_line(stdout, "Help")?;
+            write_inline_line(stdout, EXTENDED_HELP)?;
+        }
+        ScreenRoute::DiagnosticsRoot => {
+            write_inline_line(stdout, "Diagnostics")?;
+            write_inline_line(
+                stdout,
+                &format!("  endpoint health: {}", shell.diagnostics_endpoint_health),
+            )?;
+            write_inline_line(stdout, &format!("  activity: {}", shell.activity_label()))?;
+            write_inline_line(stdout, &format!("  status: {}", shell.status()))?;
+        }
+        ScreenRoute::ReservedRoot => {
+            write_inline_line(stdout, "More")?;
+            write_inline_line(stdout, "  More tools coming soon.")?;
+        }
+        ScreenRoute::SettingsModelForm
+        | ScreenRoute::SettingsEndpointForm
+        | ScreenRoute::SettingsSystemPromptForm
+        | ScreenRoute::SettingsRuntimeTimeoutForm
+        | ScreenRoute::SettingsRuntimeRetriesForm
+        | ScreenRoute::ChatRoot => {}
+    }
+    write_inline_line(stdout, "")?;
+    stdout
+        .flush()
+        .map_err(|err| OberonError::Storage(format!("stdout flush failed: {err}")))?;
+    Ok(())
+}
+
+fn sync_shell_transcript_from_app(shell: &mut TuiShellState, app: &DaemonBackedTuiApp) {
+    shell.transcript = app
+        .transcript()
+        .iter()
+        .map(|message| UiLine {
+            role: role_label(message.role).to_string(),
+            content: message.content.clone(),
+        })
+        .collect();
+}
+
+fn submit_inline_input(
+    stdout: &mut io::Stdout,
+    app: &mut DaemonBackedTuiApp,
+    shell: &mut TuiShellState,
+) -> Result<(), OberonError> {
+    let trimmed = std::mem::take(&mut shell.input).trim().to_string();
+    shell.autocomplete = None;
+    execute!(stdout, MoveToColumn(0), Clear(ClearType::CurrentLine))
+        .map_err(|err| OberonError::Storage(format!("inline prompt clear failed: {err}")))?;
+    if trimmed.is_empty() {
+        shell.set_activity(ActivityState::Idle, "input was empty");
+        return Ok(());
+    }
+
+    if trimmed.starts_with('/') {
+        let command = parse_tui_command(&trimmed)?;
+        match command {
+            TuiCommand::Help
+            | TuiCommand::Status
+            | TuiCommand::Sessions
+            | TuiCommand::Settings
+            | TuiCommand::Accounts
+            | TuiCommand::Diagnostics
+            | TuiCommand::More
+            | TuiCommand::Config => {
+                shell.open_route_for_command(&command);
+                shell.refresh_runtime_data(app);
+                shell.set_activity(
+                    ActivityState::Idle,
+                    match command {
+                        TuiCommand::Help => "help opened",
+                        TuiCommand::Status => "status opened",
+                        TuiCommand::Sessions => "sessions opened",
+                        TuiCommand::Settings | TuiCommand::Config => "settings opened",
+                        TuiCommand::Accounts => "accounts opened",
+                        TuiCommand::Diagnostics => "diagnostics opened",
+                        TuiCommand::More => "more opened",
+                        _ => "workspace opened",
+                    },
+                );
+                print_inline_workspace(stdout, shell)?;
+            }
+            TuiCommand::Quit => {
+                shell.should_quit = true;
+                shell.set_activity(ActivityState::Idle, "quitting");
+            }
+            _ => {
+                let response = app.handle_command(command.clone())?;
+                shell.set_activity(ActivityState::Idle, response.output.clone());
+                shell.should_quit = response.should_quit;
+                match command {
+                    TuiCommand::Load(name) => shell.sync_loaded_session_from_id(&name),
+                    TuiCommand::Save(name) => {
+                        shell.mark_loaded_session(Some(name.clone()), Some(name))
+                    }
+                    TuiCommand::Clear => {
+                        shell.current_session_id = None;
+                        shell.current_session_title = None;
+                        shell.baseline_signature = None;
+                    }
+                    _ => {}
+                }
+                sync_shell_transcript_from_app(shell, app);
+                shell.refresh_runtime_data(app);
+                print_inline_status(stdout, shell)?;
+            }
+        }
+        return Ok(());
+    }
+
+    write_inline_line(stdout, &format!("[user] {trimmed}"))?;
+    stdout
+        .flush()
+        .map_err(|err| OberonError::Storage(format!("stdout flush failed: {err}")))?;
+
+    let mut assistant_started = false;
+    let mut tool_state: BTreeMap<usize, (String, String)> = BTreeMap::new();
+    let prompt = trimmed.clone();
+    match app.stream_prompt_events(&prompt, &mut |event| match event {
+        oberon4_core::DaemonEvent::ChatChunk { content } => {
+            if !assistant_started {
+                write!(stdout, "[assistant] ").map_err(|err| {
+                    OberonError::Storage(format!("inline chat write failed: {err}"))
+                })?;
+                assistant_started = true;
+            }
+            write!(stdout, "{content}")
+                .map_err(|err| OberonError::Storage(format!("inline chat write failed: {err}")))?;
+            stdout
+                .flush()
+                .map_err(|err| OberonError::Storage(format!("stdout flush failed: {err}")))?;
+            Ok(())
+        }
+        oberon4_core::DaemonEvent::ToolCallDelta { delta } => {
+            let _ = merge_tool_ui_delta(&mut tool_state, delta);
+            Ok(())
+        }
+        other => Err(OberonError::Storage(format!(
+            "unexpected daemon stream event: {other:?}"
+        ))),
+    }) {
+        Ok(message) => {
+            if assistant_started {
+                write_inline_line(stdout, "")?;
+            } else {
+                write_inline_line(stdout, &format!("[assistant] {}", message.content))?;
+            }
+            app.apply_successful_prompt(&prompt, message.clone());
+            let _ = shell.autosave_current_session(app, &prompt, &message.content);
+            sync_shell_transcript_from_app(shell, app);
+            shell.refresh_runtime_data(app);
+            shell.set_activity(ActivityState::Idle, "response complete");
+        }
+        Err(err) => {
+            if assistant_started {
+                write_inline_line(stdout, "")?;
+            }
+            write_inline_line(stdout, &format!("[error] {err}"))?;
+            shell.set_activity(ActivityState::Error, err.to_string());
+        }
+    }
+    stdout
+        .flush()
+        .map_err(|err| OberonError::Storage(format!("stdout flush failed: {err}")))?;
+    Ok(())
+}
+
+fn init_fullscreen_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>, OberonError> {
     enable_raw_mode()
         .map_err(|err| OberonError::Storage(format!("raw mode enable failed: {err}")))?;
     let mut stdout = io::stdout();
-    if !options.no_alt_screen {
-        execute!(stdout, EnterAlternateScreen)
-            .map_err(|err| OberonError::Storage(format!("enter alt screen failed: {err}")))?;
-    }
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
+        .map_err(|err| OberonError::Storage(format!("enter alt screen failed: {err}")))?;
     Terminal::new(CrosstermBackend::new(stdout))
         .map_err(|err| OberonError::Storage(format!("terminal init failed: {err}")))
 }
 
-fn restore_terminal(
+fn restore_fullscreen_terminal(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    options: TuiLaunchOptions,
 ) -> Result<(), OberonError> {
-    if !options.no_alt_screen {
-        execute!(terminal.backend_mut(), LeaveAlternateScreen)
-            .map_err(|err| OberonError::Storage(format!("leave alt screen failed: {err}")))?;
-    }
+    execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )
+    .map_err(|err| OberonError::Storage(format!("disable mouse capture failed: {err}")))?;
     disable_raw_mode()
         .map_err(|err| OberonError::Storage(format!("raw mode disable failed: {err}")))?;
     Ok(())
@@ -3319,6 +3950,23 @@ mod tests {
             content: "reply".to_string(),
         });
         assert!(shell.is_dirty());
+    }
+
+    #[test]
+    fn transcript_scroll_controls_toggle_follow_mode() {
+        let mut shell = TuiShellState::default();
+        assert!(shell.transcript_follow);
+
+        shell.scroll_transcript_by(10);
+        assert!(!shell.transcript_follow);
+        assert_eq!(shell.transcript_scroll, 10);
+
+        shell.scroll_transcript_to_top();
+        assert!(!shell.transcript_follow);
+        assert_eq!(shell.transcript_scroll, 0);
+
+        shell.scroll_transcript_to_bottom();
+        assert!(shell.transcript_follow);
     }
 
     #[test]
