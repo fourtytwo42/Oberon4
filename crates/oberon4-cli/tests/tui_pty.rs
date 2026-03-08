@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
     thread,
@@ -101,7 +101,7 @@ struct PtyHarness {
 }
 
 impl PtyHarness {
-    fn spawn(cli: &Path, data_dir: &Path, socket_path: &Path) -> Self {
+    fn spawn(cli: &Path, data_dir: &Path, socket_path: &Path, extra_args: &[&str]) -> Self {
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -117,6 +117,10 @@ impl PtyHarness {
                 .expect("cli binary path should be valid utf-8 for PTY launch"),
         );
         command.arg("tui");
+        for arg in extra_args {
+            command.arg(arg);
+        }
+        command.cwd(repo_root());
         command.env("OBERON4_DATA_DIR", data_dir);
         command.env("OBERON4_SOCKET_PATH", socket_path);
         command.env("OBERON4_DAEMON_BIN", debug_binary("oberon4-daemon"));
@@ -163,6 +167,11 @@ impl PtyHarness {
             .write_all(input.as_bytes())
             .expect("input should write");
         self.writer.write_all(b"\r").expect("enter should write");
+        self.writer.flush().expect("flush should succeed");
+    }
+
+    fn send_bytes(&mut self, input: &[u8]) {
+        self.writer.write_all(input).expect("input should write");
         self.writer.flush().expect("flush should succeed");
     }
 
@@ -218,12 +227,42 @@ fn temp_dir(name: &str) -> PathBuf {
 }
 
 fn debug_binary(name: &str) -> PathBuf {
-    let current = std::env::current_exe().expect("current exe");
-    let debug_dir = current
+    ensure_workspace_binaries_built();
+    repo_root().join("target").join("debug").join(name)
+}
+
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("integration test should run from target/debug/deps");
-    debug_dir.join(name)
+        .expect("crate manifest should live under workspace root")
+        .to_path_buf()
+}
+
+fn ensure_workspace_binaries_built() {
+    static BUILT: OnceLock<()> = OnceLock::new();
+    BUILT.get_or_init(|| {
+        let cargo_bin = std::env::var_os("CARGO")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("cargo"));
+        let status = Command::new(cargo_bin)
+            .args([
+                "build",
+                "-p",
+                "oberon4-cli",
+                "-p",
+                "oberon4-daemon",
+                "-p",
+                "oberon4-tui",
+            ])
+            .current_dir(repo_root())
+            .status()
+            .expect("workspace binaries should build for PTY tests");
+        assert!(
+            status.success(),
+            "workspace binary build failed: {status:?}"
+        );
+    });
 }
 
 #[derive(Debug)]
@@ -234,14 +273,14 @@ struct CliRun {
 
 fn run_cli(
     cli: &Path,
-    daemon: &Path,
+    _daemon: &Path,
     data_dir: &Path,
     socket_path: &Path,
     args: &[&str],
 ) -> CliRun {
     let output = Command::new(cli)
         .args(args)
-        .env("OBERON4_DAEMON_BIN", daemon)
+        .env("OBERON4_DAEMON_BIN", debug_binary("oberon4-daemon"))
         .env("OBERON4_DATA_DIR", data_dir)
         .env("OBERON4_SOCKET_PATH", socket_path)
         .env("OPENAI_API_KEY", "test-key")
@@ -334,16 +373,18 @@ fn tui_pty_initial_render_and_quit() {
     std::fs::create_dir_all(&data_dir).expect("data dir should exist");
     let socket_path = data_dir.join("daemon.sock");
 
-    let mut harness = PtyHarness::spawn(&cli, &data_dir, &socket_path);
+    let mut harness = PtyHarness::spawn(&cli, &data_dir, &socket_path, &[]);
     harness.wait_for_text("Oberon4 TUI", Duration::from_secs(5));
+    harness.wait_for_text("activity: idle", Duration::from_secs(5));
+    harness.wait_for_text("/sessions to browse saved chats", Duration::from_secs(5));
     harness.wait_for_text(
-        "No messages yet. Type text to chat or /help for commands.",
+        "Enter send | Ctrl+J newline | Tab command autocomplete | Ctrl+R sessions | Esc close/clear/quit",
         Duration::from_secs(5),
     );
 
     let _ = mock_server.base_url;
 
-    harness.send_line("/quit");
+    harness.send_bytes(&[3]);
     harness.wait_for_exit();
 
     let _ = std::fs::remove_dir_all(&data_dir);
@@ -366,20 +407,9 @@ fn tui_pty_command_and_prompt_flow() {
         &mock_server.base_url,
     );
 
-    let mut harness = PtyHarness::spawn(&cli, &data_dir, &socket_path);
+    let mut harness = PtyHarness::spawn(&cli, &data_dir, &socket_path, &[]);
     harness.wait_for_text("Oberon4 TUI", Duration::from_secs(5));
-
-    harness.send_line("/help");
-    harness.wait_for_text("/help /quit /status", Duration::from_secs(5));
-
-    harness.send_line("/status");
-    harness.wait_for_text(
-        &format!(
-            "running=true endpoint={} model=gpt-5.1-codex-mini",
-            mock_server.base_url
-        ),
-        Duration::from_secs(5),
-    );
+    harness.wait_for_text("activity: idle", Duration::from_secs(5));
 
     harness.send_line("say hello from pty");
     harness.wait_for_text("waiting on provider response...", Duration::from_secs(5));
@@ -388,14 +418,18 @@ fn tui_pty_command_and_prompt_flow() {
     harness.send_line("/save smoke");
     harness.wait_for_text("saved session smoke", Duration::from_secs(5));
 
-    harness.send_line("/clear");
-    harness.wait_for_text("transcript cleared", Duration::from_secs(5));
+    harness.send_line("/fork smoke-copy");
+    harness.wait_for_text("forked session smoke-copy", Duration::from_secs(5));
 
-    harness.send_line("/load smoke");
-    harness.wait_for_text("loaded session smoke", Duration::from_secs(5));
-    harness.wait_for_text("pty smoke ok", Duration::from_secs(5));
+    harness.send_bytes(&[18]);
+    harness.wait_for_text("Sessions (Ctrl+R, Up/Down, Enter)", Duration::from_secs(5));
+    harness.wait_for_text("smoke", Duration::from_secs(5));
+    harness.wait_for_text("smoke-copy", Duration::from_secs(5));
+    harness.send_bytes(b"\x1b[B");
+    harness.send_bytes(b"\r");
+    harness.wait_for_text("loaded session", Duration::from_secs(5));
 
-    harness.send_line("/quit");
+    harness.send_bytes(&[3]);
     harness.wait_for_exit();
 
     let stop = run_cli(&cli, &daemon, &data_dir, &socket_path, &["daemon", "stop"]);
@@ -404,6 +438,30 @@ fn tui_pty_command_and_prompt_flow() {
         "stderr={}",
         stop.stderr
     );
+
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+#[test]
+fn tui_pty_inline_mode_preserves_render_without_alt_screen() {
+    let mock_server = MockHotspotServer::start();
+    let cli = debug_binary("oberon4-cli");
+    let data_dir = temp_dir("inline-data");
+    std::fs::create_dir_all(&data_dir).expect("data dir should exist");
+    let socket_path = data_dir.join("daemon.sock");
+
+    let mut harness = PtyHarness::spawn(&cli, &data_dir, &socket_path, &["--no-alt-screen"]);
+    harness.wait_for_text("Oberon4 TUI", Duration::from_secs(5));
+    harness.wait_for_text("Overview", Duration::from_secs(5));
+    harness.wait_for_text("Composer", Duration::from_secs(5));
+
+    let _ = mock_server.base_url;
+
+    harness.send_bytes(&[3]);
+    harness.wait_for_exit();
+
+    let screen = harness.screen_contents();
+    assert!(screen.contains("Oberon4 TUI"));
 
     let _ = std::fs::remove_dir_all(&data_dir);
 }

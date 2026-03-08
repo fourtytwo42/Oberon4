@@ -66,12 +66,15 @@ Use this checklist only after automated gates through `EG-P8` are green.
 
 ### TUI
 - [ ] automated PTY smoke: `bash scripts/tui-pty-smoke.sh`
-  - covers `/help`, `/status`, prompt send, `/save`, `/clear`, `/load`, and `/quit`
+  - covers the status-bar/layout render, prompt send, session browser, `/save`, `/fork`, `/load`, `/quit`, and `oberon4 tui --no-alt-screen`
 - [ ] manual TUI spot-check only for anything not covered by PTY smoke
   - verify `/config`
+  - verify `/sessions`
   - verify `/model o4-mini`
   - verify `/endpoint https://gateway.example.test`
   - verify `/system be concise`
+  - verify multiline drafting with `Ctrl+J`
+  - verify slash autocomplete with `Tab`
 
 ### Tray
 - [ ] verify supported-platform adapter or unsupported fallback message

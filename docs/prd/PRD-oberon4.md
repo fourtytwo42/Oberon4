@@ -74,6 +74,7 @@ Build a local-first, modular agent host with:
 - `FR-008` CLI command surface
   - `AC-008.1`: CLI exposes `daemon start`, `daemon stop`, and `daemon status`.
   - `AC-008.2`: CLI exposes `tui` to launch the interactive terminal UI.
+  - `AC-008.2a`: CLI exposes `tui --no-alt-screen` to run the TUI without switching to the terminal alternate screen.
   - `AC-008.3`: CLI exposes `config show` and `config set <key> <value>` for endpoint/model/runtime configuration.
   - `AC-008.4`: CLI exposes `endpoint test` to validate the configured OpenAI-compatible endpoint.
   - `AC-008.5`: CLI exposes one-shot `chat --message <text>` execution for scripting and smoke checks.
@@ -81,14 +82,16 @@ Build a local-first, modular agent host with:
   - `AC-008.7`: all CLI commands return deterministic exit codes and sanitized errors.
 
 - `FR-009` TUI command surface
-  - `AC-009.1`: TUI supports `/help`, `/quit`, and `/status`.
+  - `AC-009.1`: TUI supports `/help`, `/quit`, `/status`, and `/sessions`.
   - `AC-009.2`: TUI supports `/config` to show effective runtime configuration.
   - `AC-009.3`: TUI supports `/model <name>` to switch active model for the session.
   - `AC-009.4`: TUI supports `/endpoint <url>` to override endpoint for the session.
   - `AC-009.5`: TUI supports `/system <text>` to set or replace the session system prompt.
   - `AC-009.6`: TUI supports `/clear` to clear the visible transcript buffer.
-  - `AC-009.7`: TUI supports `/save <name>` and `/load <name>` for session persistence.
+  - `AC-009.7`: TUI supports `/save <name>`, `/load <name>`, and `/fork <name>` for session persistence and branching.
   - `AC-009.8`: invalid or unsupported TUI commands fail with explicit help text and no state corruption.
+  - `AC-009.9`: TUI shows a persistent status bar, transcript pane, contextual side panel, and composer help row without requiring daemon contract changes.
+  - `AC-009.10`: TUI supports multiline drafting (`Ctrl+J`), recent-session browser (`Ctrl+R`), slash-command autocomplete (`Tab`), and ordered `Esc` close/clear/quit handling.
 
 ## 5. Non-Functional Requirements
 - `NFR-001` Reliability: no panics on malformed endpoint responses.

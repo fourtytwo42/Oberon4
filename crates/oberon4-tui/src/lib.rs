@@ -24,9 +24,10 @@ use oberon4_provider_openai::{FakeTransport, OpenAiCompatibleClient, RetryPolicy
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
-    style::{Modifier, Style},
+    layout::{Constraint, Layout, Rect},
+    style::{Color, Modifier, Style},
     text::{Line, Text},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs, Wrap},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +35,7 @@ pub enum TuiCommand {
     Help,
     Quit,
     Status,
+    Sessions,
     Config,
     Model(String),
     Endpoint(String),
@@ -41,6 +43,7 @@ pub enum TuiCommand {
     Clear,
     Save(String),
     Load(String),
+    Fork(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,13 +58,85 @@ pub struct UiLine {
     pub content: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActivityState {
+    Idle,
+    Running,
+    WaitingOnProvider,
+    Streaming,
+    Saving,
+    Loading,
+    Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SidePanelTab {
+    Status,
+    Sessions,
+    Help,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FocusTarget {
+    Composer,
+    Sessions,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct StatusSnapshot {
+    running: bool,
+    endpoint: String,
+    model: String,
+    active_account: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AutocompleteState {
+    matches: Vec<String>,
+    selected: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TuiShellState {
     input: String,
     status: String,
+    activity: ActivityState,
     should_quit: bool,
     transcript: Vec<UiLine>,
+    side_panel_tab: SidePanelTab,
+    side_panel_visible: bool,
+    overlay_visible: bool,
+    focus: FocusTarget,
+    sessions: Vec<SessionSummary>,
+    session_index: usize,
+    current_session: Option<String>,
+    baseline_signature: Option<String>,
+    status_snapshot: StatusSnapshot,
+    autocomplete: Option<AutocompleteState>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TuiLaunchOptions {
+    pub no_alt_screen: bool,
+}
+
+const PANEL_SPLIT_WIDTH: u16 = 120;
+const FOOTER_HEIGHT: u16 = 5;
+const COMMAND_CATALOG: [(&str, bool); 12] = [
+    ("/help", false),
+    ("/quit", false),
+    ("/status", false),
+    ("/sessions", false),
+    ("/config", false),
+    ("/model", true),
+    ("/endpoint", true),
+    ("/system", true),
+    ("/clear", false),
+    ("/save", true),
+    ("/load", true),
+    ("/fork", true),
+];
+const EXTENDED_HELP: &str = "/help /quit /status /sessions /config /model <name> /endpoint <url> /system <text> /clear /save <name> /load <name> /fork <name>";
 
 struct PendingSubmission {
     receiver: Receiver<AsyncUiEvent>,
@@ -120,9 +195,20 @@ impl Default for TuiShellState {
     fn default() -> Self {
         Self {
             input: String::new(),
-            status: "Connected to daemon".to_string(),
+            status: "ready".to_string(),
+            activity: ActivityState::Idle,
             should_quit: false,
             transcript: Vec::new(),
+            side_panel_tab: SidePanelTab::Status,
+            side_panel_visible: true,
+            overlay_visible: false,
+            focus: FocusTarget::Composer,
+            sessions: Vec::new(),
+            session_index: 0,
+            current_session: None,
+            baseline_signature: None,
+            status_snapshot: StatusSnapshot::default(),
+            autocomplete: None,
         }
     }
 }
@@ -147,12 +233,16 @@ impl TuiApp {
     pub fn handle_command(&mut self, command: TuiCommand) -> Result<TuiResponse, OberonError> {
         match command {
             TuiCommand::Help => Ok(TuiResponse {
-                output: "/help /quit /status /config /model <name> /endpoint <url> /system <text> /clear /save <name> /load <name>".to_string(),
+                output: EXTENDED_HELP.to_string(),
                 should_quit: false,
             }),
             TuiCommand::Quit => Ok(TuiResponse {
                 output: "quitting".to_string(),
                 should_quit: true,
+            }),
+            TuiCommand::Sessions => Ok(TuiResponse {
+                output: "sessions panel opened".to_string(),
+                should_quit: false,
             }),
             TuiCommand::Status => {
                 let status = self.runtime.status()?;
@@ -231,6 +321,22 @@ impl TuiApp {
                     should_quit: false,
                 })
             }
+            TuiCommand::Fork(name) => {
+                let session = SavedSession {
+                    summary: SessionSummary {
+                        id: SessionId::new(name.clone()),
+                        title: name.clone(),
+                        provider: oberon4_core::ChatProviderKind::OpenAiCompatible,
+                        model: self.runtime.load_config()?.endpoint.model.clone(),
+                    },
+                    messages: self.transcript.clone(),
+                };
+                self.runtime.session_store.save_session(session)?;
+                Ok(TuiResponse {
+                    output: format!("forked session {name}"),
+                    should_quit: false,
+                })
+            }
         }
     }
 
@@ -240,6 +346,18 @@ impl TuiApp {
 
     pub fn system_prompt(&self) -> Option<&str> {
         self.system_prompt.as_deref()
+    }
+
+    pub fn list_sessions(&self) -> Result<Vec<SessionSummary>, OberonError> {
+        let mut sessions = self
+            .runtime
+            .session_store
+            .list_sessions()?
+            .into_iter()
+            .map(|session| session.summary)
+            .collect::<Vec<_>>();
+        sort_sessions(&mut sessions);
+        Ok(sessions)
     }
 
     fn send_prompt(&mut self, prompt: &str) -> Result<TuiResponse, OberonError> {
@@ -306,33 +424,41 @@ impl DaemonBackedTuiApp {
         }
         match command {
             TuiCommand::Help => Ok(TuiResponse {
-                output: "/help /quit /status /config /model <name> /endpoint <url> /system <text> /clear /save <name> /load <name>".to_string(),
+                output: EXTENDED_HELP.to_string(),
                 should_quit: false,
             }),
             TuiCommand::Quit => Ok(TuiResponse {
                 output: "quitting".to_string(),
                 should_quit: true,
             }),
-            TuiCommand::Status => match self.client.send(&oberon4_core::DaemonCommand::GetStatus)? {
-                oberon4_core::DaemonEvent::Status { status } => Ok(TuiResponse {
-                    output: format!(
-                        "running={} endpoint={} model={} active_account={}",
-                        status.running,
-                        status.endpoint_base_url,
-                        status.model,
-                        status.active_account.as_deref().unwrap_or("none")
-                    ),
-                    should_quit: false,
-                }),
-                event => protocol_error(event),
-            },
-            TuiCommand::Config => match self.client.send(&oberon4_core::DaemonCommand::LoadConfig)? {
-                oberon4_core::DaemonEvent::ConfigLoaded { config } => Ok(TuiResponse {
-                    output: redacted_config_json(&config)?,
-                    should_quit: false,
-                }),
-                event => protocol_error(event),
-            },
+            TuiCommand::Sessions => Ok(TuiResponse {
+                output: "sessions panel opened".to_string(),
+                should_quit: false,
+            }),
+            TuiCommand::Status => {
+                match self.client.send(&oberon4_core::DaemonCommand::GetStatus)? {
+                    oberon4_core::DaemonEvent::Status { status } => Ok(TuiResponse {
+                        output: format!(
+                            "running={} endpoint={} model={} active_account={}",
+                            status.running,
+                            status.endpoint_base_url,
+                            status.model,
+                            status.active_account.as_deref().unwrap_or("none")
+                        ),
+                        should_quit: false,
+                    }),
+                    event => protocol_error(event),
+                }
+            }
+            TuiCommand::Config => {
+                match self.client.send(&oberon4_core::DaemonCommand::LoadConfig)? {
+                    oberon4_core::DaemonEvent::ConfigLoaded { config } => Ok(TuiResponse {
+                        output: redacted_config_json(&config)?,
+                        should_quit: false,
+                    }),
+                    event => protocol_error(event),
+                }
+            }
             TuiCommand::Model(model) => {
                 let mut config = self.load_config()?;
                 config.endpoint.model = model.clone();
@@ -386,20 +512,43 @@ impl DaemonBackedTuiApp {
                     event => protocol_error(event),
                 }
             }
-            TuiCommand::Load(name) => match self.client.send(
-                &oberon4_core::DaemonCommand::LoadSession {
-                    session_id: name.clone(),
-                },
-            )? {
-                oberon4_core::DaemonEvent::SessionLoaded { session } => {
-                    self.transcript = session.messages;
-                    Ok(TuiResponse {
-                        output: format!("loaded session {name}"),
-                        should_quit: false,
-                    })
+            TuiCommand::Load(name) => {
+                match self
+                    .client
+                    .send(&oberon4_core::DaemonCommand::LoadSession {
+                        session_id: name.clone(),
+                    })? {
+                    oberon4_core::DaemonEvent::SessionLoaded { session } => {
+                        self.transcript = session.messages;
+                        Ok(TuiResponse {
+                            output: format!("loaded session {name}"),
+                            should_quit: false,
+                        })
+                    }
+                    event => protocol_error(event),
                 }
-                event => protocol_error(event),
-            },
+            }
+            TuiCommand::Fork(name) => {
+                let session = SavedSession {
+                    summary: SessionSummary {
+                        id: SessionId::new(name.clone()),
+                        title: name.clone(),
+                        provider: oberon4_core::ChatProviderKind::OpenAiCompatible,
+                        model: self.load_config()?.endpoint.model,
+                    },
+                    messages: self.transcript.clone(),
+                };
+                match self
+                    .client
+                    .send(&oberon4_core::DaemonCommand::SaveSession { session })?
+                {
+                    oberon4_core::DaemonEvent::SessionLoaded { .. } => Ok(TuiResponse {
+                        output: format!("forked session {name}"),
+                        should_quit: false,
+                    }),
+                    event => protocol_error(event),
+                }
+            }
         }
     }
 
@@ -409,6 +558,35 @@ impl DaemonBackedTuiApp {
 
     pub fn system_prompt(&self) -> Option<&str> {
         self.system_prompt.as_deref()
+    }
+
+    pub fn list_sessions(&self) -> Result<Vec<SessionSummary>, OberonError> {
+        match self
+            .client
+            .send(&oberon4_core::DaemonCommand::ListSessions)?
+        {
+            oberon4_core::DaemonEvent::SessionList { sessions } => {
+                let mut summaries = sessions
+                    .into_iter()
+                    .map(|session| session.summary)
+                    .collect::<Vec<_>>();
+                sort_sessions(&mut summaries);
+                Ok(summaries)
+            }
+            event => Err(protocol_error_inner(event)),
+        }
+    }
+
+    fn load_status_snapshot(&self) -> Result<StatusSnapshot, OberonError> {
+        match self.client.send(&oberon4_core::DaemonCommand::GetStatus)? {
+            oberon4_core::DaemonEvent::Status { status } => Ok(StatusSnapshot {
+                running: status.running,
+                endpoint: status.endpoint_base_url,
+                model: status.model,
+                active_account: status.active_account.unwrap_or_else(|| "none".to_string()),
+            }),
+            event => Err(protocol_error_inner(event)),
+        }
     }
 
     fn send_prompt(&mut self, prompt: &str) -> Result<TuiResponse, OberonError> {
@@ -549,17 +727,170 @@ impl TuiShellState {
 
     pub fn push_input_char(&mut self, ch: char) {
         self.input.push(ch);
+        self.focus = FocusTarget::Composer;
+        self.refresh_autocomplete();
     }
 
     pub fn backspace(&mut self) {
         let _ = self.input.pop();
+        self.refresh_autocomplete();
+    }
+
+    pub fn insert_newline(&mut self) {
+        self.input.push('\n');
+        self.refresh_autocomplete();
+    }
+
+    pub fn activity_label(&self) -> &'static str {
+        match self.activity {
+            ActivityState::Idle => "idle",
+            ActivityState::Running => "running",
+            ActivityState::WaitingOnProvider => "waiting on provider",
+            ActivityState::Streaming => "streaming",
+            ActivityState::Saving => "saving",
+            ActivityState::Loading => "loading",
+            ActivityState::Error => "error",
+        }
+    }
+
+    fn show_tab(&mut self, tab: SidePanelTab, terminal_width: u16) {
+        self.side_panel_tab = tab;
+        if terminal_width >= PANEL_SPLIT_WIDTH {
+            self.side_panel_visible = true;
+            self.overlay_visible = false;
+        } else {
+            self.overlay_visible = true;
+            self.side_panel_visible = false;
+        }
+        self.focus = if matches!(tab, SidePanelTab::Sessions) {
+            FocusTarget::Sessions
+        } else {
+            FocusTarget::Composer
+        };
+    }
+
+    pub fn handle_escape(&mut self) {
+        if self.autocomplete.is_some() {
+            self.autocomplete = None;
+            return;
+        }
+        if self.overlay_visible {
+            self.overlay_visible = false;
+            self.focus = FocusTarget::Composer;
+            return;
+        }
+        if !self.input.is_empty() {
+            self.input.clear();
+            self.refresh_autocomplete();
+            self.status = "draft cleared".to_string();
+            return;
+        }
+        self.should_quit = true;
+        self.status = "quitting".to_string();
+    }
+
+    pub fn cycle_autocomplete(&mut self) {
+        let Some(state) = self.autocomplete.as_mut() else {
+            self.refresh_autocomplete();
+            return;
+        };
+        if !state.matches.is_empty() {
+            state.selected = (state.selected + 1) % state.matches.len();
+        }
+    }
+
+    pub fn accept_autocomplete(&mut self) -> bool {
+        let Some(state) = self.autocomplete.as_ref() else {
+            return false;
+        };
+        let Some(selected) = state.matches.get(state.selected) else {
+            return false;
+        };
+        if command_requires_argument(selected) {
+            self.input = format!("{selected} ");
+        } else {
+            self.input = selected.clone();
+        }
+        self.autocomplete = None;
+        true
+    }
+
+    pub fn move_session_selection(&mut self, delta: isize) {
+        if self.sessions.is_empty() {
+            return;
+        }
+        let len = self.sessions.len() as isize;
+        let next = (self.session_index as isize + delta).clamp(0, len - 1);
+        self.session_index = next as usize;
+    }
+
+    fn set_activity(&mut self, activity: ActivityState, status: impl Into<String>) {
+        self.activity = activity;
+        self.status = status.into();
+    }
+
+    pub fn refresh_sidebar(&mut self, app: &DaemonBackedTuiApp) {
+        if let Ok(snapshot) = app.load_status_snapshot() {
+            self.status_snapshot = snapshot;
+        }
+        if let Ok(sessions) = app.list_sessions() {
+            self.sessions = sessions;
+            if self.session_index >= self.sessions.len() {
+                self.session_index = self.sessions.len().saturating_sub(1);
+            }
+        }
+    }
+
+    pub fn mark_loaded_session(&mut self, session: Option<String>) {
+        self.current_session = session;
+        self.baseline_signature = Some(transcript_signature(&self.transcript));
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        let current = transcript_signature(&self.transcript);
+        match &self.baseline_signature {
+            Some(baseline) => baseline != &current,
+            None => !self.transcript.is_empty(),
+        }
+    }
+
+    fn refresh_autocomplete(&mut self) {
+        let trimmed = self.input.trim();
+        if !trimmed.starts_with('/') || trimmed.contains(' ') || trimmed.is_empty() {
+            self.autocomplete = None;
+            return;
+        }
+        let mut matches = COMMAND_CATALOG
+            .iter()
+            .map(|(command, _)| (*command).to_string())
+            .filter(|command| command.starts_with(trimmed))
+            .collect::<Vec<_>>();
+        matches.sort();
+        if matches.is_empty() {
+            self.autocomplete = None;
+        } else {
+            let selected = self
+                .autocomplete
+                .as_ref()
+                .map(|state| state.selected.min(matches.len().saturating_sub(1)))
+                .unwrap_or(0);
+            self.autocomplete = Some(AutocompleteState { matches, selected });
+        }
     }
 
     pub fn submit(&mut self, app: &mut DaemonBackedTuiApp) -> Result<(), OberonError> {
         let input = std::mem::take(&mut self.input);
+        self.autocomplete = None;
         let trimmed = input.trim();
         if trimmed.is_empty() {
-            self.status = "Input was empty".to_string();
+            self.set_activity(ActivityState::Idle, "Input was empty");
+            return Ok(());
+        }
+
+        if trimmed == "/sessions" {
+            self.show_tab(SidePanelTab::Sessions, PANEL_SPLIT_WIDTH.saturating_sub(1));
+            self.refresh_sidebar(app);
+            self.set_activity(ActivityState::Idle, "sessions panel opened");
             return Ok(());
         }
 
@@ -570,8 +901,27 @@ impl TuiShellState {
             });
         }
 
+        let command = if trimmed.starts_with('/') {
+            Some(parse_tui_command(trimmed)?)
+        } else {
+            None
+        };
+
+        if matches!(command, Some(TuiCommand::Help)) {
+            self.show_tab(SidePanelTab::Help, PANEL_SPLIT_WIDTH.saturating_sub(1));
+        } else if matches!(command, Some(TuiCommand::Status)) {
+            self.show_tab(SidePanelTab::Status, PANEL_SPLIT_WIDTH.saturating_sub(1));
+        }
+
+        match command {
+            Some(TuiCommand::Save(_)) => self.activity = ActivityState::Saving,
+            Some(TuiCommand::Load(_)) => self.activity = ActivityState::Loading,
+            Some(TuiCommand::Fork(_)) => self.activity = ActivityState::Saving,
+            _ => self.activity = ActivityState::Running,
+        }
+
         let response = app.handle_input(trimmed)?;
-        self.status = response.output.clone();
+        self.set_activity(ActivityState::Idle, response.output.clone());
         self.should_quit = response.should_quit;
 
         if trimmed.starts_with('/') {
@@ -588,6 +938,13 @@ impl TuiShellState {
                     content: response.output,
                 });
             }
+            match command {
+                Some(TuiCommand::Save(name)) => self.mark_loaded_session(Some(name)),
+                Some(TuiCommand::Load(name)) => self.mark_loaded_session(Some(name)),
+                Some(TuiCommand::Clear) => {}
+                _ => {}
+            }
+            self.refresh_sidebar(app);
             return Ok(());
         }
 
@@ -598,17 +955,24 @@ impl TuiShellState {
             });
         }
 
+        self.refresh_sidebar(app);
+
         Ok(())
     }
 }
 
 pub fn run_terminal_ui() -> Result<(), OberonError> {
+    run_terminal_ui_with_options(TuiLaunchOptions::default())
+}
+
+pub fn run_terminal_ui_with_options(options: TuiLaunchOptions) -> Result<(), OberonError> {
     let mut app = DaemonBackedTuiApp::default();
     let mut shell = TuiShellState::default();
-    let mut terminal = init_terminal()?;
+    shell.refresh_sidebar(&app);
+    let mut terminal = init_terminal(options)?;
 
     let result = run_terminal_loop(&mut terminal, &mut app, &mut shell);
-    restore_terminal(&mut terminal)?;
+    restore_terminal(&mut terminal, options)?;
     result
 }
 
@@ -660,24 +1024,57 @@ fn run_terminal_loop(
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 shell.should_quit = true;
-                shell.status = "quitting".to_string();
+                shell.set_activity(ActivityState::Idle, "quitting");
+            }
+            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                let width = terminal
+                    .size()
+                    .map_err(|err| OberonError::Storage(format!("tui size lookup failed: {err}")))?
+                    .width;
+                shell.show_tab(SidePanelTab::Sessions, width);
+                shell.refresh_sidebar(app);
+                shell.set_activity(ActivityState::Idle, "sessions panel opened");
+            }
+            KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                shell.insert_newline();
             }
             KeyCode::Char(ch) => shell.push_input_char(ch),
             KeyCode::Backspace => shell.backspace(),
+            KeyCode::Tab => shell.cycle_autocomplete(),
+            KeyCode::Up if matches!(shell.focus, FocusTarget::Sessions) => {
+                shell.move_session_selection(-1)
+            }
+            KeyCode::Down if matches!(shell.focus, FocusTarget::Sessions) => {
+                shell.move_session_selection(1)
+            }
             KeyCode::Enter => {
-                if pending_submission.is_some() {
+                if matches!(shell.focus, FocusTarget::Sessions)
+                    && !shell.sessions.is_empty()
+                    && pending_submission.is_none()
+                {
+                    let name = shell.sessions[shell.session_index].id.as_str().to_string();
+                    shell.input = format!("/load {name}");
+                    shell.overlay_visible = false;
+                    shell.focus = FocusTarget::Composer;
+                    shell.submit(app)?;
+                } else if shell.input.trim().starts_with('/')
+                    && shell.input.trim() == shell.input.trim_end()
+                    && !shell.input.contains(' ')
+                    && shell.accept_autocomplete()
+                {
+                    shell.set_activity(ActivityState::Idle, "command completed");
+                } else if pending_submission.is_some() {
                     if !handle_pending_local_command(shell)? {
-                        shell.status =
-                            "request in flight; wait, or press Esc/Ctrl+C to quit".to_string();
+                        shell.set_activity(
+                            ActivityState::Running,
+                            "request in flight; wait, or press Esc/Ctrl+C to quit",
+                        );
                     }
                 } else if let Some(pending) = start_async_submit(app, shell)? {
                     pending_submission = Some(pending);
                 }
             }
-            KeyCode::Esc => {
-                shell.should_quit = true;
-                shell.status = "quitting".to_string();
-            }
+            KeyCode::Esc => shell.handle_escape(),
             _ => {}
         }
     }
@@ -692,11 +1089,15 @@ fn handle_pending_local_command(shell: &mut TuiShellState) -> Result<bool, Obero
     let command = parse_tui_command(&trimmed)?;
     let response = match command {
         TuiCommand::Help => TuiResponse {
-            output: "/help /quit /status /config /model <name> /endpoint <url> /system <text> /clear /save <name> /load <name>".to_string(),
+            output: EXTENDED_HELP.to_string(),
             should_quit: false,
         },
         TuiCommand::Status => TuiResponse {
             output: "request in flight".to_string(),
+            should_quit: false,
+        },
+        TuiCommand::Sessions => TuiResponse {
+            output: "sessions panel opened".to_string(),
             should_quit: false,
         },
         TuiCommand::Quit => TuiResponse {
@@ -707,7 +1108,7 @@ fn handle_pending_local_command(shell: &mut TuiShellState) -> Result<bool, Obero
     };
 
     shell.input.clear();
-    shell.status = response.output.clone();
+    shell.set_activity(ActivityState::Idle, response.output.clone());
     shell.should_quit = response.should_quit;
     shell.transcript.push(UiLine {
         role: "system".to_string(),
@@ -729,7 +1130,7 @@ fn start_async_submit(
     let trimmed = shell.input.trim().to_string();
     if trimmed.is_empty() {
         shell.input.clear();
-        shell.status = "Input was empty".to_string();
+        shell.set_activity(ActivityState::Idle, "Input was empty");
         return Ok(None);
     }
 
@@ -758,6 +1159,10 @@ fn start_async_submit(
         content: "...".to_string(),
     });
     let assistant_line_index = shell.transcript.len() - 1;
+    shell.set_activity(
+        ActivityState::WaitingOnProvider,
+        "waiting on provider response...",
+    );
     shell.status = "waiting on provider response...".to_string();
 
     let (sender, receiver) = mpsc::channel();
@@ -829,7 +1234,7 @@ fn handle_pending_timeout(
             }
         }
     }
-    shell.status = "request timed out".to_string();
+    shell.set_activity(ActivityState::Error, "request timed out");
 }
 
 fn handle_async_ui_event(
@@ -846,7 +1251,7 @@ fn handle_async_ui_event(
                         line.content.clear();
                     }
                     line.content.push_str(&content);
-                    shell.status = "streaming response...".to_string();
+                    shell.set_activity(ActivityState::Streaming, "streaming response...");
                 }
             }
         }
@@ -875,11 +1280,15 @@ fn handle_async_ui_event(
                 finalize_streamed_assistant(shell, &pending, &message);
             }
             app.apply_successful_prompt(&prompt, message.clone());
-            shell.status = if message.content.is_empty() {
-                "stream complete".to_string()
-            } else {
-                message.content.clone()
-            };
+            shell.set_activity(
+                ActivityState::Idle,
+                if message.content.is_empty() {
+                    "stream complete".to_string()
+                } else {
+                    message.content.clone()
+                },
+            );
+            shell.refresh_sidebar(app);
         }
         AsyncUiEvent::Failed(err) => {
             if let Some(pending) = pending_submission.take() {
@@ -893,7 +1302,8 @@ fn handle_async_ui_event(
                     });
                 }
             }
-            shell.status = err.to_string();
+            shell.set_activity(ActivityState::Error, err.to_string());
+            shell.refresh_sidebar(app);
         }
     }
 }
@@ -948,22 +1358,87 @@ fn finalize_streamed_assistant(
 
 fn render_terminal(frame: &mut Frame, shell: &TuiShellState) {
     let area = frame.size();
-    let [header, body, footer] = ratatui::layout::Layout::vertical([
-        ratatui::layout::Constraint::Length(3),
-        ratatui::layout::Constraint::Min(5),
-        ratatui::layout::Constraint::Length(3),
+    let [header, body, footer] = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Min(5),
+        Constraint::Length(FOOTER_HEIGHT),
     ])
     .areas(area);
 
-    let header_text = Paragraph::new(Text::from(vec![
-        Line::styled("Oberon4 TUI", Style::default().add_modifier(Modifier::BOLD)),
-        Line::raw(shell.status()),
-    ]))
-    .block(Block::default().borders(Borders::ALL).title("Status"));
+    render_header(frame, header, shell);
+    render_body(frame, body, shell);
+    render_footer(frame, footer, shell);
 
+    let cursor_lines = composer_lines(shell.input());
+    let last_line = cursor_lines.last().cloned().unwrap_or_default();
+    let cursor_y = footer
+        .y
+        .saturating_add(1 + cursor_lines.len().saturating_sub(1) as u16);
+    let cursor_x = footer.x.saturating_add(1 + last_line.len() as u16);
+    frame.set_cursor(cursor_x, cursor_y);
+}
+
+fn render_header(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
+    let session = shell.current_session.as_deref().unwrap_or("unsaved");
+    let dirty = if shell.is_dirty() { "*" } else { "" };
+    let header_lines = Text::from(vec![
+        Line::styled(
+            "Oberon4 TUI",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::raw(format!(
+            "daemon={} activity={} endpoint={} model={} account={} session={}{}",
+            if shell.status_snapshot.running {
+                "running"
+            } else {
+                "stopped"
+            },
+            shell.activity_label(),
+            shell.status_snapshot.endpoint,
+            shell.status_snapshot.model,
+            shell.status_snapshot.active_account,
+            session,
+            dirty,
+        )),
+    ]);
+    let header_widget = Paragraph::new(header_lines)
+        .block(Block::default().borders(Borders::ALL).title("Overview"));
+    frame.render_widget(header_widget, area);
+}
+
+fn render_body(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
+    let transcript_area;
+    let panel_area;
+    if area.width >= PANEL_SPLIT_WIDTH {
+        let [left, right] =
+            Layout::horizontal([Constraint::Percentage(68), Constraint::Percentage(32)])
+                .areas(area);
+        transcript_area = left;
+        panel_area = Some(right);
+    } else {
+        transcript_area = area;
+        panel_area = None;
+    }
+
+    render_transcript(frame, transcript_area, shell);
+
+    if let Some(panel_area) = panel_area {
+        if shell.side_panel_visible {
+            render_side_panel(frame, panel_area, shell);
+        }
+    } else if shell.overlay_visible {
+        let popup = centered_rect(area, 80, 70);
+        frame.render_widget(Clear, popup);
+        render_side_panel(frame, popup, shell);
+    }
+}
+
+fn render_transcript(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
     let transcript_lines: Vec<Line<'static>> = if shell.transcript().is_empty() {
         vec![Line::raw(
-            "No messages yet. Type text to chat or /help for commands.",
+            "No messages yet. Type text to chat, /sessions to browse saved chats, or /help for commands.",
         )]
     } else {
         shell
@@ -972,41 +1447,146 @@ fn render_terminal(frame: &mut Frame, shell: &TuiShellState) {
             .map(|line| Line::raw(format!("[{}] {}", line.role, line.content)))
             .collect()
     };
-
     let transcript = Paragraph::new(Text::from(transcript_lines))
         .block(Block::default().borders(Borders::ALL).title("Transcript"))
         .wrap(Wrap { trim: false });
-
-    let input = Paragraph::new(shell.input())
-        .block(Block::default().borders(Borders::ALL).title("Input"))
-        .wrap(Wrap { trim: false });
-
-    frame.render_widget(header_text, header);
-    frame.render_widget(Clear, body);
-    frame.render_widget(transcript, body);
-    frame.render_widget(Clear, footer);
-    frame.render_widget(input, footer);
-    frame.set_cursor(
-        footer.x.saturating_add(shell.input().len() as u16 + 1),
-        footer.y.saturating_add(1),
-    );
+    frame.render_widget(transcript, area);
 }
 
-fn init_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>, OberonError> {
+fn render_side_panel(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
+    let [tabs_area, content_area] =
+        Layout::vertical([Constraint::Length(3), Constraint::Min(5)]).areas(area);
+    let titles = vec!["Status", "Sessions", "Help"];
+    let selected = match shell.side_panel_tab {
+        SidePanelTab::Status => 0,
+        SidePanelTab::Sessions => 1,
+        SidePanelTab::Help => 2,
+    };
+    let tabs = Tabs::new(titles)
+        .select(selected)
+        .block(Block::default().borders(Borders::ALL).title("Panel"))
+        .highlight_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        );
+    frame.render_widget(tabs, tabs_area);
+
+    match shell.side_panel_tab {
+        SidePanelTab::Status => {
+            let lines = Text::from(vec![
+                Line::raw(format!("activity: {}", shell.activity_label())),
+                Line::raw(format!("status: {}", shell.status())),
+                Line::raw(format!("endpoint: {}", shell.status_snapshot.endpoint)),
+                Line::raw(format!("model: {}", shell.status_snapshot.model)),
+                Line::raw(format!(
+                    "active account: {}",
+                    shell.status_snapshot.active_account
+                )),
+                Line::raw(format!(
+                    "session: {}",
+                    shell.current_session.as_deref().unwrap_or("unsaved")
+                )),
+                Line::raw(format!("dirty: {}", shell.is_dirty())),
+            ]);
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .block(Block::default().borders(Borders::ALL).title("Status"))
+                    .wrap(Wrap { trim: false }),
+                content_area,
+            );
+        }
+        SidePanelTab::Sessions => {
+            let items: Vec<ListItem<'static>> = if shell.sessions.is_empty() {
+                vec![ListItem::new("No saved sessions")]
+            } else {
+                shell
+                    .sessions
+                    .iter()
+                    .enumerate()
+                    .map(|(index, session)| {
+                        let prefix = if index == shell.session_index {
+                            ">"
+                        } else {
+                            " "
+                        };
+                        ListItem::new(format!("{prefix} {} ({})", session.title, session.model))
+                    })
+                    .collect()
+            };
+            frame.render_widget(
+                List::new(items).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Sessions (Ctrl+R, Up/Down, Enter)"),
+                ),
+                content_area,
+            );
+        }
+        SidePanelTab::Help => {
+            frame.render_widget(
+                Paragraph::new(Text::from(vec![
+                    Line::raw(EXTENDED_HELP),
+                    Line::raw("Enter send | Ctrl+J newline | Tab autocomplete"),
+                    Line::raw("Ctrl+R sessions | Esc close/clear/quit"),
+                ]))
+                .block(Block::default().borders(Borders::ALL).title("Help"))
+                .wrap(Wrap { trim: false }),
+                content_area,
+            );
+        }
+    }
+}
+
+fn render_footer(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
+    let [input_area, hint_area] =
+        Layout::vertical([Constraint::Length(4), Constraint::Length(1)]).areas(area);
+    let input = Paragraph::new(shell.input())
+        .block(Block::default().borders(Borders::ALL).title("Composer"))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(Clear, input_area);
+    frame.render_widget(input, input_area);
+
+    if let Some(autocomplete) = shell.autocomplete.as_ref() {
+        let suggestion = autocomplete
+            .matches
+            .get(autocomplete.selected)
+            .cloned()
+            .unwrap_or_default();
+        frame.render_widget(
+            Paragraph::new(format!("autocomplete: {suggestion}")),
+            hint_area,
+        );
+    } else {
+        frame.render_widget(
+            Paragraph::new("Enter send | Ctrl+J newline | Tab command autocomplete | Ctrl+R sessions | Esc close/clear/quit"),
+            hint_area,
+        );
+    }
+}
+
+fn init_terminal(
+    options: TuiLaunchOptions,
+) -> Result<Terminal<CrosstermBackend<io::Stdout>>, OberonError> {
     enable_raw_mode()
         .map_err(|err| OberonError::Storage(format!("raw mode enable failed: {err}")))?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)
-        .map_err(|err| OberonError::Storage(format!("enter alt screen failed: {err}")))?;
+    if !options.no_alt_screen {
+        execute!(stdout, EnterAlternateScreen)
+            .map_err(|err| OberonError::Storage(format!("enter alt screen failed: {err}")))?;
+    }
     Terminal::new(CrosstermBackend::new(stdout))
         .map_err(|err| OberonError::Storage(format!("terminal init failed: {err}")))
 }
 
 fn restore_terminal(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    options: TuiLaunchOptions,
 ) -> Result<(), OberonError> {
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)
-        .map_err(|err| OberonError::Storage(format!("leave alt screen failed: {err}")))?;
+    if !options.no_alt_screen {
+        execute!(terminal.backend_mut(), LeaveAlternateScreen)
+            .map_err(|err| OberonError::Storage(format!("leave alt screen failed: {err}")))?;
+    }
     disable_raw_mode()
         .map_err(|err| OberonError::Storage(format!("raw mode disable failed: {err}")))?;
     Ok(())
@@ -1028,6 +1608,7 @@ pub fn parse_tui_command(input: &str) -> Result<TuiCommand, OberonError> {
         "/help" => Ok(TuiCommand::Help),
         "/quit" => Ok(TuiCommand::Quit),
         "/status" => Ok(TuiCommand::Status),
+        "/sessions" => Ok(TuiCommand::Sessions),
         "/config" => Ok(TuiCommand::Config),
         "/model" => require_argument(rest, "/model").map(TuiCommand::Model),
         "/endpoint" => require_argument(rest, "/endpoint").map(TuiCommand::Endpoint),
@@ -1035,6 +1616,7 @@ pub fn parse_tui_command(input: &str) -> Result<TuiCommand, OberonError> {
         "/clear" => Ok(TuiCommand::Clear),
         "/save" => require_argument(rest, "/save").map(TuiCommand::Save),
         "/load" => require_argument(rest, "/load").map(TuiCommand::Load),
+        "/fork" => require_argument(rest, "/fork").map(TuiCommand::Fork),
         _ => Err(OberonError::Validation(
             "unsupported TUI command. Use /help".to_string(),
         )),
@@ -1056,6 +1638,54 @@ fn require_argument(value: &str, command: &str) -> Result<String, OberonError> {
     } else {
         Ok(value.to_string())
     }
+}
+
+fn sort_sessions(sessions: &mut [SessionSummary]) {
+    sessions.sort_by(|left, right| {
+        left.title
+            .cmp(&right.title)
+            .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+    });
+}
+
+fn command_requires_argument(command: &str) -> bool {
+    COMMAND_CATALOG
+        .iter()
+        .find(|(candidate, _)| *candidate == command)
+        .map(|(_, requires_argument)| *requires_argument)
+        .unwrap_or(false)
+}
+
+fn transcript_signature(lines: &[UiLine]) -> String {
+    lines
+        .iter()
+        .map(|line| format!("{}:{}", line.role, line.content))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn composer_lines(input: &str) -> Vec<&str> {
+    if input.is_empty() {
+        vec![""]
+    } else {
+        input.split('\n').collect()
+    }
+}
+
+fn centered_rect(area: Rect, width_percent: u16, height_percent: u16) -> Rect {
+    let [_top, middle, _bottom] = Layout::vertical([
+        Constraint::Percentage((100_u16.saturating_sub(height_percent)) / 2),
+        Constraint::Percentage(height_percent),
+        Constraint::Percentage(100_u16.saturating_sub(height_percent).div_ceil(2)),
+    ])
+    .areas(area);
+    let [_left, center, _right] = Layout::horizontal([
+        Constraint::Percentage((100_u16.saturating_sub(width_percent)) / 2),
+        Constraint::Percentage(width_percent),
+        Constraint::Percentage(100_u16.saturating_sub(width_percent).div_ceil(2)),
+    ])
+    .areas(middle);
+    center
 }
 
 fn redacted_config_json(config: &AppConfig) -> Result<String, OberonError> {
@@ -1224,10 +1854,10 @@ mod tests {
     };
 
     use super::{
-        AsyncUiEvent, BinaryLaunchTarget, DaemonBackedTuiApp, PendingSubmission, TuiApp,
-        TuiCommand, TuiShellState, UiLine, handle_async_ui_event, handle_pending_local_command,
-        handle_pending_timeout, parse_tui_command, resolve_binary_launch_target,
-        start_async_submit, status_line,
+        AsyncUiEvent, BinaryLaunchTarget, DaemonBackedTuiApp, FocusTarget, PANEL_SPLIT_WIDTH,
+        PendingSubmission, SidePanelTab, TuiApp, TuiCommand, TuiShellState, UiLine,
+        handle_async_ui_event, handle_pending_local_command, handle_pending_timeout,
+        parse_tui_command, resolve_binary_launch_target, start_async_submit, status_line,
     };
     use oberon4_auth::{AccountRegistry, InMemoryAccountMetadataStore};
     use oberon4_core::{
@@ -1247,12 +1877,20 @@ mod tests {
     fn parses_supported_commands() {
         assert_eq!(parse_tui_command("/help").unwrap(), TuiCommand::Help);
         assert_eq!(
+            parse_tui_command("/sessions").unwrap(),
+            TuiCommand::Sessions
+        );
+        assert_eq!(
             parse_tui_command("/model o4-mini").unwrap(),
             TuiCommand::Model("o4-mini".to_string())
         );
         assert_eq!(
             parse_tui_command("/save demo").unwrap(),
             TuiCommand::Save("demo".to_string())
+        );
+        assert_eq!(
+            parse_tui_command("/fork demo-copy").unwrap(),
+            TuiCommand::Fork("demo-copy".to_string())
         );
     }
 
@@ -1314,6 +1952,25 @@ mod tests {
         assert_eq!(clear.output, "transcript cleared");
         assert_eq!(load.output, "loaded session demo");
         assert!(!app.transcript().is_empty());
+    }
+
+    #[test]
+    fn fork_command_saves_independent_session() {
+        let mut app = TuiApp::default();
+        let _ = app.handle_input("hello").unwrap();
+
+        let fork = app
+            .handle_command(TuiCommand::Fork("demo-copy".to_string()))
+            .unwrap();
+        let clear = app.handle_command(TuiCommand::Clear).unwrap();
+        let load = app
+            .handle_command(TuiCommand::Load("demo-copy".to_string()))
+            .unwrap();
+
+        assert_eq!(fork.output, "forked session demo-copy");
+        assert_eq!(clear.output, "transcript cleared");
+        assert_eq!(load.output, "loaded session demo-copy");
+        assert_eq!(app.transcript().len(), 2);
     }
 
     #[test]
@@ -1409,6 +2066,74 @@ mod tests {
     }
 
     #[test]
+    fn shell_autocomplete_cycles_and_accepts_commands() {
+        let mut shell = TuiShellState::default();
+        for ch in "/s".chars() {
+            shell.push_input_char(ch);
+        }
+
+        let matches = shell
+            .autocomplete
+            .as_ref()
+            .expect("autocomplete should open")
+            .matches
+            .clone();
+        assert!(matches.contains(&"/save".to_string()));
+        assert!(matches.contains(&"/sessions".to_string()));
+        assert!(matches.contains(&"/status".to_string()));
+
+        shell.cycle_autocomplete();
+        assert!(shell.accept_autocomplete());
+        assert!(shell.input().starts_with("/s"));
+    }
+
+    #[test]
+    fn shell_multiline_and_escape_precedence_behave_as_expected() {
+        let mut shell = TuiShellState::default();
+        shell.push_input_char('/');
+        shell.push_input_char('s');
+        assert!(shell.autocomplete.is_some());
+        shell.handle_escape();
+        assert!(shell.autocomplete.is_none());
+
+        shell.insert_newline();
+        shell.push_input_char('x');
+        assert_eq!(shell.input(), "/s\nx");
+        shell.handle_escape();
+        assert_eq!(shell.input(), "");
+        assert!(!shell.should_quit());
+
+        shell.handle_escape();
+        assert!(shell.should_quit());
+    }
+
+    #[test]
+    fn shell_session_panel_tracks_layout_and_dirty_state() {
+        let mut shell = TuiShellState::default();
+        shell.show_tab(SidePanelTab::Sessions, PANEL_SPLIT_WIDTH);
+        assert!(shell.side_panel_visible);
+        assert!(!shell.overlay_visible);
+        assert!(matches!(shell.focus, FocusTarget::Sessions));
+
+        shell.show_tab(SidePanelTab::Sessions, PANEL_SPLIT_WIDTH - 1);
+        assert!(!shell.side_panel_visible);
+        assert!(shell.overlay_visible);
+
+        shell.transcript.push(UiLine {
+            role: "user".to_string(),
+            content: "hello".to_string(),
+        });
+        assert!(shell.is_dirty());
+        shell.mark_loaded_session(Some("demo".to_string()));
+        assert!(!shell.is_dirty());
+        shell.transcript.push(UiLine {
+            role: "assistant".to_string(),
+            content: "reply".to_string(),
+        });
+        assert!(shell.is_dirty());
+    }
+
+    #[test]
     fn shell_submit_records_command_output() {
         let socket_path = std::env::temp_dir().join(format!(
             "oberon4-tui-shell-test-{}.sock",
@@ -1446,6 +2171,50 @@ mod tests {
 
         assert!(shell.status().contains("/help"));
         assert_eq!(shell.transcript()[0].role, "system");
+
+        let client = DaemonIpcClient::new(&socket_path);
+        let _ = client.send(&oberon4_core::DaemonCommand::Shutdown).unwrap();
+        handle.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn shell_submit_opens_sessions_panel() {
+        let socket_path = std::env::temp_dir().join(format!(
+            "oberon4-tui-shell-sessions-test-{}.sock",
+            std::process::id()
+        ));
+        let thread_socket = socket_path.clone();
+        let handle = thread::spawn(move || {
+            let app = DaemonApp::new(
+                DaemonRuntime::default(),
+                FakeChatProvider {
+                    reply: "daemon reply".to_string(),
+                },
+                FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
+                FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+                AccountRegistry::default(),
+                InMemorySecretStore::default(),
+                InMemoryAccountMetadataStore::default(),
+            );
+            serve_unix_socket(&thread_socket, app)
+        });
+
+        for _ in 0..20 {
+            if socket_path.exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+
+        let mut app = DaemonBackedTuiApp::new(DaemonIpcClient::new(&socket_path));
+        let mut shell = TuiShellState {
+            input: "/sessions".to_string(),
+            ..TuiShellState::default()
+        };
+        shell.submit(&mut app).unwrap();
+
+        assert_eq!(shell.status(), "sessions panel opened");
+        assert!(matches!(shell.side_panel_tab, SidePanelTab::Sessions));
 
         let client = DaemonIpcClient::new(&socket_path);
         let _ = client.send(&oberon4_core::DaemonCommand::Shutdown).unwrap();
