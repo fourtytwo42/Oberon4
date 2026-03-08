@@ -49,6 +49,7 @@ use ratatui::{
 pub enum TuiCommand {
     Help,
     Quit,
+    New,
     Status,
     Sessions,
     Settings,
@@ -137,7 +138,6 @@ enum FormAction {
 enum SessionSidebarItem {
     CurrentChat,
     Saved(usize),
-    NewSession,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -224,9 +224,10 @@ impl Default for TuiLaunchOptions {
 const FOOTER_HEIGHT: u16 = 5;
 const CODE_BLOCK_BG: Color = Color::Rgb(28, 32, 40);
 const CODE_BLOCK_FG: Color = Color::Rgb(185, 220, 255);
-const COMMAND_CATALOG: [(&str, bool); 16] = [
+const COMMAND_CATALOG: [(&str, bool); 17] = [
     ("/help", false),
     ("/quit", false),
+    ("/new", false),
     ("/status", false),
     ("/sessions", false),
     ("/settings", false),
@@ -242,7 +243,7 @@ const COMMAND_CATALOG: [(&str, bool); 16] = [
     ("/load", true),
     ("/fork", true),
 ];
-const EXTENDED_HELP: &str = "/help /quit /status /sessions /settings /accounts /diagnostics /more /config /model <name> /endpoint <url> /system <text> /clear /save <name> /load <name> /fork <name>";
+const EXTENDED_HELP: &str = "/help /quit /new /status /sessions /settings /accounts /diagnostics /more /config /model <name> /endpoint <url> /system <text> /clear /save <name> /load <name> /fork <name>";
 const SESSION_SIDEBAR_WIDTH: u16 = 18;
 const SESSION_VISIBLE_WIDTH: usize = 12;
 
@@ -373,6 +374,13 @@ impl TuiApp {
                 output: "quitting".to_string(),
                 should_quit: true,
             }),
+            TuiCommand::New => {
+                self.transcript.clear();
+                Ok(TuiResponse {
+                    output: "new session opened".to_string(),
+                    should_quit: false,
+                })
+            }
             TuiCommand::Sessions => Ok(TuiResponse {
                 output: "sessions workspace opened".to_string(),
                 should_quit: false,
@@ -580,6 +588,13 @@ impl DaemonBackedTuiApp {
                 output: "quitting".to_string(),
                 should_quit: true,
             }),
+            TuiCommand::New => {
+                self.transcript.clear();
+                Ok(TuiResponse {
+                    output: "new session opened".to_string(),
+                    should_quit: false,
+                })
+            }
             TuiCommand::Sessions => Ok(TuiResponse {
                 output: "sessions workspace opened".to_string(),
                 should_quit: false,
@@ -1434,7 +1449,6 @@ impl TuiShellState {
             }
             items.push(SessionSidebarItem::Saved(index));
         }
-        items.push(SessionSidebarItem::NewSession);
         items
     }
 
@@ -1531,11 +1545,6 @@ impl TuiShellState {
                 self.transcript = Self::ui_lines_from_messages(&preview.messages);
                 self.scroll_transcript_to_bottom();
                 self.set_activity(ActivityState::Idle, format!("previewing {}", session_title));
-            }
-            SessionSidebarItem::NewSession => {
-                self.transcript.clear();
-                self.scroll_transcript_to_bottom();
-                self.set_activity(ActivityState::Idle, "previewing new session");
             }
         }
 
@@ -1836,19 +1845,6 @@ impl TuiShellState {
                                 return Ok(true);
                             }
                         }
-                        SessionSidebarItem::NewSession => {
-                            self.transcript.clear();
-                            app.transcript.clear();
-                            self.current_session_id = None;
-                            self.current_session_title = None;
-                            self.baseline_signature = None;
-                            self.workspace = Workspace::Chat;
-                            self.screen_stack = vec![ScreenRoute::ChatRoot];
-                            self.focus = FocusTarget::Composer;
-                            self.scroll_transcript_to_bottom();
-                            self.set_activity(ActivityState::Idle, "new session opened");
-                            return Ok(true);
-                        }
                     }
                 }
             }
@@ -1993,6 +1989,7 @@ impl TuiShellState {
         }
 
         match command {
+            Some(TuiCommand::New) => self.activity = ActivityState::Idle,
             Some(TuiCommand::Save(_)) => self.activity = ActivityState::Saving,
             Some(TuiCommand::Load(_)) => self.activity = ActivityState::Loading,
             Some(TuiCommand::Fork(_)) => self.activity = ActivityState::Saving,
@@ -2019,6 +2016,12 @@ impl TuiShellState {
                 });
             }
             match command {
+                Some(TuiCommand::New) => {
+                    self.current_session_id = None;
+                    self.current_session_title = None;
+                    self.baseline_signature = None;
+                    self.scroll_transcript_to_bottom();
+                }
                 Some(TuiCommand::Save(name)) => {
                     self.mark_loaded_session(Some(name.clone()), Some(name))
                 }
@@ -3305,7 +3308,6 @@ fn render_sessions_sidebar(frame: &mut Frame, area: Rect, shell: &TuiShellState)
                     .get(session_index)
                     .map(|session| session.title.clone())
                     .unwrap_or_else(|| "missing".to_string()),
-                SessionSidebarItem::NewSession => "new session".to_string(),
             };
             let visible = compact_session_title(&title, selected, shell.render_tick);
             let style = if selected {
@@ -3485,6 +3487,7 @@ fn render_help_workspace(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
     let [top, bottom] = Layout::vertical([Constraint::Length(7), Constraint::Min(5)]).areas(area);
     frame.render_widget(
         Paragraph::new(Text::from(vec![
+            Line::raw("/new         start fresh chat"),
             Line::raw("/sessions    browse chats"),
             Line::raw("/settings    open settings"),
             Line::raw("/status      show status"),
@@ -3672,7 +3675,7 @@ fn render_footer(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
         );
     } else {
         let hint = if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
-            "/help /sessions /settings /status /accounts /diagnostics /more /quit"
+            "/new /help /sessions /settings /status /accounts /diagnostics /more /quit"
         } else {
             "Up/Down navigate | Enter select | mouse wheel scroll | Home/End jump | Esc back"
         };
@@ -3684,7 +3687,7 @@ fn print_inline_banner(stdout: &mut io::Stdout) -> Result<(), OberonError> {
     write_inline_line(stdout, "Oberon4 TUI")?;
     write_inline_line(
         stdout,
-        "Inline mode. Use /help for commands. Use /sessions to switch chats.",
+        "Inline mode. Use /help for commands. Use /new or /sessions for chats.",
     )?;
     write_inline_line(stdout, "")?;
     stdout
@@ -3771,7 +3774,6 @@ fn print_inline_workspace(
                         .get(*saved_index)
                         .map(|session| session.title.clone())
                         .unwrap_or_else(|| "unknown".to_string()),
-                    SessionSidebarItem::NewSession => "new session".to_string(),
                 };
                 write_inline_line(stdout, &format!("{prefix} {title}"))?;
             }
@@ -3934,6 +3936,11 @@ fn submit_inline_input(
                 shell.set_activity(ActivityState::Idle, response.output.clone());
                 shell.should_quit = response.should_quit;
                 match command {
+                    TuiCommand::New => {
+                        shell.current_session_id = None;
+                        shell.current_session_title = None;
+                        shell.baseline_signature = None;
+                    }
                     TuiCommand::Load(name) => shell.sync_loaded_session_from_id(&name),
                     TuiCommand::Save(name) => {
                         shell.mark_loaded_session(Some(name.clone()), Some(name))
@@ -4065,6 +4072,7 @@ pub fn parse_tui_command(input: &str) -> Result<TuiCommand, OberonError> {
     match command {
         "/help" => Ok(TuiCommand::Help),
         "/quit" => Ok(TuiCommand::Quit),
+        "/new" => Ok(TuiCommand::New),
         "/status" => Ok(TuiCommand::Status),
         "/sessions" => Ok(TuiCommand::Sessions),
         "/settings" => Ok(TuiCommand::Settings),
@@ -4087,6 +4095,7 @@ fn canonical_tui_command(command: &str) -> &str {
     match command.to_ascii_lowercase().as_str() {
         "/help" | "/halp" | "/commands" => "/help",
         "/quit" | "/exit" | "/close" => "/quit",
+        "/new" | "/fresh" | "/start" => "/new",
         "/status" | "/stat" | "/stats" => "/status",
         "/sessions" | "/session" | "/sessoins" | "/sessons" => "/sessions",
         "/settings" | "/setting" | "/setings" | "/settigns" | "/setteings" => "/settings",
@@ -4726,6 +4735,8 @@ mod tests {
     fn parses_supported_commands() {
         assert_eq!(parse_tui_command("/help").unwrap(), TuiCommand::Help);
         assert_eq!(parse_tui_command("/halp").unwrap(), TuiCommand::Help);
+        assert_eq!(parse_tui_command("/new").unwrap(), TuiCommand::New);
+        assert_eq!(parse_tui_command("/fresh").unwrap(), TuiCommand::New);
         assert_eq!(
             parse_tui_command("/sessions").unwrap(),
             TuiCommand::Sessions
@@ -5384,7 +5395,7 @@ mod tests {
         assert_eq!(shell.status(), "sessions focused");
         assert!(matches!(shell.workspace, Workspace::Chat));
         assert!(matches!(shell.focus, FocusTarget::List));
-        assert_eq!(shell.session_sidebar_items().len(), 2);
+        assert_eq!(shell.session_sidebar_items().len(), 1);
 
         let client = DaemonIpcClient::new(&socket_path);
         let _ = client.send(&oberon4_core::DaemonCommand::Shutdown).unwrap();
