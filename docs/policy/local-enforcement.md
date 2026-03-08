@@ -165,6 +165,7 @@ Notes:
     - test command
     - build command
     - push is blocked if any required step fails
+    - hook execution prepends `$HOME/.local/bin:$HOME/.cargo/bin` so bootstrap-installed security tools stay visible under git-hook PATHs
     - Oberon4 defaults:
       - smoke: `GATE_MODE=smoke bash scripts/oberon4-gate.sh`
       - test: `GATE_MODE=strict bash scripts/oberon4-gate.sh`

@@ -18,6 +18,7 @@ require_build="${HOOKS_LOCAL_CI_REQUIRE_BUILD:-1}"
 smoke_cmd="${HOOKS_LOCAL_SMOKE_CMD:-}"
 test_cmd="${HOOKS_LOCAL_TEST_CMD:-}"
 build_cmd="${HOOKS_LOCAL_BUILD_CMD:-}"
+local_ci_extra_path="${HOOKS_LOCAL_CI_EXTRA_PATH:-${HOME}/.local/bin:${HOME}/.cargo/bin}"
 
 run_step() {
   local label="$1"
@@ -34,7 +35,7 @@ run_step() {
   fi
 
   echo "Local CI gate: running ${label}: ${cmd}"
-  if ! bash -lc "$cmd"; then
+  if ! PATH="${local_ci_extra_path}:${PATH}" bash -lc "$cmd"; then
     echo "Local CI gate failed at ${label}." >&2
     return 1
   fi
