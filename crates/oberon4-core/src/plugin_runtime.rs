@@ -262,6 +262,26 @@ pub struct ToolDescribeResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolSearchRequestEnvelope {
+    pub request: SearchRequest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolSearchResponseEnvelope {
+    pub response: SearchResponse,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolDescribeRequestEnvelope {
+    pub request: ToolDescribeRequest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolDescribeResponseEnvelope {
+    pub response: ToolDescribeResponse,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandSchemaReference {
     pub id: String,
     pub schema: serde_json::Value,
@@ -309,6 +329,16 @@ pub struct PlanResult {
     pub resource_limits: Option<ResourceLimits>,
     #[serde(default, rename = "approvalPreview")]
     pub approval_preview: Option<CommandPlanPreview>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolPlanRequestEnvelope {
+    pub request: PlanRequest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolPlanResponseEnvelope {
+    pub response: PlanResult,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -365,6 +395,19 @@ pub struct InvokeRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InvokeResponse {
     pub result: InvokeResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolInvokeRequestEnvelope {
+    pub request: InvokeRequest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolInvokeResponseEnvelope {
+    #[serde(default)]
+    pub result: Option<ToolResult>,
+    #[serde(default)]
+    pub error: Option<ToolError>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -447,6 +490,16 @@ pub struct PolicyInspectResponse {
     pub operating_mode: OperatingMode,
     #[serde(default, rename = "reasonCodes")]
     pub reason_codes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolPolicyInspectRequestEnvelope {
+    pub request: PolicyInspectRequest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolPolicyInspectResponseEnvelope {
+    pub response: PolicyInspectResponse,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -601,6 +654,79 @@ pub struct WorkspaceWriteResult {
     #[serde(rename = "preconditionStatus")]
     pub precondition_status: WorkspacePreconditionStatus,
     pub touched: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestValidationIssue {
+    pub code: String,
+    pub message: String,
+    #[serde(default)]
+    pub field: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestValidationResult {
+    pub valid: bool,
+    #[serde(default)]
+    pub issues: Vec<ManifestValidationIssue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyResolution {
+    pub tool: String,
+    pub command: String,
+    pub capabilities: EffectiveCapabilities,
+    #[serde(rename = "approvalRequired")]
+    pub approval_required: bool,
+    #[serde(rename = "resourceLimits")]
+    pub resource_limits: ResourceLimits,
+    #[serde(rename = "operatingMode")]
+    pub operating_mode: OperatingMode,
+    #[serde(default, rename = "reasonCodes")]
+    pub reason_codes: Vec<String>,
+    #[serde(default, rename = "blockingIssues")]
+    pub blocking_issues: Vec<String>,
+}
+
+pub trait PluginRegistry {
+    fn list_plugins(&self) -> Vec<PluginDescription>;
+    fn search(&self, request: &SearchRequest) -> Result<SearchResponse, crate::OberonError>;
+    fn describe(
+        &self,
+        request: &ToolDescribeRequest,
+    ) -> Result<ToolDescribeResponse, crate::OberonError>;
+    fn manifest(&self, tool: &str) -> Result<PluginManifest, crate::OberonError>;
+    fn command_manifest(
+        &self,
+        tool: &str,
+        command: &str,
+    ) -> Result<PluginCommandManifest, crate::OberonError>;
+}
+
+pub trait PolicyResolver {
+    fn resolve(
+        &self,
+        tool: &str,
+        command: &PluginCommandManifest,
+        manifest: &PluginManifest,
+    ) -> Result<PolicyResolution, crate::OberonError>;
+}
+
+pub trait HostToolRuntime {
+    fn tool_search(&self, request: &SearchRequest) -> Result<SearchResponse, crate::OberonError>;
+    fn tool_describe(
+        &self,
+        request: &ToolDescribeRequest,
+    ) -> Result<ToolDescribeResponse, crate::OberonError>;
+    fn tool_plan(&self, request: &PlanRequest) -> Result<PlanResult, crate::OberonError>;
+    fn tool_invoke(
+        &self,
+        request: &InvokeRequest,
+    ) -> Result<ToolInvokeResponseEnvelope, crate::OberonError>;
+    fn tool_policy_inspect(
+        &self,
+        request: &PolicyInspectRequest,
+    ) -> Result<PolicyInspectResponse, crate::OberonError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -765,13 +891,16 @@ mod tests {
         ApprovalResourceLimits, ArtifactReference, BuildMetadata, CapabilityGrant,
         CapabilityGrantKind, CapabilityManifest, CommandSchemaReference, DiffSummary,
         EffectiveCapabilities, EstimatedCost, HandleOperation, InvocationContext, InvokeMetrics,
-        InvokeResult, InvokeStatus, LifecycleActions, LifecycleHooks, NetworkPolicy, OperatingMode,
+        InvokeRequest, InvokeResult, InvokeStatus, LifecycleActions, LifecycleHooks,
+        ManifestValidationIssue, ManifestValidationResult, NetworkPolicy, OperatingMode,
         PlanRequest, PlanResult, PlanStatus, PluginCommandManifest, PluginDescription,
-        PluginExample, PluginManifest, PolicyInspectResponse, PreconditionModel, PromptingManifest,
-        ProvenanceManifest, RemoteImpact, ResourceBudgetRequest, ResourceLimits, SearchMatch,
-        SearchRequest, SearchResponse, SecretClass, SideEffectClass, SignatureMetadata,
-        ToolDescribeRequest, ToolDescribeResponse, ToolError, ToolGuidance, ToolResult, ToolTier,
-        WorkspaceImpact,
+        PluginExample, PluginManifest, PolicyInspectResponse, PolicyResolution, PreconditionModel,
+        PromptingManifest, ProvenanceManifest, RemoteImpact, ResourceBudgetRequest, ResourceLimits,
+        SearchMatch, SearchRequest, SearchResponse, SecretClass, SideEffectClass,
+        SignatureMetadata, ToolDescribeRequest, ToolDescribeRequestEnvelope, ToolDescribeResponse,
+        ToolDescribeResponseEnvelope, ToolError, ToolGuidance, ToolInvokeRequestEnvelope,
+        ToolInvokeResponseEnvelope, ToolPlanRequestEnvelope, ToolPlanResponseEnvelope, ToolResult,
+        ToolSearchRequestEnvelope, ToolSearchResponseEnvelope, ToolTier, WorkspaceImpact,
     };
     use crate::RequestId;
 
@@ -1152,5 +1281,211 @@ mod tests {
         let encoded = serde_json::to_string(&description).unwrap();
         let decoded: PluginDescription = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, description);
+    }
+
+    #[test]
+    fn host_tool_envelopes_round_trip() {
+        let search_request = ToolSearchRequestEnvelope {
+            request: SearchRequest {
+                query: "workspace writer".to_string(),
+                limit: Some(5),
+                session_id: Some("sess_123".to_string()),
+            },
+        };
+        let encoded_search_request = serde_json::to_string(&search_request).unwrap();
+        let decoded_search_request: ToolSearchRequestEnvelope =
+            serde_json::from_str(&encoded_search_request).unwrap();
+        assert_eq!(decoded_search_request, search_request);
+
+        let search_response = ToolSearchResponseEnvelope {
+            response: SearchResponse {
+                matches: vec![SearchMatch {
+                    tool: "workspace".to_string(),
+                    command: "write_file_atomic".to_string(),
+                    summary: "Write file contents atomically.".to_string(),
+                    tool_tier: ToolTier::OrdinaryPlugin,
+                    side_effects: SideEffectClass::ExternalWrite,
+                    approval_required: true,
+                    capabilities_required: vec!["workspace.write".to_string()],
+                    confidence: "0.92".to_string(),
+                }],
+            },
+        };
+        let encoded_search_response = serde_json::to_string(&search_response).unwrap();
+        let decoded_search_response: ToolSearchResponseEnvelope =
+            serde_json::from_str(&encoded_search_response).unwrap();
+        assert_eq!(decoded_search_response, search_response);
+
+        let describe_request = ToolDescribeRequestEnvelope {
+            request: ToolDescribeRequest {
+                tool: "workspace".to_string(),
+                command: "write_file_atomic".to_string(),
+            },
+        };
+        let encoded_describe_request = serde_json::to_string(&describe_request).unwrap();
+        let decoded_describe_request: ToolDescribeRequestEnvelope =
+            serde_json::from_str(&encoded_describe_request).unwrap();
+        assert_eq!(decoded_describe_request, describe_request);
+
+        let describe_response = ToolDescribeResponseEnvelope {
+            response: ToolDescribeResponse {
+                tool: "workspace".to_string(),
+                command: "write_file_atomic".to_string(),
+                summary: "Write file contents atomically.".to_string(),
+                input_schema: CommandSchemaReference {
+                    id: "workspace.write_file_atomic.input".to_string(),
+                    schema: serde_json::json!({"type":"object"}),
+                },
+                output_schema: CommandSchemaReference {
+                    id: "workspace.write_file_atomic.output".to_string(),
+                    schema: serde_json::json!({"type":"object"}),
+                },
+                side_effects: SideEffectClass::ExternalWrite,
+                approval_expectation: ApprovalExpectation::Required,
+                capabilities_required: vec!["workspace.write".to_string()],
+                pagination_behavior: None,
+                artifact_rules: None,
+                guidance: ToolGuidance {
+                    when_to_use: "Use when editing a workspace file.".to_string(),
+                    when_not_to_use: "Do not use for remote-only operations.".to_string(),
+                    examples: vec!["Update docs/notes.md".to_string()],
+                    common_mistakes: vec!["Passing an absolute path".to_string()],
+                    failure_recovery: vec!["Retry after re-reading workspace revision".to_string()],
+                },
+            },
+        };
+        let encoded_describe_response = serde_json::to_string(&describe_response).unwrap();
+        let decoded_describe_response: ToolDescribeResponseEnvelope =
+            serde_json::from_str(&encoded_describe_response).unwrap();
+        assert_eq!(decoded_describe_response, describe_response);
+
+        let context = InvocationContext {
+            request_id: RequestId::new(),
+            session_id: "sess_123".to_string(),
+            plugin_id: "workspace-git".to_string(),
+            plugin_version: "0.1.0".to_string(),
+            command: "write_file_atomic".to_string(),
+            deadline: "2026-03-08T12:00:05Z".to_string(),
+            runtime_api_version: "1.0".to_string(),
+            capability_grants: vec![CapabilityGrant {
+                kind: CapabilityGrantKind::WorkspaceHandle,
+                id: "wrk_123".to_string(),
+                operations: vec![HandleOperation::Read, HandleOperation::Write],
+            }],
+            workspace_revision: Some("wsr_123".to_string()),
+            memory_limit: 134_217_728,
+            time_limit_ms: 5_000,
+            output_limit_bytes: 131_072,
+            storage_limit_bytes: 268_435_456,
+            network_policy: NetworkPolicy::Denied,
+        };
+
+        let plan_request = ToolPlanRequestEnvelope {
+            request: PlanRequest {
+                command: "write_file_atomic".to_string(),
+                input: serde_json::json!({"workspaceHandle":"wrk_123","path":"docs/notes.md"}),
+                context: context.clone(),
+            },
+        };
+        let encoded_plan_request = serde_json::to_string(&plan_request).unwrap();
+        let decoded_plan_request: ToolPlanRequestEnvelope =
+            serde_json::from_str(&encoded_plan_request).unwrap();
+        assert_eq!(decoded_plan_request, plan_request);
+
+        let plan_response = ToolPlanResponseEnvelope {
+            response: PlanResult {
+                status: PlanStatus::Ok,
+                side_effects: SideEffectClass::ExternalWrite,
+                approval_required: true,
+                capabilities_required: vec!["workspace.write".to_string()],
+                estimated_cost: EstimatedCost::Low,
+                estimated_steps: 1,
+                preconditions: vec!["workspaceRevision".to_string()],
+                blocking_issues: Vec::new(),
+                resource_limits: Some(ResourceLimits {
+                    memory_bytes: Some(134_217_728),
+                    time_ms: Some(5_000),
+                    storage_bytes: None,
+                    output_bytes: None,
+                    network_policy: Some(NetworkPolicy::Denied),
+                }),
+                approval_preview: None,
+            },
+        };
+        let encoded_plan_response = serde_json::to_string(&plan_response).unwrap();
+        let decoded_plan_response: ToolPlanResponseEnvelope =
+            serde_json::from_str(&encoded_plan_response).unwrap();
+        assert_eq!(decoded_plan_response, plan_response);
+
+        let invoke_request = ToolInvokeRequestEnvelope {
+            request: InvokeRequest {
+                command: "write_file_atomic".to_string(),
+                input: serde_json::json!({"workspaceHandle":"wrk_123","path":"docs/notes.md"}),
+                context,
+            },
+        };
+        let encoded_invoke_request = serde_json::to_string(&invoke_request).unwrap();
+        let decoded_invoke_request: ToolInvokeRequestEnvelope =
+            serde_json::from_str(&encoded_invoke_request).unwrap();
+        assert_eq!(decoded_invoke_request, invoke_request);
+
+        let invoke_response = ToolInvokeResponseEnvelope {
+            result: None,
+            error: Some(ToolError {
+                status: super::ErrorStatus::Error,
+                code: "NOT_YET_EXECUTABLE".to_string(),
+                message: "plugin execution is not available until WP2".to_string(),
+                retryable: false,
+                request_id: RequestId::new(),
+                plugin_id: "workspace-git".to_string(),
+                plugin_version: "0.1.0".to_string(),
+                command: "write_file_atomic".to_string(),
+                next_suggested_action: Some("tool_plan".to_string()),
+            }),
+        };
+        let encoded_invoke_response = serde_json::to_string(&invoke_response).unwrap();
+        let decoded_invoke_response: ToolInvokeResponseEnvelope =
+            serde_json::from_str(&encoded_invoke_response).unwrap();
+        assert_eq!(decoded_invoke_response, invoke_response);
+    }
+
+    #[test]
+    fn manifest_validation_and_policy_models_round_trip() {
+        let validation = ManifestValidationResult {
+            valid: false,
+            issues: vec![ManifestValidationIssue {
+                code: "duplicate_command".to_string(),
+                message: "command names must be unique".to_string(),
+                field: Some("commands[1].name".to_string()),
+            }],
+        };
+        let encoded_validation = serde_json::to_string(&validation).unwrap();
+        let decoded_validation: ManifestValidationResult =
+            serde_json::from_str(&encoded_validation).unwrap();
+        assert_eq!(decoded_validation, validation);
+
+        let resolution = PolicyResolution {
+            tool: "workspace-git".to_string(),
+            command: "write_file_atomic".to_string(),
+            capabilities: EffectiveCapabilities {
+                allowed: vec!["workspace.write".to_string()],
+                blocked: Vec::new(),
+            },
+            approval_required: true,
+            resource_limits: ResourceLimits {
+                memory_bytes: Some(134_217_728),
+                time_ms: Some(5_000),
+                storage_bytes: Some(268_435_456),
+                output_bytes: Some(131_072),
+                network_policy: Some(NetworkPolicy::Denied),
+            },
+            operating_mode: OperatingMode::Production,
+            reason_codes: Vec::new(),
+            blocking_issues: Vec::new(),
+        };
+        let encoded_resolution = serde_json::to_string(&resolution).unwrap();
+        let decoded_resolution: PolicyResolution =
+            serde_json::from_str(&encoded_resolution).unwrap();
+        assert_eq!(decoded_resolution, resolution);
     }
 }

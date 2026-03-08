@@ -86,21 +86,21 @@ Evidence:
 - `rg -n "shell|bash|/tmp|C:\\\\\\\\|SSH_AUTH_SOCK|secret read|raw filesystem" wit/oberon-plugin-runtime/plugin-runtime.wit`
 
 ### Phase 1: Host Runtime Core
-- [ ] `WP1.1` Implement plugin registry and manifest index.
-- [ ] `WP1.2` Implement manifest validation and provenance validation scaffolding.
-- [ ] `WP1.3` Implement host policy engine for:
+- [x] `WP1.1` Implement plugin registry and manifest index.
+- [x] `WP1.2` Implement manifest validation and provenance validation scaffolding.
+- [x] `WP1.3` Implement host policy engine for:
   - capabilities
   - resource budgets
   - approvals
   - operating mode (`dev` / `production`)
-- [ ] `WP1.4` Implement core host tools:
+- [x] `WP1.4` Implement core host tools:
   - `tool_search`
   - `tool_describe`
   - `tool_plan`
   - `tool_invoke`
   - `tool_policy_inspect`
-- [ ] `WP1.5` Implement artifact broker and storage broker foundations.
-- [ ] `WP1.6` Implement structured error and approval payload generation.
+- [x] `WP1.5` Implement artifact broker and storage broker foundations.
+- [x] `WP1.6` Implement structured error and approval payload generation.
 
 Dependencies:
 - depends on `EG-WP0`
@@ -110,6 +110,10 @@ Verification gate `EG-WP1`:
 - core tool contract tests pass
 - policy inspection responses match schema
 - approval payload tests pass
+Evidence:
+- `cargo test -p oberon4-core`
+- `cargo test -p oberon4-daemon`
+- `cargo fmt --all`
 
 ### Phase 2: WASM/WASI Execution Layer
 - [ ] `WP2.1` Integrate the selected WASM/WASI runtime.

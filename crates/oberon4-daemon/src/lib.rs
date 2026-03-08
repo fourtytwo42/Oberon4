@@ -1,3 +1,5 @@
+pub mod plugin_runtime;
+
 use std::{
     collections::BTreeMap,
     fs,
@@ -14,6 +16,12 @@ use oberon4_core::{
     DaemonEvent, DaemonStatus, FileConfigStore, FileSecretStore, FileSessionStore,
     InMemoryConfigStore, InMemorySessionStore, OAuthProvider, OAuthProviderKind, OberonError,
     PendingOAuthFlow, RequestId, SecretStore, ServiceEnvelope, SessionStore,
+};
+
+pub use plugin_runtime::{
+    ArtifactBrokerFoundation, FilePluginRegistry, HOST_RUNTIME_API_VERSION, PluginRuntimeHost,
+    RegisteredPlugin, RuntimeBrokerFoundations, StaticPolicyResolver, StorageBrokerFoundation,
+    validate_manifest,
 };
 
 pub fn daemon_status(config: &AppConfig) -> ServiceEnvelope<String> {
@@ -388,9 +396,10 @@ where
                 })
             }
             DaemonCommand::CompleteOAuthConnect { flow_id, callback } => {
-                let pending = self.pending_oauth_flows.remove(&flow_id).ok_or_else(|| {
-                    OberonError::NotFound(format!("oauth_flow:{flow_id}"))
-                })?;
+                let pending = self
+                    .pending_oauth_flows
+                    .remove(&flow_id)
+                    .ok_or_else(|| OberonError::NotFound(format!("oauth_flow:{flow_id}")))?;
                 let provider = pending.provider;
                 let bundle = self
                     .oauth_provider(provider)?
@@ -401,11 +410,7 @@ where
                 self.persist_accounts()?;
                 Ok(CommandOutcome {
                     event: DaemonEvent::Ack {
-                        message: format!(
-                            "connected {} {}",
-                            provider_name(provider),
-                            account.id
-                        ),
+                        message: format!("connected {} {}", provider_name(provider), account.id),
                     },
                     should_shutdown: false,
                 })
@@ -702,7 +707,6 @@ fn provider_name(provider: OAuthProviderKind) -> &'static str {
         OAuthProviderKind::Anthropic => "anthropic",
     }
 }
-
 
 #[cfg(test)]
 mod tests {
