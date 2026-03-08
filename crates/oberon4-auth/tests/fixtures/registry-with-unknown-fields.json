@@ -1,0 +1,20 @@
+{
+  "accounts": [
+    {
+      "id": "acct-openai-primary",
+      "provider": "open_ai",
+      "label": "OpenAI Primary",
+      "state": "active",
+      "usage_window": {
+        "hourly": "ok"
+      }
+    }
+  ],
+  "active_accounts": {
+    "open_ai": "acct-openai-primary"
+  },
+  "schema_version": 1,
+  "notes": {
+    "source": "legacy"
+  }
+}

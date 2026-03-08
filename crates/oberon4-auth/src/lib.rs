@@ -181,6 +181,7 @@ impl OAuthTokenExchange for ReqwestOAuthTokenExchange {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AccountRegistry {
     accounts: Vec<StoredAccount>,
     active_accounts: BTreeMap<OAuthProviderKind, String>,

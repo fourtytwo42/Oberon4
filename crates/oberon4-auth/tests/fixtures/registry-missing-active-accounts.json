@@ -1,0 +1,16 @@
+{
+  "accounts": [
+    {
+      "id": "acct-openai-primary",
+      "provider": "open_ai",
+      "label": "OpenAI Primary",
+      "state": "active"
+    },
+    {
+      "id": "acct-anthropic-primary",
+      "provider": "anthropic",
+      "label": "Anthropic Primary",
+      "state": "disabled"
+    }
+  ]
+}
