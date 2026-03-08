@@ -14,3 +14,5 @@ serde_json.workspace = true
 
 [dev-dependencies]
 oberon4-tui = { path = "../oberon4-tui" }
+portable-pty = "0.9.0"
+vt100 = "0.16.2"
