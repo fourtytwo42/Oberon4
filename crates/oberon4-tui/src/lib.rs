@@ -1847,7 +1847,14 @@ impl TuiShellState {
         };
         let session_id = session.id.as_str().to_string();
         let session_title = session.title.clone();
-        let message = app.delete_session(&session_id)?;
+        let message = match app.delete_session(&session_id) {
+            Ok(message) => message,
+            Err(err) if delete_session_requires_daemon_refresh(&err) => {
+                restart_daemon_process(app.client.socket_path().to_path_buf())?;
+                app.delete_session(&session_id)?
+            }
+            Err(err) => return Err(err),
+        };
         self.refresh_runtime_data(app);
         let item_count = self.session_sidebar_items().len();
         if item_count == 0 {
@@ -3697,6 +3704,30 @@ fn spawn_daemon_process(socket_path: PathBuf) -> Result<(), OberonError> {
         .spawn()
         .map_err(|err| OberonError::Storage(format!("failed to spawn daemon: {err}")))?;
     Ok(())
+}
+
+fn restart_daemon_process(socket_path: PathBuf) -> Result<(), OberonError> {
+    let client = DaemonIpcClient::new(&socket_path);
+    let _ = client.send(&oberon4_core::DaemonCommand::Shutdown);
+    thread::sleep(Duration::from_millis(100));
+    spawn_daemon_process(socket_path.clone())?;
+
+    for _ in 0..40 {
+        if client.send(&oberon4_core::DaemonCommand::GetStatus).is_ok() {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    Err(OberonError::Storage(
+        "daemon failed to become ready after restart".to_string(),
+    ))
+}
+
+fn delete_session_requires_daemon_refresh(err: &OberonError) -> bool {
+    let message = err.to_string();
+    message.contains("unknown variant `delete_session`")
+        || message.contains("unknown variant 'delete_session'")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
