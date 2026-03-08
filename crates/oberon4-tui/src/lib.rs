@@ -142,6 +142,7 @@ struct PendingSubmission {
     receiver: Receiver<AsyncUiEvent>,
     started_at: Instant,
     timeout: Duration,
+    status_line_index: Option<usize>,
     assistant_line_index: usize,
     tool_line_indices: BTreeMap<usize, usize>,
     tool_state: BTreeMap<usize, (String, String)>,
@@ -815,6 +816,17 @@ impl TuiShellState {
         true
     }
 
+    fn should_accept_autocomplete_on_enter(&self) -> bool {
+        let trimmed = self.input.trim();
+        let Some(state) = self.autocomplete.as_ref() else {
+            return false;
+        };
+        let Some(selected) = state.matches.get(state.selected) else {
+            return false;
+        };
+        trimmed != selected || command_requires_argument(selected)
+    }
+
     pub fn move_session_selection(&mut self, delta: isize) {
         if self.sessions.is_empty() {
             return;
@@ -1060,6 +1072,7 @@ fn run_terminal_loop(
                 } else if shell.input.trim().starts_with('/')
                     && shell.input.trim() == shell.input.trim_end()
                     && !shell.input.contains(' ')
+                    && shell.should_accept_autocomplete_on_enter()
                     && shell.accept_autocomplete()
                 {
                     shell.set_activity(ActivityState::Idle, "command completed");
@@ -1154,6 +1167,7 @@ fn start_async_submit(
         role: "status".to_string(),
         content: "waiting on provider response...".to_string(),
     });
+    let status_line_index = shell.transcript.len() - 1;
     shell.transcript.push(UiLine {
         role: "assistant".to_string(),
         content: "...".to_string(),
@@ -1197,10 +1211,30 @@ fn start_async_submit(
         receiver,
         started_at: Instant::now(),
         timeout,
+        status_line_index: Some(status_line_index),
         assistant_line_index,
         tool_line_indices: BTreeMap::new(),
         tool_state: BTreeMap::new(),
     }))
+}
+
+fn retire_pending_status_line(shell: &mut TuiShellState, pending: &mut PendingSubmission) {
+    let Some(index) = pending.status_line_index.take() else {
+        return;
+    };
+    if index >= shell.transcript.len() {
+        return;
+    }
+
+    shell.transcript.remove(index);
+    if pending.assistant_line_index > index {
+        pending.assistant_line_index -= 1;
+    }
+    for line_index in pending.tool_line_indices.values_mut() {
+        if *line_index > index {
+            *line_index -= 1;
+        }
+    }
 }
 
 fn has_trailing_user_line(transcript: &[UiLine], content: &str) -> bool {
@@ -1246,6 +1280,7 @@ fn handle_async_ui_event(
     match event {
         AsyncUiEvent::TextDelta(content) => {
             if let Some(pending) = pending_submission.as_mut() {
+                retire_pending_status_line(shell, pending);
                 if let Some(line) = shell.transcript.get_mut(pending.assistant_line_index) {
                     if line.content == "..." {
                         line.content.clear();
@@ -1257,6 +1292,7 @@ fn handle_async_ui_event(
         }
         AsyncUiEvent::ToolCallDelta(delta) => {
             if let Some(pending) = pending_submission.as_mut() {
+                retire_pending_status_line(shell, pending);
                 let line_index = if let Some(index) = pending.tool_line_indices.get(&delta.index) {
                     *index
                 } else {
@@ -1276,22 +1312,17 @@ fn handle_async_ui_event(
         }
         AsyncUiEvent::Complete { prompt, message } => {
             let pending = pending_submission.take();
-            if let Some(pending) = pending {
+            if let Some(mut pending) = pending {
+                retire_pending_status_line(shell, &mut pending);
                 finalize_streamed_assistant(shell, &pending, &message);
             }
             app.apply_successful_prompt(&prompt, message.clone());
-            shell.set_activity(
-                ActivityState::Idle,
-                if message.content.is_empty() {
-                    "stream complete".to_string()
-                } else {
-                    message.content.clone()
-                },
-            );
+            shell.set_activity(ActivityState::Idle, "response complete");
             shell.refresh_sidebar(app);
         }
         AsyncUiEvent::Failed(err) => {
-            if let Some(pending) = pending_submission.take() {
+            if let Some(mut pending) = pending_submission.take() {
+                retire_pending_status_line(shell, &mut pending);
                 if let Some(line) = shell.transcript.get_mut(pending.assistant_line_index) {
                     line.role = "error".to_string();
                     line.content = err.to_string();
@@ -2085,6 +2116,30 @@ mod tests {
     }
 
     #[test]
+    fn exact_quit_command_does_not_autocomplete_on_enter() {
+        let mut shell = TuiShellState::default();
+        for ch in "/quit".chars() {
+            shell.push_input_char(ch);
+        }
+
+        assert!(shell.autocomplete.is_some());
+        assert!(!shell.should_accept_autocomplete_on_enter());
+    }
+
+    #[test]
+    fn argument_commands_still_expand_on_enter_autocomplete() {
+        let mut shell = TuiShellState::default();
+        for ch in "/model".chars() {
+            shell.push_input_char(ch);
+        }
+
+        assert!(shell.autocomplete.is_some());
+        assert!(shell.should_accept_autocomplete_on_enter());
+        assert!(shell.accept_autocomplete());
+        assert_eq!(shell.input(), "/model ");
+    }
+
+    #[test]
     fn shell_multiline_and_escape_precedence_behave_as_expected() {
         let mut shell = TuiShellState::default();
         shell.push_input_char('/');
@@ -2285,11 +2340,12 @@ mod tests {
         }
 
         assert_eq!(shell.input(), "x");
-        assert_eq!(shell.status(), "daemon reply");
+        assert_eq!(shell.status(), "response complete");
         assert_eq!(app.transcript().len(), 2);
+        assert_eq!(shell.transcript().len(), 2);
         assert_eq!(shell.transcript()[0].role, "user");
-        assert_eq!(shell.transcript()[2].role, "assistant");
-        assert_eq!(shell.transcript()[2].content, "daemon reply");
+        assert_eq!(shell.transcript()[1].role, "assistant");
+        assert_eq!(shell.transcript()[1].content, "daemon reply");
 
         let client = DaemonIpcClient::new(&socket_path);
         let _ = client.send(&oberon4_core::DaemonCommand::Shutdown).unwrap();
@@ -2308,6 +2364,7 @@ mod tests {
             receiver: mpsc::channel().1,
             started_at: Instant::now(),
             timeout: Duration::from_secs(1),
+            status_line_index: None,
             assistant_line_index: 0,
             tool_line_indices: BTreeMap::new(),
             tool_state: BTreeMap::new(),
@@ -2389,6 +2446,7 @@ mod tests {
             receiver,
             started_at: Instant::now() - Duration::from_secs(2),
             timeout: Duration::from_millis(10),
+            status_line_index: None,
             assistant_line_index: 0,
             tool_line_indices: BTreeMap::new(),
             tool_state: BTreeMap::new(),
