@@ -2909,7 +2909,7 @@ fn render_transcript(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
     frame.render_widget(Paragraph::new(Text::from(viewport.visible_rows)), text_area);
 
     if let Some(scrollbar_area) = scrollbar_area {
-        let mut state = ScrollbarState::new(viewport.total_rows)
+        let mut state = ScrollbarState::new(viewport.scrollable_rows)
             .position(viewport.scroll)
             .viewport_content_length(viewport.visible_height);
         frame.render_stateful_widget(
@@ -2927,7 +2927,7 @@ fn render_transcript(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
 #[derive(Debug)]
 struct TranscriptViewport {
     visible_rows: Vec<Line<'static>>,
-    total_rows: usize,
+    scrollable_rows: usize,
     scroll: usize,
     visible_height: usize,
     scrollbar_visible: bool,
@@ -2938,7 +2938,7 @@ fn build_transcript_viewport(area: Rect, shell: &TuiShellState) -> TranscriptVie
     if visible_height == 0 {
         return TranscriptViewport {
             visible_rows: Vec::new(),
-            total_rows: 0,
+            scrollable_rows: 0,
             scroll: 0,
             visible_height: 0,
             scrollbar_visible: false,
@@ -2957,6 +2957,7 @@ fn build_transcript_viewport(area: Rect, shell: &TuiShellState) -> TranscriptVie
 
     let total_rows = rows.len();
     let max_scroll = total_rows.saturating_sub(visible_height);
+    let scrollable_rows = if total_rows == 0 { 0 } else { max_scroll + 1 };
     let scroll = if shell.transcript_follow {
         max_scroll
     } else {
@@ -2972,7 +2973,7 @@ fn build_transcript_viewport(area: Rect, shell: &TuiShellState) -> TranscriptVie
 
     TranscriptViewport {
         visible_rows,
-        total_rows,
+        scrollable_rows,
         scroll,
         visible_height,
         scrollbar_visible,
@@ -5012,7 +5013,31 @@ mod tests {
         );
 
         assert!(viewport.scrollbar_visible);
-        assert!(viewport.total_rows > viewport.visible_height);
+        assert!(viewport.scrollable_rows > 1);
+    }
+
+    #[test]
+    fn transcript_viewport_follow_mode_tracks_bottom_position() {
+        let mut shell = TuiShellState::default();
+        for idx in 0..20 {
+            shell.transcript.push(UiLine {
+                role: "assistant".to_string(),
+                content: format!("line {idx}"),
+            });
+        }
+        shell.transcript_follow = true;
+
+        let viewport = build_transcript_viewport(
+            Rect {
+                x: 0,
+                y: 0,
+                width: 40,
+                height: 6,
+            },
+            &shell,
+        );
+
+        assert_eq!(viewport.scroll, viewport.scrollable_rows.saturating_sub(1));
     }
 
     #[test]
