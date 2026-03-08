@@ -15,12 +15,16 @@ Use this checklist only after automated gates through `EG-P8` are green.
 - `RUSTFLAGS='-C debuginfo=0'`
 
 ## Automated Preconditions
+- [ ] `bash scripts/repair-loop.sh`
+  - if this fails, inspect `artifacts/repair-loop/<timestamp>-<pid>/summary.json`
 - [ ] `GATE_MODE=strict bash scripts/oberon4-gate.sh`
   - if this fails, inspect `artifacts/failures/<timestamp>-oberon4-gate-<pid>/`
 
 ## Optional Live Endpoint Preconditions
 - [ ] `bash scripts/live-local-smoke.sh`
   - if this fails, inspect `artifacts/failures/<timestamp>-live-local-smoke-<pid>/`
+- [ ] `RUN_LIVE_LOCAL_SMOKE=1 bash scripts/repair-loop.sh`
+  - if this fails, inspect `artifacts/repair-loop/<timestamp>-<pid>/summary.json` and the referenced `failure_bundle_path`
 
 ## Manual Smoke Flow
 ### CLI
@@ -68,3 +72,4 @@ Use this checklist only after automated gates through `EG-P8` are green.
 - [ ] no secret/token values printed
 - [ ] any defects discovered are recorded before release
 - [ ] any failed automated precondition has an associated bundle in `artifacts/failures/` for follow-up diagnosis
+- [ ] runtime evidence directories (`.live-manual/`, `artifacts/failures/`, `artifacts/repair-loop/`, `artifacts/live-local-smoke/`) are treated as ephemeral and not staged for release commits

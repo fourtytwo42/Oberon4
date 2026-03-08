@@ -11,6 +11,7 @@ Required scopes:
 ## 2. Required Commands
 - canonical gate: `GATE_MODE=strict bash scripts/oberon4-gate.sh`
 - smoke gate: `GATE_MODE=smoke bash scripts/oberon4-gate.sh`
+- canonical repair loop: `bash scripts/repair-loop.sh`
 - local baseline: `cargo test`
 - focused crate: `cargo test -p <crate-name>`
 - lint gate (when enabled): `cargo clippy --all-targets -- -D warnings`
@@ -21,8 +22,10 @@ Gate behavior:
 - `smoke` defaults to no heavyweight checks unless individual `RUN_*` flags are enabled
 - optional live verification remains opt-in through `RUN_LIVE_ENDPOINT_SMOKE=1` and `RUN_LIVE_DAEMON_SMOKE=1`
 - optional PTY TUI verification remains opt-in through `RUN_TUI_PTY_SMOKE=1`
-- machine-readable diagnostics are available through `oberon4 doctor --json` and should be used by automation when diagnosis output needs stable parsing
+- optional live repair-loop verification remains opt-in through `RUN_LIVE_LOCAL_SMOKE=1 bash scripts/repair-loop.sh`
+- machine-readable diagnostics are available through `oberon4 doctor --json` and should be used by automation when diagnosis output needs stable parsing; the JSON now includes `config_path`, `data_dir`, `socket_path`, `api_key_env`, `config_exists`, and `daemon_reachable`
 - failed gate or local-live runs write a troubleshooting bundle under `artifacts/failures/<timestamp>-<entrypoint>-<pid>/`
+- repair-loop runs write machine-readable stage logs and `summary.json` under `artifacts/repair-loop/<timestamp>-<pid>/`
 
 ## 2.1 Optional Live Hotspot Smoke
 Use this when a real LLM Hotspot universal endpoint is available and you want live-provider evidence in addition to deterministic tests.
@@ -51,6 +54,7 @@ Rules:
 - confirm success by both provider-level HTTP response and daemon-backed CLI live integration test
 - prefer `scripts/live-local-smoke.sh` when validating the known local LLM Hotspot environment because it also checks `doctor --json` and writes a machine-readable run summary
 - if the gate or local live wrapper fails, inspect the emitted bundle in `artifacts/failures/` before re-running so diagnosis uses the original failure context
+- prefer `scripts/repair-loop.sh` as the first local recovery command because it runs `doctor --json`, the strict gate, PTY smoke, and optionally the live-local wrapper in one fixed order
 
 ## 3. Coverage Expectations by Requirement
 - `FR-001`: lifecycle tests (start, health, graceful stop)
@@ -68,3 +72,4 @@ Rules:
 ## 5. Test Artifacts
 - each PR/change set must include requirement checklist with `met/not met`
 - include command outputs for required test scopes
+- treat `.live-manual/`, `artifacts/failures/`, `artifacts/repair-loop/`, and `artifacts/live-local-smoke/` as ephemeral runtime evidence, not review artifacts to commit

@@ -20,6 +20,10 @@ Thumbs.db
 .tmp/
 tmp/
 *.log
+.live-manual/
+artifacts/failures/
+artifacts/repair-loop/
+artifacts/live-local-smoke/
 
 # Large local research corpus
 Research/

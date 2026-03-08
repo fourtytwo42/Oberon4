@@ -17,6 +17,8 @@ chmod +x \
   scripts/oberon4-gate.sh \
   scripts/live-local-smoke.sh \
   scripts/test-live-local-smoke.sh \
+  scripts/repair-loop.sh \
+  scripts/test-repair-loop.sh \
   scripts/tui-pty-smoke.sh \
   scripts/check-policy-stack.sh \
   scripts/bootstrap-policy-stack.sh \

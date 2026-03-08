@@ -1216,8 +1216,14 @@ mod tests {
         assert_eq!(value["endpoint_check"], "fail");
         assert_eq!(value["error"], "daemon is not running");
         assert_eq!(value["data_dir"], expected_data_dir.display().to_string());
-        assert_eq!(value["config_path"], expected_config_path.display().to_string());
-        assert_eq!(value["socket_path"], expected_socket_path.display().to_string());
+        assert_eq!(
+            value["config_path"],
+            expected_config_path.display().to_string()
+        );
+        assert_eq!(
+            value["socket_path"],
+            expected_socket_path.display().to_string()
+        );
         assert_eq!(value["api_key_env"], "OPENAI_API_KEY");
         assert_eq!(value["config_exists"], expected_config_path.exists());
         assert_eq!(value["daemon_reachable"], false);
