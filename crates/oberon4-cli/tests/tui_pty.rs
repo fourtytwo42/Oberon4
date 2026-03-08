@@ -444,8 +444,9 @@ fn tui_pty_command_and_prompt_flow() {
     harness.wait_for_text("forked session smoke-copy", Duration::from_secs(5));
 
     harness.send_line("/sessions");
-    harness.wait_for_text("Sessions *", Duration::from_secs(5));
-    harness.send_bytes(b"\x1b[B");
+    harness.wait_for_text("Find sessions", Duration::from_secs(5));
+    harness.send_bytes(b"copy");
+    harness.wait_for_text("smoke-copy", Duration::from_secs(5));
     harness.send_bytes(b"\r");
     harness.wait_for_text("Composer", Duration::from_secs(5));
     let output = harness.raw_output();

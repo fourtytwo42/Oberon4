@@ -140,6 +140,13 @@ enum SessionSidebarItem {
     Saved(usize),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct SessionPickerState {
+    query: String,
+    filtered_items: Vec<SessionSidebarItem>,
+    selected: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScreenRoute {
     ChatRoot,
@@ -194,6 +201,7 @@ pub struct TuiShellState {
     focus: FocusTarget,
     sessions: Vec<SessionSummary>,
     session_index: usize,
+    session_picker: SessionPickerState,
     accounts: Vec<StoredAccount>,
     account_index: usize,
     menu_index: usize,
@@ -329,6 +337,7 @@ impl Default for TuiShellState {
             focus: FocusTarget::Composer,
             sessions: Vec::new(),
             session_index: 0,
+            session_picker: SessionPickerState::default(),
             accounts: Vec::new(),
             account_index: 0,
             menu_index: 0,
@@ -1168,6 +1177,17 @@ impl TuiShellState {
     }
 
     fn handle_escape(&mut self) {
+        if matches!(self.workspace, Workspace::Sessions)
+            && matches!(self.current_route(), ScreenRoute::SessionsRoot)
+        {
+            if !self.session_picker.query.is_empty() {
+                self.clear_session_picker_query();
+                self.status = "session search cleared".to_string();
+            } else {
+                self.close_overlay();
+            }
+            return;
+        }
         if self.autocomplete.is_some() {
             self.autocomplete = None;
             return;
@@ -1256,6 +1276,11 @@ impl TuiShellState {
         Self::move_selection(&mut self.session_index, len, delta);
     }
 
+    pub fn move_session_picker_selection(&mut self, delta: isize) {
+        let len = self.session_picker.filtered_items.len();
+        Self::move_selection(&mut self.session_picker.selected, len, delta);
+    }
+
     pub fn move_account_selection(&mut self, delta: isize) {
         let len = self
             .accounts_for_current_route()
@@ -1307,6 +1332,12 @@ impl TuiShellState {
         }
         if let Ok(health) = app.endpoint_health() {
             self.diagnostics_endpoint_health = health;
+        }
+        if matches!(self.workspace, Workspace::Sessions) {
+            self.refresh_session_picker_matches();
+            if self.session_picker.query.is_empty() {
+                self.select_current_session_in_picker();
+            }
         }
     }
 
@@ -1407,10 +1438,12 @@ impl TuiShellState {
     fn open_route_for_command(&mut self, command: &TuiCommand) {
         match command {
             TuiCommand::Sessions => {
-                self.workspace = Workspace::Chat;
-                self.screen_stack = vec![ScreenRoute::ChatRoot];
-                self.session_index = 0;
+                self.workspace = Workspace::Sessions;
+                self.screen_stack = vec![ScreenRoute::SessionsRoot];
                 self.focus = FocusTarget::List;
+                self.session_picker = SessionPickerState::default();
+                self.refresh_session_picker_matches();
+                self.select_current_session_in_picker();
             }
             _ => {
                 if let Some(workspace) = Self::route_for_command(command) {
@@ -1450,6 +1483,102 @@ impl TuiShellState {
             items.push(SessionSidebarItem::Saved(index));
         }
         items
+    }
+
+    fn session_picker_search_text(&self, item: SessionSidebarItem) -> String {
+        match item {
+            SessionSidebarItem::CurrentChat => format!(
+                "{} {} current",
+                self.current_chat_sidebar_title(),
+                self.current_session_id.as_deref().unwrap_or_default()
+            ),
+            SessionSidebarItem::Saved(index) => self
+                .sessions
+                .get(index)
+                .map(|session| {
+                    format!(
+                        "{} {} {}",
+                        session.title,
+                        session.id.as_str(),
+                        session.model
+                    )
+                })
+                .unwrap_or_default(),
+        }
+    }
+
+    fn refresh_session_picker_matches(&mut self) {
+        let mut scored = self
+            .session_sidebar_items()
+            .into_iter()
+            .filter_map(|item| {
+                session_match_score(
+                    self.session_picker.query.trim(),
+                    &self.session_picker_search_text(item),
+                )
+                .map(|score| (score, item))
+            })
+            .collect::<Vec<_>>();
+        scored.sort_by(|(left_score, left_item), (right_score, right_item)| {
+            left_score
+                .cmp(right_score)
+                .then_with(|| self.session_picker_label(*left_item).cmp(&self.session_picker_label(*right_item)))
+        });
+        self.session_picker.filtered_items = scored.into_iter().map(|(_, item)| item).collect();
+        if self.session_picker.filtered_items.is_empty() {
+            self.session_picker.selected = 0;
+        } else if self.session_picker.selected >= self.session_picker.filtered_items.len() {
+            self.session_picker.selected = self.session_picker.filtered_items.len().saturating_sub(1);
+        }
+    }
+
+    fn select_current_session_in_picker(&mut self) {
+        self.session_picker.selected = self
+            .session_picker
+            .filtered_items
+            .iter()
+            .position(|item| matches!(item, SessionSidebarItem::CurrentChat))
+            .unwrap_or(0);
+    }
+
+    fn clear_session_picker_query(&mut self) {
+        self.session_picker.query.clear();
+        self.refresh_session_picker_matches();
+        self.select_current_session_in_picker();
+    }
+
+    fn session_picker_label(&self, item: SessionSidebarItem) -> String {
+        match item {
+            SessionSidebarItem::CurrentChat => format!("{} (current)", self.current_chat_sidebar_title()),
+            SessionSidebarItem::Saved(index) => self
+                .sessions
+                .get(index)
+                .map(|session| session.title.clone())
+                .unwrap_or_else(|| "missing".to_string()),
+        }
+    }
+
+    fn selected_session_picker_item(&self) -> Option<SessionSidebarItem> {
+        self.session_picker
+            .filtered_items
+            .get(self.session_picker.selected)
+            .copied()
+    }
+
+    fn update_session_picker_query(
+        &mut self,
+        query: String,
+        app: &DaemonBackedTuiApp,
+    ) -> Result<(), OberonError> {
+        self.session_picker.query = query;
+        self.refresh_session_picker_matches();
+        if self.session_picker.filtered_items.is_empty() {
+            self.restore_active_chat_preview(app);
+            self.set_activity(ActivityState::Idle, "no sessions match");
+        } else {
+            self.preview_selected_session(app)?;
+        }
+        Ok(())
     }
 
     fn sync_loaded_session_from_id(&mut self, session_id: &str) {
@@ -1526,7 +1655,12 @@ impl TuiShellState {
         &mut self,
         app: &DaemonBackedTuiApp,
     ) -> Result<(), OberonError> {
-        let Some(item) = self.session_sidebar_items().get(self.session_index).copied() else {
+        let selected_item = if matches!(self.workspace, Workspace::Sessions) {
+            self.selected_session_picker_item()
+        } else {
+            self.session_sidebar_items().get(self.session_index).copied()
+        };
+        let Some(item) = selected_item else {
             return Ok(());
         };
 
@@ -1812,6 +1946,32 @@ impl TuiShellState {
         app: &mut DaemonBackedTuiApp,
     ) -> Result<bool, OberonError> {
         match self.current_route() {
+            ScreenRoute::SessionsRoot if matches!(self.workspace, Workspace::Sessions) => {
+                if let Some(item) = self.selected_session_picker_item() {
+                    match item {
+                        SessionSidebarItem::CurrentChat => {
+                            self.restore_active_chat_preview(app);
+                            self.close_overlay();
+                            self.scroll_transcript_to_bottom();
+                            self.set_activity(ActivityState::Idle, "current chat selected");
+                            return Ok(true);
+                        }
+                        SessionSidebarItem::Saved(index) => {
+                            if let Some(session) = self.sessions.get(index) {
+                                let name = session.id.as_str().to_string();
+                                let response = app.handle_command(TuiCommand::Load(name.clone()))?;
+                                self.set_activity(ActivityState::Idle, response.output);
+                                self.sync_loaded_session_from_id(&name);
+                                self.transcript = Self::ui_lines_from_messages(app.transcript());
+                                self.refresh_runtime_data(app);
+                                self.close_overlay();
+                                self.scroll_transcript_to_bottom();
+                                return Ok(true);
+                            }
+                        }
+                    }
+                }
+            }
             ScreenRoute::ChatRoot | ScreenRoute::SessionsRoot
                 if matches!(self.workspace, Workspace::Chat) =>
             {
@@ -1976,7 +2136,7 @@ impl TuiShellState {
                     match command {
                         TuiCommand::Help => "help overlay opened",
                         TuiCommand::Status => "status overlay opened",
-                        TuiCommand::Sessions => "sessions focused",
+                        TuiCommand::Sessions => "session picker opened",
                         TuiCommand::Settings | TuiCommand::Config => "settings overlay opened",
                         TuiCommand::Accounts => "accounts overlay opened",
                         TuiCommand::Diagnostics => "diagnostics overlay opened",
@@ -2045,6 +2205,67 @@ impl TuiShellState {
 
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum SessionMatchScore {
+    Substring(usize),
+    WordBoundary(usize),
+    Fuzzy(usize),
+}
+
+fn session_match_score(query: &str, haystack: &str) -> Option<SessionMatchScore> {
+    if query.is_empty() {
+        return Some(SessionMatchScore::Substring(0));
+    }
+    let query = query.to_ascii_lowercase();
+    let haystack = haystack.to_ascii_lowercase();
+
+    if let Some(index) = haystack.find(&query) {
+        return Some(SessionMatchScore::Substring(index));
+    }
+
+    if let Some(index) = find_word_boundary_match(&haystack, &query) {
+        return Some(SessionMatchScore::WordBoundary(index));
+    }
+
+    fuzzy_match_positions(&haystack, &query).map(SessionMatchScore::Fuzzy)
+}
+
+fn find_word_boundary_match(haystack: &str, query: &str) -> Option<usize> {
+    haystack.match_indices(query).map(|(idx, _)| idx).find(|&idx| {
+        idx == 0
+            || !haystack[..idx]
+                .chars()
+                .last()
+                .map(|ch| ch.is_ascii_alphanumeric())
+                .unwrap_or(false)
+    })
+}
+
+fn fuzzy_match_positions(haystack: &str, query: &str) -> Option<usize> {
+    let mut score = 0usize;
+    let mut query_chars = query.chars();
+    let mut wanted = query_chars.next()?;
+    let mut last_match = 0usize;
+    let mut matched_any = false;
+    for (idx, ch) in haystack.chars().enumerate() {
+        if ch == wanted {
+            if matched_any {
+                score += idx.saturating_sub(last_match);
+            } else {
+                score += idx;
+                matched_any = true;
+            }
+            last_match = idx;
+            if let Some(next) = query_chars.next() {
+                wanted = next;
+            } else {
+                return Some(score);
+            }
+        }
+    }
+    None
 }
 
 pub fn run_terminal_ui() -> Result<(), OberonError> {
@@ -2206,12 +2427,26 @@ fn run_inline_terminal_loop(
                 }
             }
             KeyCode::Char(ch) => {
-                if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
+                if matches!(shell.workspace, Workspace::Sessions)
+                    && matches!(shell.current_route(), ScreenRoute::SessionsRoot)
+                {
+                    let mut query = shell.session_picker.query.clone();
+                    query.push(ch);
+                    shell.update_session_picker_query(query, app)?;
+                    rerender_workspace = true;
+                } else if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
                     shell.push_input_char(ch);
                 }
             }
             KeyCode::Backspace => {
-                if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
+                if matches!(shell.workspace, Workspace::Sessions)
+                    && matches!(shell.current_route(), ScreenRoute::SessionsRoot)
+                {
+                    let mut query = shell.session_picker.query.clone();
+                    query.pop();
+                    shell.update_session_picker_query(query, app)?;
+                    rerender_workspace = true;
+                } else if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
                     shell.backspace();
                 }
             }
@@ -2225,6 +2460,10 @@ fn run_inline_terminal_loop(
                 }
                 FocusTarget::List => {
                     match shell.current_route() {
+                        ScreenRoute::SessionsRoot if matches!(shell.workspace, Workspace::Sessions) => {
+                            shell.move_session_picker_selection(-1);
+                            shell.preview_selected_session(app)?;
+                        }
                         ScreenRoute::SessionsRoot => {
                             shell.move_session_selection(-1);
                             shell.preview_selected_session(app)?;
@@ -2243,6 +2482,10 @@ fn run_inline_terminal_loop(
                 }
                 FocusTarget::List => {
                     match shell.current_route() {
+                        ScreenRoute::SessionsRoot if matches!(shell.workspace, Workspace::Sessions) => {
+                            shell.move_session_picker_selection(1);
+                            shell.preview_selected_session(app)?;
+                        }
                         ScreenRoute::SessionsRoot => {
                             shell.move_session_selection(1);
                             shell.preview_selected_session(app)?;
@@ -2285,7 +2528,9 @@ fn run_inline_terminal_loop(
                     pending.cancel_flag.store(true, Ordering::Relaxed);
                     shell.set_activity(ActivityState::Idle, "oauth flow canceled");
                 }
-                if matches!(shell.focus, FocusTarget::List) && matches!(shell.workspace, Workspace::Chat)
+                if matches!(shell.workspace, Workspace::Sessions)
+                    || (matches!(shell.focus, FocusTarget::List)
+                        && matches!(shell.workspace, Workspace::Chat))
                 {
                     shell.restore_active_chat_preview(app);
                 }
@@ -2385,12 +2630,13 @@ fn run_terminal_loop(
                         shell.set_activity(ActivityState::Idle, "quitting");
                     }
                     KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        shell.workspace = Workspace::Chat;
-                        shell.screen_stack = vec![ScreenRoute::ChatRoot];
+                        shell.workspace = Workspace::Sessions;
+                        shell.screen_stack = vec![ScreenRoute::SessionsRoot];
                         shell.focus = FocusTarget::List;
-                        shell.session_index = 0;
+                        shell.session_picker = SessionPickerState::default();
                         shell.refresh_runtime_data(app);
-                        shell.set_activity(ActivityState::Idle, "sessions focused");
+                        shell.select_current_session_in_picker();
+                        shell.set_activity(ActivityState::Idle, "session picker opened");
                     }
                     KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
@@ -2398,12 +2644,24 @@ fn run_terminal_loop(
                         }
                     }
                     KeyCode::Char(ch) => {
-                        if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
+                        if matches!(shell.workspace, Workspace::Sessions)
+                            && matches!(shell.current_route(), ScreenRoute::SessionsRoot)
+                        {
+                            let mut query = shell.session_picker.query.clone();
+                            query.push(ch);
+                            shell.update_session_picker_query(query, app)?;
+                        } else if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
                             shell.push_input_char(ch)
                         }
                     }
                     KeyCode::Backspace => {
-                        if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
+                        if matches!(shell.workspace, Workspace::Sessions)
+                            && matches!(shell.current_route(), ScreenRoute::SessionsRoot)
+                        {
+                            let mut query = shell.session_picker.query.clone();
+                            query.pop();
+                            shell.update_session_picker_query(query, app)?;
+                        } else if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
                             shell.backspace();
                         }
                     }
@@ -2414,6 +2672,10 @@ fn run_terminal_loop(
                         FocusTarget::Menu => shell.move_menu_selection(-1),
                         FocusTarget::List => match shell.current_route() {
                             ScreenRoute::AccountList { .. } => shell.move_account_selection(-1),
+                            ScreenRoute::SessionsRoot if matches!(shell.workspace, Workspace::Sessions) => {
+                                shell.move_session_picker_selection(-1);
+                                shell.preview_selected_session(app)?;
+                            }
                             _ if matches!(shell.workspace, Workspace::Chat) => {
                                 shell.move_session_selection(-1);
                                 shell.preview_selected_session(app)?;
@@ -2431,6 +2693,10 @@ fn run_terminal_loop(
                         FocusTarget::Menu => shell.move_menu_selection(1),
                         FocusTarget::List => match shell.current_route() {
                             ScreenRoute::AccountList { .. } => shell.move_account_selection(1),
+                            ScreenRoute::SessionsRoot if matches!(shell.workspace, Workspace::Sessions) => {
+                                shell.move_session_picker_selection(1);
+                                shell.preview_selected_session(app)?;
+                            }
                             _ if matches!(shell.workspace, Workspace::Chat) => {
                                 shell.move_session_selection(1);
                                 shell.preview_selected_session(app)?;
@@ -3357,14 +3623,54 @@ fn render_overlay(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
     let overlay = overlay_area(area);
     frame.render_widget(WidgetClear, overlay);
     match shell.workspace {
+        Workspace::Sessions => render_sessions_overlay(frame, overlay, shell),
         Workspace::Settings => render_settings_workspace(frame, overlay, shell),
         Workspace::Status => render_status_workspace(frame, overlay, shell),
         Workspace::Help => render_help_workspace(frame, overlay, shell),
         Workspace::Accounts => render_accounts_workspace(frame, overlay, shell),
         Workspace::Diagnostics => render_diagnostics_workspace(frame, overlay, shell),
         Workspace::Reserved => render_reserved_workspace(frame, overlay, shell),
-        Workspace::Chat | Workspace::Sessions => {}
+        Workspace::Chat => {}
     }
+}
+
+fn render_sessions_overlay(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
+    let [search_area, list_area] =
+        Layout::vertical([Constraint::Length(3), Constraint::Min(5)]).areas(area);
+    frame.render_widget(
+        Paragraph::new(shell.session_picker.query.as_str()).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Find sessions"),
+        ),
+        search_area,
+    );
+
+    let items = if shell.session_picker.filtered_items.is_empty() {
+        vec![ListItem::new("No sessions match")]
+    } else {
+        shell.session_picker
+            .filtered_items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let prefix = if index == shell.session_picker.selected {
+                    ">"
+                } else {
+                    " "
+                };
+                ListItem::new(format!("{prefix} {}", shell.session_picker_label(*item)))
+            })
+            .collect::<Vec<_>>()
+    };
+    frame.render_widget(
+        List::new(items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Sessions"),
+        ),
+        list_area,
+    );
 }
 
 fn render_settings_workspace(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
@@ -3676,6 +3982,8 @@ fn render_footer(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
     } else {
         let hint = if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
             "/new /help /sessions /settings /status /accounts /diagnostics /more /quit"
+        } else if matches!(shell.workspace, Workspace::Sessions) {
+            "Type to filter | Up/Down preview | Enter open | Esc clear/back"
         } else {
             "Up/Down navigate | Enter select | mouse wheel scroll | Home/End jump | Esc back"
         };
@@ -3761,12 +4069,24 @@ fn print_inline_workspace(
     match shell.current_route() {
         ScreenRoute::SessionsRoot => {
             write_inline_line(stdout, "Sessions")?;
-            for (index, item) in shell.session_sidebar_items().iter().enumerate() {
-                let prefix = if index == shell.session_index {
-                    ">"
+            if !shell.session_picker.query.is_empty() {
+                write_inline_line(stdout, &format!("search: {}", shell.session_picker.query))?;
+            }
+            let items = if matches!(shell.workspace, Workspace::Sessions) {
+                shell.session_picker.filtered_items.clone()
+            } else {
+                shell.session_sidebar_items()
+            };
+            if items.is_empty() {
+                write_inline_line(stdout, "  No sessions match")?;
+            }
+            for (index, item) in items.iter().enumerate() {
+                let selected_index = if matches!(shell.workspace, Workspace::Sessions) {
+                    shell.session_picker.selected
                 } else {
-                    " "
+                    shell.session_index
                 };
+                let prefix = if index == selected_index { ">" } else { " " };
                 let title = match item {
                     SessionSidebarItem::CurrentChat => shell.current_chat_sidebar_title(),
                     SessionSidebarItem::Saved(saved_index) => shell
@@ -3917,7 +4237,7 @@ fn submit_inline_input(
                     match command {
                         TuiCommand::Help => "help opened",
                         TuiCommand::Status => "status opened",
-                        TuiCommand::Sessions => "sessions opened",
+                        TuiCommand::Sessions => "session picker opened",
                         TuiCommand::Settings | TuiCommand::Config => "settings opened",
                         TuiCommand::Accounts => "accounts opened",
                         TuiCommand::Diagnostics => "diagnostics opened",
@@ -4708,9 +5028,10 @@ mod tests {
 
     use super::{
         AsyncUiEvent, BinaryLaunchTarget, CODE_BLOCK_BG, DaemonBackedTuiApp, FocusTarget,
-        PendingSubmission, ScreenRoute, TuiApp, TuiCommand, TuiShellState, UiLine, Workspace,
+        PendingSubmission, ScreenRoute, SessionMatchScore, TuiApp, TuiCommand, TuiShellState,
+        UiLine, Workspace,
         build_transcript_rows, build_transcript_viewport, finalize_streamed_assistant,
-        format_assistant_markdown,
+        format_assistant_markdown, session_match_score,
         handle_async_ui_event, handle_pending_local_command,
         handle_pending_timeout, parse_callback_request, parse_tui_command,
         resolve_binary_launch_target, start_async_submit, status_line,
@@ -5392,10 +5713,11 @@ mod tests {
         };
         shell.submit(&mut app).unwrap();
 
-        assert_eq!(shell.status(), "sessions focused");
-        assert!(matches!(shell.workspace, Workspace::Chat));
+        assert_eq!(shell.status(), "session picker opened");
+        assert!(matches!(shell.workspace, Workspace::Sessions));
         assert!(matches!(shell.focus, FocusTarget::List));
         assert_eq!(shell.session_sidebar_items().len(), 1);
+        assert_eq!(shell.session_picker.filtered_items.len(), 1);
 
         let client = DaemonIpcClient::new(&socket_path);
         let _ = client.send(&oberon4_core::DaemonCommand::Shutdown).unwrap();
@@ -5516,6 +5838,151 @@ mod tests {
                 .iter()
                 .any(|line| line.content.contains("active prompt"))
         );
+
+        let client = DaemonIpcClient::new(&socket_path);
+        let _ = client.send(&oberon4_core::DaemonCommand::Shutdown).unwrap();
+        handle.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn session_picker_matcher_prioritizes_substring_prefix_and_fuzzy() {
+        assert_eq!(
+            session_match_score("help", "Need help soon"),
+            Some(SessionMatchScore::Substring(5))
+        );
+        assert_eq!(
+            session_match_score("word", "alpha wordplay"),
+            Some(SessionMatchScore::Substring(6))
+        );
+        assert_eq!(
+            session_match_score("bed", "big empty den"),
+            Some(SessionMatchScore::Fuzzy(10))
+        );
+        assert_eq!(session_match_score("zzz", "alpha beta"), None);
+    }
+
+    #[test]
+    fn session_picker_filters_and_escape_restores_active_chat() {
+        let socket_path = std::env::temp_dir().join(format!(
+            "oberon4-tui-session-picker-test-{}.sock",
+            std::process::id()
+        ));
+        let thread_socket = socket_path.clone();
+        let handle = thread::spawn(move || {
+            let app = DaemonApp::new(
+                DaemonRuntime::default(),
+                FakeChatProvider {
+                    reply: "daemon reply".to_string(),
+                },
+                FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
+                FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+                AccountRegistry::default(),
+                InMemorySecretStore::default(),
+                InMemoryAccountMetadataStore::default(),
+            );
+            serve_unix_socket(&thread_socket, app)
+        });
+
+        for _ in 0..20 {
+            if socket_path.exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+
+        let mut app = DaemonBackedTuiApp::new(DaemonIpcClient::new(&socket_path));
+        app.handle_input("alpha prompt").unwrap();
+        app.handle_command(TuiCommand::Save("alpha-room".to_string()))
+            .unwrap();
+        app.handle_command(TuiCommand::Clear).unwrap();
+        app.handle_input("beta prompt").unwrap();
+        app.handle_command(TuiCommand::Save("beta-room".to_string()))
+            .unwrap();
+        app.handle_command(TuiCommand::Clear).unwrap();
+        app.handle_input("active prompt").unwrap();
+
+        let mut shell = TuiShellState {
+            input: "/sessions".to_string(),
+            ..TuiShellState::default()
+        };
+        shell.submit(&mut app).unwrap();
+        assert!(matches!(shell.workspace, Workspace::Sessions));
+
+        shell
+            .update_session_picker_query("beta".to_string(), &app)
+            .unwrap();
+        assert_eq!(shell.session_picker.filtered_items.len(), 1);
+        shell.preview_selected_session(&app).unwrap();
+        assert!(shell
+            .transcript()
+            .iter()
+            .any(|line| line.content.contains("beta prompt")));
+
+        shell.handle_escape();
+        assert!(shell.session_picker.query.is_empty());
+        shell.restore_active_chat_preview(&app);
+        assert!(shell
+            .transcript()
+            .iter()
+            .any(|line| line.content.contains("active prompt")));
+
+        let client = DaemonIpcClient::new(&socket_path);
+        let _ = client.send(&oberon4_core::DaemonCommand::Shutdown).unwrap();
+        handle.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn session_picker_enter_loads_selection_and_returns_to_composer() {
+        let socket_path = std::env::temp_dir().join(format!(
+            "oberon4-tui-session-picker-enter-test-{}.sock",
+            std::process::id()
+        ));
+        let thread_socket = socket_path.clone();
+        let handle = thread::spawn(move || {
+            let app = DaemonApp::new(
+                DaemonRuntime::default(),
+                FakeChatProvider {
+                    reply: "daemon reply".to_string(),
+                },
+                FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
+                FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+                AccountRegistry::default(),
+                InMemorySecretStore::default(),
+                InMemoryAccountMetadataStore::default(),
+            );
+            serve_unix_socket(&thread_socket, app)
+        });
+
+        for _ in 0..20 {
+            if socket_path.exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+
+        let mut app = DaemonBackedTuiApp::new(DaemonIpcClient::new(&socket_path));
+        app.handle_input("alpha prompt").unwrap();
+        app.handle_command(TuiCommand::Save("alpha-room".to_string()))
+            .unwrap();
+        app.handle_command(TuiCommand::Clear).unwrap();
+        app.handle_input("active prompt").unwrap();
+
+        let mut shell = TuiShellState {
+            input: "/sessions".to_string(),
+            ..TuiShellState::default()
+        };
+        shell.submit(&mut app).unwrap();
+        shell
+            .update_session_picker_query("alpha".to_string(), &app)
+            .unwrap();
+        shell.activate_current_list_item(&mut app).unwrap();
+
+        assert!(matches!(shell.workspace, Workspace::Chat));
+        assert!(matches!(shell.focus, FocusTarget::Composer));
+        assert!(shell
+            .transcript()
+            .iter()
+            .any(|line| line.content.contains("alpha prompt")));
 
         let client = DaemonIpcClient::new(&socket_path);
         let _ = client.send(&oberon4_core::DaemonCommand::Shutdown).unwrap();
