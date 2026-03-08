@@ -1,20 +1,37 @@
 use crate::{
-    AppConfig, ChatMessage, DaemonStatus, OAuthProviderKind, OberonError, SavedSession,
-    StoredAccount,
+    AppConfig, ChatMessage, ChatToolCallDelta, DaemonStatus, OAuthProviderKind, OberonError,
+    SavedSession, StoredAccount,
 };
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatStreamEvent {
+    TextDelta { content: String },
+    ToolCallDelta(ChatToolCallDelta),
+}
+
 pub trait ChatProvider {
+    fn stream_message(
+        &self,
+        endpoint: &str,
+        model: &str,
+        messages: &[ChatMessage],
+        on_event: &mut dyn FnMut(ChatStreamEvent) -> Result<(), OberonError>,
+    ) -> Result<ChatMessage, OberonError>;
+
     fn send_message(
         &self,
         endpoint: &str,
         model: &str,
         messages: &[ChatMessage],
-    ) -> Result<ChatMessage, OberonError>;
+    ) -> Result<ChatMessage, OberonError> {
+        self.stream_message(endpoint, model, messages, &mut |_| Ok(()))
+    }
 
     fn endpoint_health(&self, endpoint: &str, model: &str) -> Result<(), OberonError> {
         let probe = [ChatMessage {
             role: crate::ChatRole::User,
             content: "health".to_string(),
+            tool_calls: Vec::new(),
         }];
         self.send_message(endpoint, model, &probe).map(|_| ())
     }

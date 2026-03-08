@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    AppConfig, ChatMessage, ChatProvider, ChatRole, ConfigStore, OAuthProvider, OAuthProviderKind,
-    OberonError, SavedSession, SessionStore, StoredAccount,
+    AppConfig, ChatMessage, ChatProvider, ChatRole, ChatStreamEvent, ConfigStore, OAuthProvider,
+    OAuthProviderKind, OberonError, SavedSession, SessionStore, StoredAccount,
 };
 
 #[derive(Debug, Clone)]
@@ -19,15 +19,20 @@ impl Default for FakeChatProvider {
 }
 
 impl ChatProvider for FakeChatProvider {
-    fn send_message(
+    fn stream_message(
         &self,
         _endpoint: &str,
         _model: &str,
         _messages: &[ChatMessage],
+        on_event: &mut dyn FnMut(ChatStreamEvent) -> Result<(), OberonError>,
     ) -> Result<ChatMessage, OberonError> {
+        on_event(ChatStreamEvent::TextDelta {
+            content: self.reply.clone(),
+        })?;
         Ok(ChatMessage {
             role: ChatRole::Assistant,
             content: self.reply.clone(),
+            tool_calls: Vec::new(),
         })
     }
 }
@@ -127,6 +132,7 @@ mod tests {
         let provider = FakeChatProvider::default();
         let reply = provider.send_message("", "", &[]).unwrap();
         assert_eq!(reply.role, ChatRole::Assistant);
+        assert!(reply.tool_calls.is_empty());
     }
 
     #[test]

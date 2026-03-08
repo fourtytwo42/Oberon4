@@ -1,0 +1,11 @@
+[endpoint]
+base_url = "http://192.168.50.239:51824"
+model = "gpt-5.1-codex-mini"
+api_key_env = "OPENAI_API_KEY"
+
+[runtime]
+request_timeout_ms = 30000
+stream_idle_timeout_ms = 30000
+max_retries = 2
+log_level = "info"
+stream_responses = true

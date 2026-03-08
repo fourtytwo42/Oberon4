@@ -77,7 +77,7 @@ Build a local-first, modular agent host with:
   - `AC-008.3`: CLI exposes `config show` and `config set <key> <value>` for endpoint/model/runtime configuration.
   - `AC-008.4`: CLI exposes `endpoint test` to validate the configured OpenAI-compatible endpoint.
   - `AC-008.5`: CLI exposes one-shot `chat --message <text>` execution for scripting and smoke checks.
-  - `AC-008.6`: CLI exposes `logs tail` and `doctor` for diagnostics.
+- `AC-008.6`: CLI exposes `logs tail`, `doctor`, and `doctor --json` for diagnostics.
   - `AC-008.7`: all CLI commands return deterministic exit codes and sanitized errors.
 
 - `FR-009` TUI command surface
@@ -178,6 +178,8 @@ Build a local-first, modular agent host with:
   - streams recent daemon logs with correlation/request identifiers when available
 - `oberon4 doctor`
   - runs local environment and configuration diagnostics and exits non-zero on failed checks
+- `oberon4 doctor --json`
+  - returns the same diagnostic result as machine-readable JSON for automation
 
 ### 8.2 Account and OAuth CLI Commands
 - `oberon4 account connect --provider <openai|anthropic>`

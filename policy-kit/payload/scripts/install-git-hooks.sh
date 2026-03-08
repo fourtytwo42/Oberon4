@@ -14,6 +14,7 @@ chmod +x \
   scripts/policy-drift-audit.sh \
   scripts/exception-debt-report.sh \
   scripts/local-ci-gate.sh \
+  scripts/oberon4-gate.sh \
   scripts/check-policy-stack.sh \
   scripts/bootstrap-policy-stack.sh \
   scripts/policy-doctor.sh \

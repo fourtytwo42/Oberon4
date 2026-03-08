@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{AppConfig, ChatMessage, DaemonStatus, OAuthProviderKind, SavedSession, StoredAccount};
+use crate::{
+    AppConfig, ChatMessage, ChatToolCallDelta, DaemonStatus, OAuthProviderKind, SavedSession,
+    StoredAccount,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -50,6 +53,9 @@ pub enum DaemonEvent {
     ChatChunk {
         content: String,
     },
+    ToolCallDelta {
+        delta: ChatToolCallDelta,
+    },
     ChatComplete {
         message: ChatMessage,
     },
@@ -80,8 +86,8 @@ pub enum DaemonEvent {
 #[cfg(test)]
 mod tests {
     use crate::{
-        AppConfig, ChatMessage, ChatProviderKind, ChatRole, DaemonCommand, DaemonEvent,
-        DaemonStatus, OAuthProviderKind, SavedSession, SessionId, SessionSummary,
+        AppConfig, ChatMessage, ChatProviderKind, ChatRole, ChatToolCallDelta, DaemonCommand,
+        DaemonEvent, DaemonStatus, OAuthProviderKind, SavedSession, SessionId, SessionSummary,
     };
 
     #[test]
@@ -91,6 +97,7 @@ mod tests {
             messages: vec![ChatMessage {
                 role: ChatRole::User,
                 content: "hello".to_string(),
+                tool_calls: Vec::new(),
             }],
         };
 
@@ -139,6 +146,7 @@ mod tests {
                 messages: vec![ChatMessage {
                     role: ChatRole::Assistant,
                     content: "hi".to_string(),
+                    tool_calls: Vec::new(),
                 }],
             },
         };
@@ -168,5 +176,21 @@ mod tests {
         let encoded = serde_json::to_string(&command).unwrap();
         let decoded: DaemonCommand = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, command);
+    }
+
+    #[test]
+    fn tool_call_delta_event_round_trips() {
+        let event = DaemonEvent::ToolCallDelta {
+            delta: ChatToolCallDelta {
+                index: 0,
+                id_fragment: Some("call_".to_string()),
+                name_fragment: Some("lookup".to_string()),
+                arguments_fragment: Some("{\"q\":\"hi\"}".to_string()),
+            },
+        };
+
+        let encoded = serde_json::to_string(&event).unwrap();
+        let decoded: DaemonEvent = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, event);
     }
 }

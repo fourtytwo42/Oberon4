@@ -165,6 +165,10 @@ Notes:
     - test command
     - build command
     - push is blocked if any required step fails
+    - Oberon4 defaults:
+      - smoke: `GATE_MODE=smoke bash scripts/oberon4-gate.sh`
+      - test: `GATE_MODE=strict bash scripts/oberon4-gate.sh`
+      - build: optional/off by default
   - If churn is high (>=10 files or >=300 lines), requires:
     - at least one commit marked `Risk: high`
     - at least 2 verification commands in commit messages
@@ -231,12 +235,12 @@ export HOOKS_RUN_EXCEPTION_DEBT_REPORT=1
 export HOOKS_EXCEPTION_DEBT_STRICT=0
 export HOOKS_EXCEPTION_DEBT_HORIZON_DAYS=14
 export HOOKS_RUN_LOCAL_CI_ON_PUSH=1
-export HOOKS_LOCAL_CI_STRICT=0
-export HOOKS_LOCAL_CI_REQUIRE_SMOKE=0
-export HOOKS_LOCAL_CI_REQUIRE_TEST=0
+export HOOKS_LOCAL_CI_STRICT=1
+export HOOKS_LOCAL_CI_REQUIRE_SMOKE=1
+export HOOKS_LOCAL_CI_REQUIRE_TEST=1
 export HOOKS_LOCAL_CI_REQUIRE_BUILD=0
-export HOOKS_LOCAL_SMOKE_CMD=""
-export HOOKS_LOCAL_TEST_CMD=""
+export HOOKS_LOCAL_SMOKE_CMD="GATE_MODE=smoke bash scripts/oberon4-gate.sh"
+export HOOKS_LOCAL_TEST_CMD="GATE_MODE=strict bash scripts/oberon4-gate.sh"
 export HOOKS_LOCAL_BUILD_CMD=""
 ```
 
@@ -247,6 +251,13 @@ export HOOKS_LOCAL_CI_STRICT=1
 export HOOKS_LOCAL_CI_REQUIRE_SMOKE=1
 export HOOKS_LOCAL_CI_REQUIRE_TEST=1
 export HOOKS_LOCAL_CI_REQUIRE_BUILD=1
+```
+
+Safe override path for a lighter local workflow:
+
+```bash
+export HOOKS_LOCAL_CI_STRICT=0
+export HOOKS_LOCAL_SMOKE_CMD="GATE_MODE=smoke RUN_WORKSPACE_TESTS=1 bash scripts/oberon4-gate.sh"
 ```
 
 - Customize architecture-impact path detection for ADR enforcement:

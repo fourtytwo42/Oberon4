@@ -183,6 +183,7 @@ mod tests {
             messages: vec![ChatMessage {
                 role: ChatRole::Assistant,
                 content: "hello".to_string(),
+                tool_calls: Vec::new(),
             }],
         };
         store.save_session(session.clone()).unwrap();

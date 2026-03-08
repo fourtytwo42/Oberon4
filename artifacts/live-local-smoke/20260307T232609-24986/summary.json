@@ -1,0 +1,24 @@
+{
+  "timestamp_utc": "20260307T232609-24986",
+  "base_url": "http://192.168.50.239:51824/v1",
+  "model": "gpt-5.1-codex-mini",
+  "api_key_env": "OPENAI_API_KEY",
+  "status": "pass",
+  "stages": [
+    {
+      "name": "live_hotspot_smoke",
+      "status": "pass",
+      "log_path": "/home/hendo420/Oberon4/artifacts/live-local-smoke/20260307T232609-24986/live_hotspot_smoke.log"
+    },
+    {
+      "name": "live_daemon_smoke",
+      "status": "pass",
+      "log_path": "/home/hendo420/Oberon4/artifacts/live-local-smoke/20260307T232609-24986/live_daemon_smoke.log"
+    },
+    {
+      "name": "doctor_json",
+      "status": "pass",
+      "log_path": "/home/hendo420/Oberon4/artifacts/live-local-smoke/20260307T232609-24986/doctor_json.log"
+    }
+  ]
+}

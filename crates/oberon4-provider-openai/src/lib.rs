@@ -1,8 +1,16 @@
-use std::{cell::RefCell, collections::VecDeque, time::Duration};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, VecDeque},
+    io::{BufRead, BufReader},
+    time::Duration,
+};
 
 use serde::{Deserialize, Serialize};
 
-use oberon4_core::{AppConfig, ChatMessage, ChatProvider, ChatRole, OberonError};
+use oberon4_core::{
+    AppConfig, ChatMessage, ChatProvider, ChatRole, ChatStreamEvent, ChatToolCall,
+    ChatToolCallDelta, OberonError,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RetryPolicy {
@@ -48,6 +56,44 @@ pub struct OpenAiChatResponseMessage {
     pub content: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenAiChatStreamResponse {
+    pub choices: Vec<OpenAiChatStreamChoice>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenAiChatStreamChoice {
+    pub delta: OpenAiChatStreamDelta,
+    pub finish_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenAiChatStreamDelta {
+    pub role: Option<String>,
+    pub content: Option<String>,
+    pub tool_calls: Option<Vec<OpenAiChatToolCallDelta>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenAiChatToolCallDelta {
+    pub index: usize,
+    pub id: Option<String>,
+    pub function: Option<OpenAiChatFunctionDelta>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenAiChatFunctionDelta {
+    pub name: Option<String>,
+    pub arguments: Option<String>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct ToolCallAssembly {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
 pub trait OpenAiTransport {
     fn post_json(
         &self,
@@ -62,6 +108,15 @@ pub trait OpenAiTransport {
         timeout_ms: u64,
         bearer_token: Option<&str>,
     ) -> Result<String, OberonError>;
+    fn post_sse(
+        &self,
+        url: &str,
+        body: &str,
+        timeout_ms: u64,
+        idle_timeout_ms: u64,
+        bearer_token: Option<&str>,
+        on_event: &mut dyn FnMut(String) -> Result<(), OberonError>,
+    ) -> Result<(), OberonError>;
 }
 
 #[derive(Debug, Clone, Default)]
@@ -140,6 +195,69 @@ impl OpenAiTransport for ReqwestTransport {
 
         Ok(text)
     }
+
+    fn post_sse(
+        &self,
+        url: &str,
+        body: &str,
+        timeout_ms: u64,
+        idle_timeout_ms: u64,
+        bearer_token: Option<&str>,
+        on_event: &mut dyn FnMut(String) -> Result<(), OberonError>,
+    ) -> Result<(), OberonError> {
+        let client = reqwest::blocking::Client::builder()
+            .connect_timeout(Duration::from_millis(timeout_ms))
+            .timeout(Duration::from_millis(idle_timeout_ms))
+            .build()
+            .map_err(|err| OberonError::Storage(format!("transport client build failed: {err}")))?;
+
+        let mut request = client
+            .post(url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(reqwest::header::ACCEPT, "text/event-stream")
+            .header(reqwest::header::CONNECTION, "close");
+        if let Some(token) = bearer_token {
+            request = request.bearer_auth(token);
+        }
+
+        let response = request
+            .body(body.to_string())
+            .send()
+            .map_err(|err| OberonError::Storage(format!("transport request failed: {err}")))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(OberonError::Validation(format!(
+                "provider returned HTTP {}",
+                status.as_u16()
+            )));
+        }
+
+        let mut reader = BufReader::new(response);
+        let mut line = String::new();
+        let mut data_lines = Vec::new();
+
+        loop {
+            line.clear();
+            let bytes = reader.read_line(&mut line).map_err(|err| {
+                OberonError::Storage(format!("transport stream read failed: {err}"))
+            })?;
+
+            if bytes == 0 {
+                flush_sse_payload(&mut data_lines, on_event)?;
+                return Ok(());
+            }
+
+            let trimmed = line.trim_end_matches(['\r', '\n']);
+            if trimmed.is_empty() {
+                flush_sse_payload(&mut data_lines, on_event)?;
+                continue;
+            }
+            if let Some(rest) = trimmed.strip_prefix("data:") {
+                data_lines.push(rest.trim_start().to_string());
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -147,6 +265,8 @@ pub struct OpenAiCompatibleClient<T> {
     base_url: String,
     api_key_env: Option<String>,
     retry_policy: RetryPolicy,
+    stream_responses: bool,
+    stream_idle_timeout_ms: u64,
     transport: T,
 }
 
@@ -161,6 +281,8 @@ impl<T> OpenAiCompatibleClient<T> {
             base_url: base_url.into(),
             api_key_env,
             retry_policy,
+            stream_responses: false,
+            stream_idle_timeout_ms: retry_policy.timeout_ms,
             transport,
         }
     }
@@ -176,12 +298,43 @@ impl<T> OpenAiCompatibleClient<T> {
     pub fn set_api_key_env(&mut self, api_key_env: Option<String>) {
         self.api_key_env = api_key_env;
     }
+
+    pub fn set_streaming_config(&mut self, enabled: bool, idle_timeout_ms: u64) {
+        self.stream_responses = enabled;
+        self.stream_idle_timeout_ms = idle_timeout_ms;
+    }
 }
 
 impl<T> OpenAiCompatibleClient<T>
 where
     T: OpenAiTransport,
 {
+    pub fn stream_chat_messages(
+        &self,
+        endpoint_override: Option<&str>,
+        model: &str,
+        messages: &[ChatMessage],
+        on_event: &mut dyn FnMut(ChatStreamEvent) -> Result<(), OberonError>,
+    ) -> Result<ChatMessage, OberonError> {
+        if !self.stream_responses {
+            return self.send_chat_messages(endpoint_override, model, messages);
+        }
+
+        let request = OpenAiChatRequest {
+            model: model.to_string(),
+            messages: messages.iter().cloned().map(into_request_message).collect(),
+            stream: true,
+        };
+        let body = serde_json::to_string(&request)
+            .map_err(|err| OberonError::Storage(format!("request serialization failed: {err}")))?;
+        let url = format!(
+            "{}/v1/chat/completions",
+            self.effective_base_url(endpoint_override)
+        );
+        let bearer_token = self.bearer_token()?;
+        self.stream_with_retry(&url, &body, bearer_token.as_deref(), on_event)
+    }
+
     pub fn send_chat_messages(
         &self,
         endpoint_override: Option<&str>,
@@ -223,7 +376,11 @@ where
     ) -> Result<(), OberonError> {
         let url = format!("{}/v1/version", self.effective_base_url(endpoint_override));
         self.transport
-            .get_text(&url, self.retry_policy.timeout_ms, self.bearer_token()?.as_deref())
+            .get_text(
+                &url,
+                self.retry_policy.timeout_ms,
+                self.bearer_token()?.as_deref(),
+            )
             .map(|_| ())
     }
 
@@ -259,15 +416,79 @@ where
         }))
     }
 
+    fn stream_with_retry(
+        &self,
+        url: &str,
+        body: &str,
+        bearer_token: Option<&str>,
+        on_event: &mut dyn FnMut(ChatStreamEvent) -> Result<(), OberonError>,
+    ) -> Result<ChatMessage, OberonError> {
+        let attempts = self.retry_policy.max_retries.saturating_add(1);
+        let mut last_error: Option<OberonError> = None;
+
+        for _ in 0..attempts {
+            let mut emitted_any = false;
+            let mut assistant_role = ChatRole::Assistant;
+            let mut assistant_text = String::new();
+            let mut tool_calls: BTreeMap<usize, ToolCallAssembly> = BTreeMap::new();
+
+            let result = self.transport.post_sse(
+                url,
+                body,
+                self.retry_policy.timeout_ms,
+                self.stream_idle_timeout_ms,
+                bearer_token,
+                &mut |payload| {
+                    emitted_any = true;
+                    let chunk: OpenAiChatStreamResponse =
+                        serde_json::from_str(&payload).map_err(|err| {
+                            OberonError::Validation(format!(
+                                "malformed provider stream chunk: {err}"
+                            ))
+                        })?;
+                    for choice in chunk.choices {
+                        if let Some(role) = choice.delta.role.as_deref() {
+                            assistant_role = parse_role(role)?;
+                        }
+                        if let Some(content) = choice.delta.content {
+                            if !content.is_empty() {
+                                assistant_text.push_str(&content);
+                                on_event(ChatStreamEvent::TextDelta { content })?;
+                            }
+                        }
+                        for delta in choice.delta.tool_calls.unwrap_or_default() {
+                            let normalized = merge_tool_call_delta(&mut tool_calls, delta);
+                            on_event(ChatStreamEvent::ToolCallDelta(normalized))?;
+                        }
+                    }
+                    Ok(())
+                },
+            );
+
+            match result {
+                Ok(()) => {
+                    let final_text = normalize_assistant_content(assistant_role, assistant_text);
+                    return Ok(ChatMessage {
+                        role: assistant_role,
+                        content: final_text,
+                        tool_calls: finalize_tool_calls(tool_calls),
+                    });
+                }
+                Err(err) if emitted_any => return Err(err),
+                Err(err) => last_error = Some(err),
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| {
+            OberonError::Storage("provider stream failed without an error".to_string())
+        }))
+    }
+
     fn bearer_token(&self) -> Result<Option<String>, OberonError> {
         match self.api_key_env.as_deref() {
-            Some(name) if !name.trim().is_empty() => std::env::var(name)
-                .map(Some)
-                .map_err(|_| {
-                    OberonError::Validation(format!(
-                        "api key environment variable is not set: {name}"
-                    ))
-                }),
+            Some(name) if !name.trim().is_empty() => std::env::var(name).map(Some).map_err(|_| {
+                OberonError::Validation(format!("api key environment variable is not set: {name}"))
+            }),
             _ => Ok(None),
         }
     }
@@ -277,18 +498,19 @@ impl<T> ChatProvider for OpenAiCompatibleClient<T>
 where
     T: OpenAiTransport,
 {
-    fn send_message(
+    fn stream_message(
         &self,
         endpoint: &str,
         model: &str,
         messages: &[ChatMessage],
+        on_event: &mut dyn FnMut(ChatStreamEvent) -> Result<(), OberonError>,
     ) -> Result<ChatMessage, OberonError> {
         let endpoint_override = if endpoint.trim().is_empty() {
             None
         } else {
             Some(endpoint)
         };
-        self.send_chat_messages(endpoint_override, model, messages)
+        self.stream_chat_messages(endpoint_override, model, messages, on_event)
     }
 
     fn endpoint_health(&self, endpoint: &str, model: &str) -> Result<(), OberonError> {
@@ -303,12 +525,32 @@ where
     fn apply_runtime_config(&mut self, config: &AppConfig) -> Result<(), OberonError> {
         self.set_retry_policy(RetryPolicy::from_config(config));
         self.set_api_key_env(config.endpoint.api_key_env.clone());
+        self.set_streaming_config(
+            config.runtime.stream_responses,
+            config.runtime.stream_idle_timeout_ms,
+        );
         Ok(())
     }
 }
 
 pub fn endpoint_summary(config: &AppConfig) -> String {
     format!("{} -> {}", config.endpoint.base_url, config.endpoint.model)
+}
+
+fn flush_sse_payload(
+    data_lines: &mut Vec<String>,
+    on_event: &mut dyn FnMut(String) -> Result<(), OberonError>,
+) -> Result<(), OberonError> {
+    if data_lines.is_empty() {
+        return Ok(());
+    }
+
+    let payload = data_lines.join("\n");
+    data_lines.clear();
+    if payload.trim() == "[DONE]" {
+        return Ok(());
+    }
+    on_event(payload)
 }
 
 fn into_request_message(message: ChatMessage) -> OpenAiChatRequestMessage {
@@ -338,7 +580,86 @@ fn into_chat_message(message: OpenAiChatResponseMessage) -> Result<ChatMessage, 
     Ok(ChatMessage {
         role,
         content: normalize_assistant_content(role, message.content),
+        tool_calls: Vec::new(),
     })
+}
+
+fn parse_role(role: &str) -> Result<ChatRole, OberonError> {
+    match role {
+        "system" => Ok(ChatRole::System),
+        "user" => Ok(ChatRole::User),
+        "assistant" => Ok(ChatRole::Assistant),
+        other => Err(OberonError::Validation(format!(
+            "provider response contained unsupported role: {other}"
+        ))),
+    }
+}
+
+fn merge_tool_call_delta(
+    tool_calls: &mut BTreeMap<usize, ToolCallAssembly>,
+    delta: OpenAiChatToolCallDelta,
+) -> ChatToolCallDelta {
+    let entry = tool_calls.entry(delta.index).or_default();
+
+    if let Some(id) = delta.id.as_deref() {
+        entry.id.push_str(id.trim());
+    }
+
+    let mut name_fragment = None;
+    let mut arguments_fragment = None;
+    if let Some(function) = delta.function {
+        if let Some(name) = function.name {
+            let trimmed = name.trim().to_string();
+            if !trimmed.is_empty() {
+                entry.name.push_str(&trimmed);
+                name_fragment = Some(trimmed);
+            }
+        }
+        if let Some(arguments) = function.arguments {
+            if !arguments.is_empty() {
+                entry.arguments.push_str(&arguments);
+                arguments_fragment = Some(arguments);
+            }
+        }
+    }
+
+    let id_fragment = delta.id.and_then(|value| {
+        let trimmed = value.trim().to_string();
+        (!trimmed.is_empty()).then_some(trimmed)
+    });
+
+    ChatToolCallDelta {
+        index: delta.index,
+        id_fragment,
+        name_fragment,
+        arguments_fragment,
+    }
+}
+
+fn finalize_tool_calls(tool_calls: BTreeMap<usize, ToolCallAssembly>) -> Vec<ChatToolCall> {
+    tool_calls
+        .into_iter()
+        .filter_map(|(index, tool)| {
+            if tool.id.trim().is_empty() && tool.name.trim().is_empty() && tool.arguments.is_empty()
+            {
+                return None;
+            }
+
+            Some(ChatToolCall {
+                id: if tool.id.trim().is_empty() {
+                    format!("tool_call_{index}")
+                } else {
+                    tool.id.trim().to_string()
+                },
+                name: if tool.name.trim().is_empty() {
+                    format!("unknown_tool_{index}")
+                } else {
+                    tool.name.trim().to_string()
+                },
+                arguments: tool.arguments,
+            })
+        })
+        .collect()
 }
 
 fn normalize_assistant_content(role: ChatRole, content: String) -> String {
@@ -433,6 +754,42 @@ impl OpenAiTransport for FakeTransport {
             ))
         })
     }
+
+    fn post_sse(
+        &self,
+        url: &str,
+        body: &str,
+        timeout_ms: u64,
+        _idle_timeout_ms: u64,
+        bearer_token: Option<&str>,
+        on_event: &mut dyn FnMut(String) -> Result<(), OberonError>,
+    ) -> Result<(), OberonError> {
+        self.requests.borrow_mut().push((
+            "POST_SSE".to_string(),
+            url.to_string(),
+            body.to_string(),
+            timeout_ms,
+            bearer_token.map(ToOwned::to_owned),
+        ));
+        let response = self.responses.borrow_mut().pop_front().unwrap_or_else(|| {
+            Err(OberonError::Storage(
+                "fake transport ran out of scripted responses".to_string(),
+            ))
+        })?;
+
+        let mut data_lines = Vec::new();
+        for raw_line in response.lines() {
+            let trimmed = raw_line.trim_end_matches(['\r', '\n']);
+            if trimmed.is_empty() {
+                flush_sse_payload(&mut data_lines, on_event)?;
+                continue;
+            }
+            if let Some(rest) = trimmed.strip_prefix("data:") {
+                data_lines.push(rest.trim_start().to_string());
+            }
+        }
+        flush_sse_payload(&mut data_lines, on_event)
+    }
 }
 
 #[cfg(test)]
@@ -475,10 +832,12 @@ mod tests {
             ChatMessage {
                 role: ChatRole::System,
                 content: "be concise".to_string(),
+                tool_calls: Vec::new(),
             },
             ChatMessage {
                 role: ChatRole::User,
                 content: "hello".to_string(),
+                tool_calls: Vec::new(),
             },
         ];
 
@@ -501,6 +860,49 @@ mod tests {
     }
 
     #[test]
+    fn stream_chat_messages_preserves_final_assistant_content() {
+        let transport = FakeTransport::new(vec![Ok(concat!(
+            "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
+            "data: [DONE]\n\n"
+        )
+        .to_string())]);
+        let mut client = OpenAiCompatibleClient::new(
+            "https://api.openai.com",
+            None,
+            RetryPolicy {
+                timeout_ms: 5_000,
+                max_retries: 0,
+            },
+            transport,
+        );
+        client.set_streaming_config(true, 5_000);
+        let mut deltas = Vec::new();
+
+        let reply = client
+            .stream_chat_messages(
+                None,
+                "gpt-4.1-mini",
+                &[ChatMessage {
+                    role: ChatRole::User,
+                    content: "hello".to_string(),
+                    tool_calls: Vec::new(),
+                }],
+                &mut |event| {
+                    if let oberon4_core::ChatStreamEvent::TextDelta { content } = event {
+                        deltas.push(content);
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(reply.role, ChatRole::Assistant);
+        assert_eq!(reply.content, "ok");
+        assert_eq!(deltas, vec!["ok".to_string()]);
+    }
+
+    #[test]
     fn endpoint_override_is_used_when_present() {
         let transport = FakeTransport::new(vec![Ok(ok_response("hi"))]);
         let client = OpenAiCompatibleClient::new(
@@ -520,6 +922,7 @@ mod tests {
                 &[ChatMessage {
                     role: ChatRole::User,
                     content: "ping".to_string(),
+                    tool_calls: Vec::new(),
                 }],
             )
             .unwrap();
@@ -555,6 +958,7 @@ mod tests {
                 &[ChatMessage {
                     role: ChatRole::User,
                     content: "hello".to_string(),
+                    tool_calls: Vec::new(),
                 }],
             )
             .unwrap();
@@ -583,6 +987,7 @@ mod tests {
                 &[ChatMessage {
                     role: ChatRole::User,
                     content: "hello".to_string(),
+                    tool_calls: Vec::new(),
                 }],
             )
             .expect_err("malformed responses should fail");
@@ -610,6 +1015,7 @@ mod tests {
                 &[ChatMessage {
                     role: ChatRole::User,
                     content: "hello".to_string(),
+                    tool_calls: Vec::new(),
                 }],
             )
             .expect_err("empty choice list should fail");
@@ -643,6 +1049,7 @@ mod tests {
                 &[ChatMessage {
                     role: ChatRole::User,
                     content: "hello".to_string(),
+                    tool_calls: Vec::new(),
                 }],
             )
             .expect_err("auth failure should surface");
@@ -690,6 +1097,7 @@ mod tests {
                 &[ChatMessage {
                     role: ChatRole::User,
                     content: "hello".to_string(),
+                    tool_calls: Vec::new(),
                 }],
             )
             .unwrap();
@@ -717,6 +1125,7 @@ mod tests {
                 &[ChatMessage {
                     role: ChatRole::User,
                     content: "hello".to_string(),
+                    tool_calls: Vec::new(),
                 }],
             )
             .unwrap();
@@ -747,6 +1156,7 @@ mod tests {
                 &[ChatMessage {
                     role: ChatRole::User,
                     content: "hello".to_string(),
+                    tool_calls: Vec::new(),
                 }],
             )
             .unwrap();
@@ -782,6 +1192,7 @@ mod tests {
                 &[ChatMessage {
                     role: ChatRole::User,
                     content: "hello".to_string(),
+                    tool_calls: Vec::new(),
                 }],
             )
             .expect_err("missing api key env should fail fast");
@@ -812,6 +1223,7 @@ mod tests {
                 &[ChatMessage {
                     role: ChatRole::User,
                     content: "hello".to_string(),
+                    tool_calls: Vec::new(),
                 }],
             )
             .unwrap();
@@ -860,6 +1272,7 @@ mod tests {
                 &[ChatMessage {
                     role: ChatRole::User,
                     content: "hello".to_string(),
+                    tool_calls: Vec::new(),
                 }],
             )
             .expect("real transport request should succeed");

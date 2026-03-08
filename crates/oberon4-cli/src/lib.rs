@@ -1,4 +1,6 @@
 use std::{
+    collections::BTreeMap,
+    io::{self, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -7,8 +9,8 @@ use std::{
 
 use oberon4_auth::{AccountRegistry, AnthropicOAuthAdapter, OpenAiOAuthAdapter, TokenBundle};
 use oberon4_core::{
-    AppConfig, ChatMessage, ChatProvider, ChatRole, InMemoryConfigStore, InMemorySecretStore,
-    InMemorySessionStore, OAuthProvider, OAuthProviderKind, OberonError,
+    AppConfig, ChatMessage, ChatProvider, ChatRole, ChatToolCallDelta, InMemoryConfigStore,
+    InMemorySecretStore, InMemorySessionStore, OAuthProvider, OAuthProviderKind, OberonError,
 };
 use oberon4_daemon::{DaemonIpcClient, DaemonRuntime, LogLevel, log_entry};
 use oberon4_provider_openai::{FakeTransport, OpenAiCompatibleClient, RetryPolicy};
@@ -29,7 +31,9 @@ pub enum CliCommand {
         message: String,
     },
     LogsTail,
-    Doctor,
+    Doctor {
+        json: bool,
+    },
     AccountConnect {
         provider: OAuthProviderKind,
     },
@@ -53,6 +57,8 @@ pub struct CliOutput {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: i32,
+    pub stdout_emitted: bool,
+    pub stderr_emitted: bool,
 }
 
 impl CliOutput {
@@ -61,6 +67,8 @@ impl CliOutput {
             stdout: stdout.into(),
             stderr: String::new(),
             exit_code: 0,
+            stdout_emitted: false,
+            stderr_emitted: false,
         }
     }
 
@@ -69,6 +77,8 @@ impl CliOutput {
             stdout: String::new(),
             stderr: stderr.into(),
             exit_code,
+            stdout_emitted: false,
+            stderr_emitted: false,
         }
     }
 }
@@ -151,6 +161,7 @@ impl CliApp {
                     &[ChatMessage {
                         role: ChatRole::User,
                         content: message,
+                        tool_calls: Vec::new(),
                     }],
                 )?;
                 Ok(CliOutput::success(reply.content))
@@ -159,14 +170,48 @@ impl CliApp {
                 LogLevel::Info,
                 "cli requested log tail",
             )?)),
-            CliCommand::Doctor => {
+            CliCommand::Doctor { json } => {
                 let health = self.runtime.health()?;
                 if !health.ready {
-                    return Ok(CliOutput::error("daemon is not running", 3));
+                    return if json {
+                        doctor_json_output(
+                            health.running,
+                            health.ready,
+                            &health.endpoint_base_url,
+                            &health.model,
+                            "fail",
+                            Some("daemon is not running".to_string()),
+                            3,
+                        )
+                    } else {
+                        Ok(CliOutput::error("daemon is not running", 3))
+                    };
                 }
-                self.provider_client
-                    .endpoint_health(Some(&health.endpoint_base_url), &health.model)?;
-                Ok(CliOutput::success("doctor passed"))
+                match self
+                    .provider_client
+                    .endpoint_health(Some(&health.endpoint_base_url), &health.model)
+                {
+                    Ok(()) if json => doctor_json_output(
+                        health.running,
+                        health.ready,
+                        &health.endpoint_base_url,
+                        &health.model,
+                        "pass",
+                        None,
+                        0,
+                    ),
+                    Ok(()) => Ok(CliOutput::success("doctor passed")),
+                    Err(err) if json => doctor_json_output(
+                        health.running,
+                        health.ready,
+                        &health.endpoint_base_url,
+                        &health.model,
+                        "fail",
+                        Some(err.to_string()),
+                        3,
+                    ),
+                    Err(err) => Err(err),
+                }
             }
             CliCommand::AccountConnect { provider } => {
                 let authorization_url = match provider {
@@ -301,42 +346,135 @@ fn execute_via_daemon(command: CliCommand) -> Result<CliOutput, OberonError> {
         }
         CliCommand::Chat { message } => {
             ensure_daemon_running()?;
-            match daemon_client()?.send(&oberon4_core::DaemonCommand::SendChat {
-                session_id: None,
-                messages: vec![ChatMessage {
-                    role: ChatRole::User,
-                    content: message,
-                }],
-            })? {
-                oberon4_core::DaemonEvent::ChatComplete { message } => {
-                    Ok(CliOutput::success(message.content))
-                }
-                event => daemon_protocol_error(event),
-            }
+            stream_chat_to_console(message)
         }
         CliCommand::LogsTail => Ok(CliOutput::success(log_entry(
             LogLevel::Info,
             "cli requested log tail",
         )?)),
-        CliCommand::Doctor => {
-            ensure_daemon_running()?;
-            let client = daemon_client()?;
-            match client.send(&oberon4_core::DaemonCommand::GetStatus)? {
-                oberon4_core::DaemonEvent::Status { status } if status.running => {}
-                oberon4_core::DaemonEvent::Status { .. } => {
-                    return Ok(CliOutput::error("daemon is not running", 3));
-                }
-                event => return daemon_protocol_error(event),
+        CliCommand::Doctor { json } => {
+            let default = AppConfig::default();
+            if let Err(err) = ensure_daemon_running() {
+                return if json {
+                    doctor_json_output(
+                        false,
+                        false,
+                        &default.endpoint.base_url,
+                        &default.endpoint.model,
+                        "fail",
+                        Some(err.to_string()),
+                        3,
+                    )
+                } else {
+                    Err(err)
+                };
             }
-            match client.send(&oberon4_core::DaemonCommand::EndpointHealth)? {
-                oberon4_core::DaemonEvent::Ack { message } => {
+
+            let client = daemon_client()?;
+            let status = match client.send(&oberon4_core::DaemonCommand::GetStatus) {
+                Ok(oberon4_core::DaemonEvent::Status { status }) => status,
+                Ok(event) => {
+                    return if json {
+                        doctor_json_output(
+                            false,
+                            false,
+                            &default.endpoint.base_url,
+                            &default.endpoint.model,
+                            "fail",
+                            Some(
+                                OberonError::Storage(format!(
+                                    "unexpected daemon response: {event:?}"
+                                ))
+                                .to_string(),
+                            ),
+                            3,
+                        )
+                    } else {
+                        daemon_protocol_error(event)
+                    };
+                }
+                Err(err) => {
+                    return if json {
+                        doctor_json_output(
+                            false,
+                            false,
+                            &default.endpoint.base_url,
+                            &default.endpoint.model,
+                            "fail",
+                            Some(err.to_string()),
+                            3,
+                        )
+                    } else {
+                        Err(err)
+                    };
+                }
+            };
+
+            if !status.running {
+                return if json {
+                    doctor_json_output(
+                        status.running,
+                        status.running,
+                        &status.endpoint_base_url,
+                        &status.model,
+                        "fail",
+                        Some("daemon is not running".to_string()),
+                        3,
+                    )
+                } else {
+                    Ok(CliOutput::error("daemon is not running", 3))
+                };
+            }
+
+            match client.send(&oberon4_core::DaemonCommand::EndpointHealth) {
+                Ok(oberon4_core::DaemonEvent::Ack { message: _ }) if json => doctor_json_output(
+                    status.running,
+                    status.running,
+                    &status.endpoint_base_url,
+                    &status.model,
+                    "pass",
+                    None,
+                    0,
+                ),
+                Ok(oberon4_core::DaemonEvent::Ack { message }) => {
                     Ok(CliOutput::success(if message == "endpoint test passed" {
                         "doctor passed".to_string()
                     } else {
                         message
                     }))
                 }
-                event => daemon_protocol_error(event),
+                Ok(event) => {
+                    let err =
+                        OberonError::Storage(format!("unexpected daemon response: {event:?}"));
+                    if json {
+                        doctor_json_output(
+                            status.running,
+                            status.running,
+                            &status.endpoint_base_url,
+                            &status.model,
+                            "fail",
+                            Some(err.to_string()),
+                            3,
+                        )
+                    } else {
+                        daemon_protocol_error(event)
+                    }
+                }
+                Err(err) => {
+                    if json {
+                        doctor_json_output(
+                            status.running,
+                            status.running,
+                            &status.endpoint_base_url,
+                            &status.model,
+                            "fail",
+                            Some(err.to_string()),
+                            3,
+                        )
+                    } else {
+                        Err(err)
+                    }
+                }
             }
         }
         CliCommand::AccountConnect { provider } => {
@@ -417,7 +555,10 @@ fn ensure_daemon_running() -> Result<(), OberonError> {
 }
 
 fn spawn_daemon_process(socket_path: PathBuf) -> Result<(), OberonError> {
-    spawn_binary(binary_launch_target("oberon4-daemon", "OBERON4_DAEMON_BIN")?, socket_path)?;
+    spawn_binary(
+        binary_launch_target("oberon4-daemon", "OBERON4_DAEMON_BIN")?,
+        socket_path,
+    )?;
     Ok(())
 }
 
@@ -453,7 +594,10 @@ enum BinaryLaunchTarget {
     },
 }
 
-fn binary_launch_target(binary_name: &str, override_env: &str) -> Result<BinaryLaunchTarget, OberonError> {
+fn binary_launch_target(
+    binary_name: &str,
+    override_env: &str,
+) -> Result<BinaryLaunchTarget, OberonError> {
     if let Some(path) = std::env::var_os(override_env) {
         return Ok(BinaryLaunchTarget::Direct(PathBuf::from(path)));
     }
@@ -468,7 +612,10 @@ fn binary_launch_target(binary_name: &str, override_env: &str) -> Result<BinaryL
     })
 }
 
-fn resolve_binary_launch_target(current_exe: &Path, binary_name: &str) -> Option<BinaryLaunchTarget> {
+fn resolve_binary_launch_target(
+    current_exe: &Path,
+    binary_name: &str,
+) -> Option<BinaryLaunchTarget> {
     for candidate in binary_path_candidates(current_exe, binary_name) {
         if candidate.exists() {
             return Some(BinaryLaunchTarget::Direct(candidate));
@@ -559,6 +706,141 @@ fn daemon_protocol_error(event: oberon4_core::DaemonEvent) -> Result<CliOutput, 
     }
 }
 
+fn stream_chat_to_console(message: String) -> Result<CliOutput, OberonError> {
+    let mut stdout_buffer = String::new();
+    let mut stderr_buffer = String::new();
+    let mut stdout_emitted = false;
+    let mut stderr_emitted = false;
+    let mut final_message: Option<ChatMessage> = None;
+    let mut tool_state: BTreeMap<usize, (String, String)> = BTreeMap::new();
+
+    daemon_client()?.send_stream(
+        &oberon4_core::DaemonCommand::SendChat {
+            session_id: None,
+            messages: vec![ChatMessage {
+                role: ChatRole::User,
+                content: message,
+                tool_calls: Vec::new(),
+            }],
+        },
+        &mut |event| match event {
+            oberon4_core::DaemonEvent::ChatChunk { content } => {
+                print!("{content}");
+                io::stdout()
+                    .flush()
+                    .map_err(|err| OberonError::Storage(format!("stdout flush failed: {err}")))?;
+                stdout_buffer.push_str(&content);
+                stdout_emitted = true;
+                Ok(())
+            }
+            oberon4_core::DaemonEvent::ToolCallDelta { delta } => {
+                let line = render_tool_delta(&mut tool_state, delta);
+                eprintln!("{line}");
+                stderr_buffer.push_str(&line);
+                stderr_buffer.push('\n');
+                stderr_emitted = true;
+                Ok(())
+            }
+            oberon4_core::DaemonEvent::ChatComplete { message } => {
+                final_message = Some(message);
+                Ok(())
+            }
+            oberon4_core::DaemonEvent::Error { message } => Err(OberonError::Validation(message)),
+            other => Err(OberonError::Storage(format!(
+                "unexpected daemon response: {other:?}"
+            ))),
+        },
+    )?;
+
+    let final_message = final_message.ok_or_else(|| {
+        OberonError::Storage("daemon stream ended without ChatComplete".to_string())
+    })?;
+
+    if !stdout_emitted && !final_message.content.is_empty() {
+        print!("{}", final_message.content);
+        io::stdout()
+            .flush()
+            .map_err(|err| OberonError::Storage(format!("stdout flush failed: {err}")))?;
+        stdout_buffer = final_message.content.clone();
+        stdout_emitted = true;
+    }
+    if stdout_emitted {
+        println!();
+    }
+    for tool_call in &final_message.tool_calls {
+        let summary = format!("tool: {} {}", tool_call.name, tool_call.arguments);
+        if !stderr_buffer.contains(&summary) {
+            eprintln!("{summary}");
+            stderr_buffer.push_str(&summary);
+            stderr_buffer.push('\n');
+            stderr_emitted = true;
+        }
+    }
+
+    Ok(CliOutput {
+        stdout: if stdout_buffer.is_empty() {
+            final_message.content
+        } else {
+            stdout_buffer
+        },
+        stderr: stderr_buffer,
+        exit_code: 0,
+        stdout_emitted,
+        stderr_emitted,
+    })
+}
+
+fn render_tool_delta(
+    tool_state: &mut BTreeMap<usize, (String, String)>,
+    delta: ChatToolCallDelta,
+) -> String {
+    let entry = tool_state.entry(delta.index).or_default();
+    if let Some(name) = delta.name_fragment.as_deref() {
+        entry.0.push_str(name);
+    }
+    if let Some(arguments) = delta.arguments_fragment.as_deref() {
+        entry.1.push_str(arguments);
+    }
+    let name = if entry.0.is_empty() {
+        format!("tool_{}", delta.index)
+    } else {
+        entry.0.clone()
+    };
+    format!(
+        "tool[{idx}] {name} {args}",
+        idx = delta.index,
+        args = entry.1
+    )
+}
+
+fn doctor_json_output(
+    running: bool,
+    ready: bool,
+    endpoint_base_url: &str,
+    model: &str,
+    endpoint_check: &str,
+    error: Option<String>,
+    exit_code: i32,
+) -> Result<CliOutput, OberonError> {
+    let stdout = serde_json::to_string_pretty(&serde_json::json!({
+        "running": running,
+        "ready": ready,
+        "endpoint_base_url": endpoint_base_url,
+        "model": model,
+        "endpoint_check": endpoint_check,
+        "error": error,
+    }))
+    .map_err(|err| OberonError::Storage(err.to_string()))?;
+
+    Ok(CliOutput {
+        stdout,
+        stderr: String::new(),
+        exit_code,
+        stdout_emitted: false,
+        stderr_emitted: false,
+    })
+}
+
 pub fn parse_command(args: &[String]) -> Result<CliCommand, OberonError> {
     let mut parts = args.iter().map(String::as_str);
     let Some(command) = parts.next() else {
@@ -619,7 +901,13 @@ pub fn parse_command(args: &[String]) -> Result<CliCommand, OberonError> {
             Some("tail") => Ok(CliCommand::LogsTail),
             _ => Err(OberonError::Validation("expected logs tail".to_string())),
         },
-        "doctor" => Ok(CliCommand::Doctor),
+        "doctor" => match parts.next() {
+            None => Ok(CliCommand::Doctor { json: false }),
+            Some("--json") if parts.next().is_none() => Ok(CliCommand::Doctor { json: true }),
+            _ => Err(OberonError::Validation(
+                "expected doctor [--json]".to_string(),
+            )),
+        },
         "account" => match parts.next() {
             Some("connect") => Ok(CliCommand::AccountConnect {
                 provider: parse_provider_flag(parts.collect())?,
@@ -719,12 +1007,22 @@ fn apply_config_value(config: &mut AppConfig, key: &str, value: &str) -> Result<
                 OberonError::Validation("runtime.request_timeout_ms must be u64".to_string())
             })?
         }
+        "runtime.stream_idle_timeout_ms" => {
+            config.runtime.stream_idle_timeout_ms = value.parse().map_err(|_| {
+                OberonError::Validation("runtime.stream_idle_timeout_ms must be u64".to_string())
+            })?
+        }
         "runtime.max_retries" => {
             config.runtime.max_retries = value.parse().map_err(|_| {
                 OberonError::Validation("runtime.max_retries must be u8".to_string())
             })?
         }
         "runtime.log_level" => config.runtime.log_level = value.to_string(),
+        "runtime.stream_responses" => {
+            config.runtime.stream_responses = value.parse().map_err(|_| {
+                OberonError::Validation("runtime.stream_responses must be bool".to_string())
+            })?
+        }
         _ => {
             return Err(OberonError::Validation(
                 "unsupported config key".to_string(),
@@ -749,7 +1047,7 @@ fn redacted_config_json(config: &AppConfig) -> Result<String, OberonError> {
 }
 
 fn default_provider_client() -> OpenAiCompatibleClient<FakeTransport> {
-    OpenAiCompatibleClient::new(
+    let mut client = OpenAiCompatibleClient::new(
         "https://api.openai.com",
         None,
         RetryPolicy {
@@ -761,7 +1059,9 @@ fn default_provider_client() -> OpenAiCompatibleClient<FakeTransport> {
             Ok(ok_response("assistant reply")),
             Ok(ok_response("healthy")),
         ]),
-    )
+    );
+    client.set_streaming_config(false, 30_000);
+    client
 }
 
 fn ok_response(content: &str) -> String {
@@ -773,9 +1073,21 @@ mod tests {
     use std::{
         path::PathBuf,
         sync::{Mutex, OnceLock},
+        thread,
+        time::Duration,
     };
 
-    use super::{BinaryLaunchTarget, CliApp, CliCommand, parse_command, resolve_binary_launch_target};
+    use oberon4_auth::{AccountRegistry, InMemoryAccountMetadataStore};
+    use oberon4_core::{
+        DaemonCommand, DaemonEvent, FakeChatProvider, FakeOAuthProvider, InMemorySecretStore,
+        OAuthProviderKind,
+    };
+    use oberon4_daemon::{DaemonApp, DaemonIpcClient, DaemonRuntime, serve_unix_socket};
+
+    use super::{
+        BinaryLaunchTarget, CliApp, CliCommand, parse_command, resolve_binary_launch_target,
+        run_cli,
+    };
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -797,6 +1109,12 @@ mod tests {
                 message: "hello".to_string()
             }
         );
+    }
+
+    #[test]
+    fn parses_doctor_json_command() {
+        let command = parse_command(&["doctor".into(), "--json".into()]).unwrap();
+        assert_eq!(command, CliCommand::Doctor { json: true });
     }
 
     #[test]
@@ -837,14 +1155,42 @@ mod tests {
     fn endpoint_test_and_doctor_use_provider_client() {
         let mut app = CliApp::default();
         let endpoint = app.run(CliCommand::EndpointTest);
-        let doctor_before_start = app.run(CliCommand::Doctor);
+        let doctor_before_start = app.run(CliCommand::Doctor { json: false });
         let _ = app.run(CliCommand::DaemonStart);
-        let doctor_after_start = app.run(CliCommand::Doctor);
+        let doctor_after_start = app.run(CliCommand::Doctor { json: false });
 
         assert_eq!(endpoint.exit_code, 0);
         assert_eq!(endpoint.stdout, "endpoint test passed");
         assert_eq!(doctor_before_start.exit_code, 3);
         assert_eq!(doctor_after_start.exit_code, 0);
+        assert_eq!(doctor_after_start.stdout, "doctor passed");
+    }
+
+    #[test]
+    fn doctor_json_reports_unhealthy_local_state() {
+        let mut app = CliApp::default();
+        let output = app.run(CliCommand::Doctor { json: true });
+        let value: serde_json::Value = serde_json::from_str(&output.stdout).unwrap();
+
+        assert_eq!(output.exit_code, 3);
+        assert_eq!(value["running"], false);
+        assert_eq!(value["ready"], false);
+        assert_eq!(value["endpoint_check"], "fail");
+        assert_eq!(value["error"], "daemon is not running");
+    }
+
+    #[test]
+    fn doctor_json_reports_healthy_local_state() {
+        let mut app = CliApp::default();
+        let _ = app.run(CliCommand::DaemonStart);
+        let output = app.run(CliCommand::Doctor { json: true });
+        let value: serde_json::Value = serde_json::from_str(&output.stdout).unwrap();
+
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(value["running"], true);
+        assert_eq!(value["ready"], true);
+        assert_eq!(value["endpoint_check"], "pass");
+        assert!(value["error"].is_null());
     }
 
     #[test]
@@ -931,10 +1277,8 @@ mod tests {
 
     #[test]
     fn resolves_workspace_cargo_fallback_when_peer_binary_is_missing() {
-        let root = std::env::temp_dir().join(format!(
-            "oberon4-cli-launcher-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("oberon4-cli-launcher-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("target/debug")).unwrap();
         std::fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
@@ -960,12 +1304,103 @@ mod tests {
     #[test]
     fn resolves_direct_peer_binary_when_present() {
         let current = PathBuf::from("/bin/true");
-        let target = resolve_binary_launch_target(&current, "sh")
-            .expect("direct binary should resolve");
+        let target =
+            resolve_binary_launch_target(&current, "sh").expect("direct binary should resolve");
 
         match target {
             BinaryLaunchTarget::Direct(path) => assert_eq!(path, PathBuf::from("/bin/sh")),
             other => panic!("expected direct binary, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn doctor_json_reports_healthy_daemon_backed_state() {
+        let _guard = env_lock().lock().expect("env lock");
+        let socket_path = std::env::temp_dir().join(format!(
+            "oberon4-cli-doctor-json-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&socket_path);
+
+        unsafe {
+            std::env::remove_var("OBERON4_FORCE_LOCAL");
+            std::env::set_var("OBERON4_SOCKET_PATH", &socket_path);
+        }
+
+        let thread_socket = socket_path.clone();
+        let handle = thread::spawn(move || {
+            let app = DaemonApp::new(
+                DaemonRuntime::default(),
+                FakeChatProvider::default(),
+                FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
+                FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+                AccountRegistry::default(),
+                InMemorySecretStore::default(),
+                InMemoryAccountMetadataStore::default(),
+            );
+            serve_unix_socket(&thread_socket, app)
+        });
+
+        for _ in 0..20 {
+            if socket_path.exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+
+        let output = run_cli(&["doctor".into(), "--json".into()]);
+        let value: serde_json::Value = serde_json::from_str(&output.stdout).unwrap();
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(value["running"], true);
+        assert_eq!(value["ready"], true);
+        assert_eq!(value["endpoint_check"], "pass");
+        assert!(value["error"].is_null());
+
+        let stop = DaemonIpcClient::new(&socket_path)
+            .send(&DaemonCommand::Shutdown)
+            .unwrap();
+        match stop {
+            DaemonEvent::Ack { message } => assert_eq!(message, "daemon stopped"),
+            other => panic!("unexpected stop event: {other:?}"),
+        }
+        handle.join().unwrap().unwrap();
+
+        unsafe {
+            std::env::remove_var("OBERON4_SOCKET_PATH");
+        }
+    }
+
+    #[test]
+    fn doctor_json_reports_daemon_start_failure() {
+        let _guard = env_lock().lock().expect("env lock");
+        let socket_path = std::env::temp_dir().join(format!(
+            "oberon4-cli-doctor-json-fail-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&socket_path);
+
+        unsafe {
+            std::env::remove_var("OBERON4_FORCE_LOCAL");
+            std::env::set_var("OBERON4_SOCKET_PATH", &socket_path);
+            std::env::set_var("OBERON4_DAEMON_BIN", "/bin/false");
+        }
+
+        let output = run_cli(&["doctor".into(), "--json".into()]);
+        let value: serde_json::Value = serde_json::from_str(&output.stdout).unwrap();
+        assert_eq!(output.exit_code, 3);
+        assert_eq!(value["running"], false);
+        assert_eq!(value["ready"], false);
+        assert_eq!(value["endpoint_check"], "fail");
+        assert!(
+            value["error"]
+                .as_str()
+                .unwrap()
+                .contains("daemon failed to become ready after spawn")
+        );
+
+        unsafe {
+            std::env::remove_var("OBERON4_SOCKET_PATH");
+            std::env::remove_var("OBERON4_DAEMON_BIN");
         }
     }
 }

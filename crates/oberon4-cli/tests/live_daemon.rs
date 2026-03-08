@@ -59,9 +59,11 @@ fn run_cli(
         .env("OBERON4_DAEMON_BIN", daemon)
         .env("OBERON4_DATA_DIR", data_dir)
         .env("OBERON4_SOCKET_PATH", socket_path)
-        .envs(api_key_env().into_iter().filter_map(|name| {
-            std::env::var(&name).ok().map(|value| (name, value))
-        }))
+        .envs(
+            api_key_env()
+                .into_iter()
+                .filter_map(|name| std::env::var(&name).ok().map(|value| (name, value))),
+        )
         .output()
         .expect("cli should execute");
 

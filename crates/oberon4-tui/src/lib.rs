@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     io,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -14,8 +15,9 @@ use crossterm::{
 };
 use oberon4_auth::AccountRegistry;
 use oberon4_core::{
-    AppConfig, ChatMessage, ChatProvider, ChatRole, InMemoryConfigStore, InMemorySessionStore,
-    OAuthProviderKind, OberonError, SavedSession, SessionId, SessionStore, SessionSummary,
+    AppConfig, ChatMessage, ChatProvider, ChatRole, ChatToolCallDelta, InMemoryConfigStore,
+    InMemorySessionStore, OAuthProviderKind, OberonError, SavedSession, SessionId, SessionStore,
+    SessionSummary,
 };
 use oberon4_daemon::{DaemonIpcClient, DaemonRuntime, LifecycleState};
 use oberon4_provider_openai::{FakeTransport, OpenAiCompatibleClient, RetryPolicy};
@@ -62,9 +64,23 @@ pub struct TuiShellState {
 }
 
 struct PendingSubmission {
-    receiver: Receiver<Result<(DaemonBackedTuiApp, TuiShellState), (TuiShellState, OberonError)>>,
+    receiver: Receiver<AsyncUiEvent>,
     started_at: Instant,
     timeout: Duration,
+    assistant_line_index: usize,
+    tool_line_indices: BTreeMap<usize, usize>,
+    tool_state: BTreeMap<usize, (String, String)>,
+}
+
+#[derive(Debug)]
+enum AsyncUiEvent {
+    TextDelta(String),
+    ToolCallDelta(ChatToolCallDelta),
+    Complete {
+        prompt: String,
+        message: ChatMessage,
+    },
+    Failed(OberonError),
 }
 
 pub struct TuiApp {
@@ -235,12 +251,14 @@ impl TuiApp {
                 self.transcript.push(ChatMessage {
                     role: ChatRole::System,
                     content: prompt_text,
+                    tool_calls: Vec::new(),
                 });
             }
         }
         self.transcript.push(ChatMessage {
             role: ChatRole::User,
             content: prompt.to_string(),
+            tool_calls: Vec::new(),
         });
         let config = self.runtime.load_config()?;
         let reply = self.provider_client.send_message(
@@ -394,32 +412,12 @@ impl DaemonBackedTuiApp {
     }
 
     fn send_prompt(&mut self, prompt: &str) -> Result<TuiResponse, OberonError> {
-        if let Some(prompt_text) = self.system_prompt.clone() {
-            if self.transcript.is_empty() {
-                self.transcript.push(ChatMessage {
-                    role: ChatRole::System,
-                    content: prompt_text,
-                });
-            }
-        }
-        self.transcript.push(ChatMessage {
-            role: ChatRole::User,
-            content: prompt.to_string(),
-        });
-
-        match self.client.send(&oberon4_core::DaemonCommand::SendChat {
-            session_id: None,
-            messages: self.transcript.clone(),
-        })? {
-            oberon4_core::DaemonEvent::ChatComplete { message } => {
-                self.transcript.push(message.clone());
-                Ok(TuiResponse {
-                    output: message.content,
-                    should_quit: false,
-                })
-            }
-            event => protocol_error(event),
-        }
+        let message = self.stream_prompt_events(prompt, &mut |_| Ok(()))?;
+        self.apply_successful_prompt(prompt, message.clone());
+        Ok(TuiResponse {
+            output: message.content,
+            should_quit: false,
+        })
     }
 
     fn load_config(&self) -> Result<AppConfig, OberonError> {
@@ -464,6 +462,71 @@ impl DaemonBackedTuiApp {
         Err(OberonError::Storage(
             "daemon failed to become ready after spawn".to_string(),
         ))
+    }
+
+    fn build_request_messages(&self, prompt: &str) -> Vec<ChatMessage> {
+        let mut messages = self.transcript.clone();
+        if let Some(prompt_text) = self.system_prompt.clone() {
+            if messages.is_empty() {
+                messages.push(ChatMessage {
+                    role: ChatRole::System,
+                    content: prompt_text,
+                    tool_calls: Vec::new(),
+                });
+            }
+        }
+        messages.push(ChatMessage {
+            role: ChatRole::User,
+            content: prompt.to_string(),
+            tool_calls: Vec::new(),
+        });
+        messages
+    }
+
+    fn apply_successful_prompt(&mut self, prompt: &str, message: ChatMessage) {
+        if let Some(prompt_text) = self.system_prompt.clone() {
+            if self.transcript.is_empty() {
+                self.transcript.push(ChatMessage {
+                    role: ChatRole::System,
+                    content: prompt_text,
+                    tool_calls: Vec::new(),
+                });
+            }
+        }
+        self.transcript.push(ChatMessage {
+            role: ChatRole::User,
+            content: prompt.to_string(),
+            tool_calls: Vec::new(),
+        });
+        self.transcript.push(message);
+    }
+
+    fn stream_prompt_events(
+        &self,
+        prompt: &str,
+        on_event: &mut dyn FnMut(oberon4_core::DaemonEvent) -> Result<(), OberonError>,
+    ) -> Result<ChatMessage, OberonError> {
+        let mut final_message = None;
+        self.client.send_stream(
+            &oberon4_core::DaemonCommand::SendChat {
+                session_id: None,
+                messages: self.build_request_messages(prompt),
+            },
+            &mut |event| match event {
+                oberon4_core::DaemonEvent::ChatComplete { message } => {
+                    final_message = Some(message);
+                    Ok(())
+                }
+                oberon4_core::DaemonEvent::Error { message } => {
+                    Err(OberonError::Validation(message))
+                }
+                other => on_event(other),
+            },
+        )?;
+
+        final_message.ok_or_else(|| {
+            OberonError::Storage("daemon stream ended without ChatComplete".to_string())
+        })
     }
 }
 
@@ -558,27 +621,7 @@ fn run_terminal_loop(
 
         if let Some(pending) = pending_submission.as_ref() {
             match pending.receiver.try_recv() {
-                Ok(result) => {
-                    pending_submission = None;
-                    match result {
-                        Ok((updated_app, updated_shell)) => {
-                            let preserved_input = std::mem::take(&mut shell.input);
-                            *app = updated_app;
-                            *shell = updated_shell;
-                            shell.input = preserved_input;
-                        }
-                        Err((failed_shell, err)) => {
-                            let preserved_input = std::mem::take(&mut shell.input);
-                            *shell = failed_shell;
-                            shell.input = preserved_input;
-                            shell.status = err.to_string();
-                            shell.transcript.push(UiLine {
-                                role: "error".to_string(),
-                                content: err.to_string(),
-                            });
-                        }
-                    }
-                }
+                Ok(event) => handle_async_ui_event(event, &mut pending_submission, app, shell),
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => {
                     pending_submission = None;
@@ -677,7 +720,7 @@ fn handle_pending_local_command(shell: &mut TuiShellState) -> Result<bool, Obero
 }
 
 fn start_async_submit(
-    app: &DaemonBackedTuiApp,
+    app: &mut DaemonBackedTuiApp,
     shell: &mut TuiShellState,
 ) -> Result<Option<PendingSubmission>, OberonError> {
     let trimmed = shell.input.trim().to_string();
@@ -687,40 +730,68 @@ fn start_async_submit(
         return Ok(None);
     }
 
-    let mut app_clone = app.clone();
-    let mut shell_clone = shell.clone();
-    shell_clone.input = std::mem::take(&mut shell.input);
+    if trimmed.starts_with('/') {
+        shell.submit(app)?;
+        return Ok(None);
+    }
+
+    let app_clone = app.clone();
+    let prompt = trimmed.clone();
+    shell.input.clear();
     let timeout = app
         .load_config()
-        .map(|config| Duration::from_millis(config.runtime.request_timeout_ms))
+        .map(|config| Duration::from_millis(config.runtime.stream_idle_timeout_ms))
         .unwrap_or_else(|_| Duration::from_secs(30));
-    shell.status = if trimmed.starts_with('/') {
-        format!("running command: {trimmed}")
-    } else {
-        shell.transcript.push(UiLine {
-            role: "user".to_string(),
-            content: trimmed.clone(),
-        });
-        shell.transcript.push(UiLine {
-            role: "status".to_string(),
-            content: "waiting on provider response...".to_string(),
-        });
-        "waiting on provider response...".to_string()
-    };
+    shell.transcript.push(UiLine {
+        role: "user".to_string(),
+        content: trimmed,
+    });
+    shell.transcript.push(UiLine {
+        role: "status".to_string(),
+        content: "waiting on provider response...".to_string(),
+    });
+    shell.transcript.push(UiLine {
+        role: "assistant".to_string(),
+        content: "...".to_string(),
+    });
+    let assistant_line_index = shell.transcript.len() - 1;
+    shell.status = "waiting on provider response...".to_string();
 
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
-        let result = match shell_clone.submit(&mut app_clone) {
-            Ok(()) => Ok((app_clone, shell_clone)),
-            Err(err) => Err((shell_clone, err)),
+        let stream_sender = sender.clone();
+        let result = app_clone.stream_prompt_events(&prompt, &mut |event| {
+            let mapped = match event {
+                oberon4_core::DaemonEvent::ChatChunk { content } => {
+                    AsyncUiEvent::TextDelta(content)
+                }
+                oberon4_core::DaemonEvent::ToolCallDelta { delta } => {
+                    AsyncUiEvent::ToolCallDelta(delta)
+                }
+                other => {
+                    return Err(OberonError::Storage(format!(
+                        "unexpected daemon stream event: {other:?}"
+                    )));
+                }
+            };
+            stream_sender
+                .send(mapped)
+                .map_err(|_| OberonError::Storage("tui stream channel closed".to_string()))
+        });
+
+        let _ = match result {
+            Ok(message) => sender.send(AsyncUiEvent::Complete { prompt, message }),
+            Err(err) => sender.send(AsyncUiEvent::Failed(err)),
         };
-        let _ = sender.send(result);
     });
 
     Ok(Some(PendingSubmission {
         receiver,
         started_at: Instant::now(),
         timeout,
+        assistant_line_index,
+        tool_line_indices: BTreeMap::new(),
+        tool_state: BTreeMap::new(),
     }))
 }
 
@@ -737,19 +808,139 @@ fn handle_pending_timeout(
 ) {
     let should_timeout = pending_submission
         .as_ref()
-        .map(|pending| pending.started_at.elapsed() > pending.timeout.saturating_add(Duration::from_millis(500)))
+        .map(|pending| {
+            pending.started_at.elapsed()
+                > pending.timeout.saturating_add(Duration::from_millis(500))
+        })
         .unwrap_or(false);
 
     if !should_timeout {
         return;
     }
 
-    *pending_submission = None;
+    if let Some(pending) = pending_submission.take() {
+        if let Some(line) = shell.transcript.get_mut(pending.assistant_line_index) {
+            if line.content == "..." || line.content.is_empty() {
+                line.role = "error".to_string();
+                line.content = "request timed out".to_string();
+            }
+        }
+    }
     shell.status = "request timed out".to_string();
-    shell.transcript.push(UiLine {
-        role: "error".to_string(),
-        content: "request timed out".to_string(),
-    });
+}
+
+fn handle_async_ui_event(
+    event: AsyncUiEvent,
+    pending_submission: &mut Option<PendingSubmission>,
+    app: &mut DaemonBackedTuiApp,
+    shell: &mut TuiShellState,
+) {
+    match event {
+        AsyncUiEvent::TextDelta(content) => {
+            if let Some(pending) = pending_submission.as_mut() {
+                if let Some(line) = shell.transcript.get_mut(pending.assistant_line_index) {
+                    if line.content == "..." {
+                        line.content.clear();
+                    }
+                    line.content.push_str(&content);
+                    shell.status = "streaming response...".to_string();
+                }
+            }
+        }
+        AsyncUiEvent::ToolCallDelta(delta) => {
+            if let Some(pending) = pending_submission.as_mut() {
+                let line_index = if let Some(index) = pending.tool_line_indices.get(&delta.index) {
+                    *index
+                } else {
+                    shell.transcript.push(UiLine {
+                        role: "tool".to_string(),
+                        content: String::new(),
+                    });
+                    let index = shell.transcript.len() - 1;
+                    pending.tool_line_indices.insert(delta.index, index);
+                    index
+                };
+                let content = merge_tool_ui_delta(&mut pending.tool_state, delta);
+                if let Some(line) = shell.transcript.get_mut(line_index) {
+                    line.content = content;
+                }
+            }
+        }
+        AsyncUiEvent::Complete { prompt, message } => {
+            let pending = pending_submission.take();
+            if let Some(pending) = pending {
+                finalize_streamed_assistant(shell, &pending, &message);
+            }
+            app.apply_successful_prompt(&prompt, message.clone());
+            shell.status = if message.content.is_empty() {
+                "stream complete".to_string()
+            } else {
+                message.content.clone()
+            };
+        }
+        AsyncUiEvent::Failed(err) => {
+            if let Some(pending) = pending_submission.take() {
+                if let Some(line) = shell.transcript.get_mut(pending.assistant_line_index) {
+                    line.role = "error".to_string();
+                    line.content = err.to_string();
+                } else {
+                    shell.transcript.push(UiLine {
+                        role: "error".to_string(),
+                        content: err.to_string(),
+                    });
+                }
+            }
+            shell.status = err.to_string();
+        }
+    }
+}
+
+fn merge_tool_ui_delta(
+    tool_state: &mut BTreeMap<usize, (String, String)>,
+    delta: ChatToolCallDelta,
+) -> String {
+    let entry = tool_state.entry(delta.index).or_default();
+    if let Some(name) = delta.name_fragment.as_deref() {
+        entry.0.push_str(name);
+    }
+    if let Some(arguments) = delta.arguments_fragment.as_deref() {
+        entry.1.push_str(arguments);
+    }
+    let name = if entry.0.is_empty() {
+        format!("tool_{}", delta.index)
+    } else {
+        entry.0.clone()
+    };
+    format!("{name} {}", entry.1)
+}
+
+fn finalize_streamed_assistant(
+    shell: &mut TuiShellState,
+    pending: &PendingSubmission,
+    message: &ChatMessage,
+) {
+    if let Some(line) = shell.transcript.get_mut(pending.assistant_line_index) {
+        let streamed = line.content.trim();
+        let final_content = message.content.trim();
+        if final_content.is_empty() && streamed.is_empty() {
+            line.content.clear();
+        } else if final_content.is_empty() {
+            line.content = streamed.to_string();
+        } else if streamed.is_empty() || streamed == "..." || final_content.len() >= streamed.len()
+        {
+            line.content = final_content.to_string();
+        } else {
+            line.content = streamed.to_string();
+        }
+    }
+
+    for (index, tool_call) in message.tool_calls.iter().enumerate() {
+        if let Some(line_index) = pending.tool_line_indices.get(&index).copied() {
+            if let Some(line) = shell.transcript.get_mut(line_index) {
+                line.content = format!("{} {}", tool_call.name, tool_call.arguments);
+            }
+        }
+    }
 }
 
 fn render_terminal(frame: &mut Frame, shell: &TuiShellState) {
@@ -946,7 +1137,10 @@ fn resolve_daemon_launch_target() -> Result<BinaryLaunchTarget, OberonError> {
     })
 }
 
-fn resolve_binary_launch_target(current_exe: &Path, binary_name: &str) -> Option<BinaryLaunchTarget> {
+fn resolve_binary_launch_target(
+    current_exe: &Path,
+    binary_name: &str,
+) -> Option<BinaryLaunchTarget> {
     for candidate in binary_path_candidates(current_exe, binary_name) {
         if candidate.exists() {
             return Some(BinaryLaunchTarget::Direct(candidate));
@@ -994,7 +1188,7 @@ fn role_label(role: ChatRole) -> &'static str {
 }
 
 fn default_provider_client() -> OpenAiCompatibleClient<FakeTransport> {
-    OpenAiCompatibleClient::new(
+    let mut client = OpenAiCompatibleClient::new(
         "https://api.openai.com",
         None,
         RetryPolicy {
@@ -1006,7 +1200,9 @@ fn default_provider_client() -> OpenAiCompatibleClient<FakeTransport> {
             Ok(ok_response("second reply")),
             Ok(ok_response("third reply")),
         ]),
-    )
+    );
+    client.set_streaming_config(false, 30_000);
+    client
 }
 
 fn ok_response(content: &str) -> String {
@@ -1015,13 +1211,18 @@ fn ok_response(content: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{thread, time::{Duration, Instant}};
     use std::sync::mpsc;
+    use std::{
+        collections::BTreeMap,
+        thread,
+        time::{Duration, Instant},
+    };
 
     use super::{
-        BinaryLaunchTarget, DaemonBackedTuiApp, PendingSubmission, TuiApp, TuiCommand,
-        TuiShellState, handle_pending_local_command, handle_pending_timeout, parse_tui_command,
-        resolve_binary_launch_target, start_async_submit, status_line,
+        AsyncUiEvent, BinaryLaunchTarget, DaemonBackedTuiApp, PendingSubmission, TuiApp,
+        TuiCommand, TuiShellState, UiLine, handle_async_ui_event, handle_pending_local_command,
+        handle_pending_timeout, parse_tui_command, resolve_binary_launch_target,
+        start_async_submit, status_line,
     };
     use oberon4_auth::{AccountRegistry, InMemoryAccountMetadataStore};
     use oberon4_core::{
@@ -1281,7 +1482,7 @@ mod tests {
             shell.push_input_char(ch);
         }
 
-        let pending = start_async_submit(&app, &mut shell)
+        let pending = start_async_submit(&mut app, &mut shell)
             .unwrap()
             .expect("submission should start");
         assert_eq!(shell.input(), "");
@@ -1293,25 +1494,31 @@ mod tests {
             shell.transcript()[1].content,
             "waiting on provider response..."
         );
+        assert_eq!(shell.transcript()[2].role, "assistant");
+        assert_eq!(shell.transcript()[2].content, "...");
 
         shell.push_input_char('x');
 
-        let (updated_app, updated_shell) = pending
-            .receiver
-            .recv_timeout(Duration::from_secs(2))
-            .expect("worker should finish")
-            .expect("submission should succeed");
-
-        let preserved_input = std::mem::take(&mut shell.input);
-        app = updated_app;
-        shell = updated_shell;
-        shell.input = preserved_input;
+        let mut pending = Some(pending);
+        loop {
+            let event = pending
+                .as_ref()
+                .unwrap()
+                .receiver
+                .recv_timeout(Duration::from_secs(2))
+                .expect("worker should finish");
+            handle_async_ui_event(event, &mut pending, &mut app, &mut shell);
+            if pending.is_none() {
+                break;
+            }
+        }
 
         assert_eq!(shell.input(), "x");
         assert_eq!(shell.status(), "daemon reply");
         assert_eq!(app.transcript().len(), 2);
         assert_eq!(shell.transcript()[0].role, "user");
-        assert_eq!(shell.transcript()[1].role, "assistant");
+        assert_eq!(shell.transcript()[2].role, "assistant");
+        assert_eq!(shell.transcript()[2].content, "daemon reply");
 
         let client = DaemonIpcClient::new(&socket_path);
         let _ = client.send(&oberon4_core::DaemonCommand::Shutdown).unwrap();
@@ -1353,7 +1560,8 @@ mod tests {
             shell.push_input_char(ch);
         }
 
-        let pending = start_async_submit(&app, &mut shell)
+        let mut app = app;
+        let pending = start_async_submit(&mut app, &mut shell)
             .unwrap()
             .expect("submission should start");
         let result = pending
@@ -1362,16 +1570,14 @@ mod tests {
             .expect("worker should finish");
 
         match result {
-            Ok((_app, shell)) => {
-                assert_eq!(shell.transcript()[0].role, "user");
-                assert_eq!(shell.transcript()[0].content, "hello");
-            }
-            Err((shell, err)) => {
-                assert_eq!(shell.transcript()[0].role, "user");
-                assert_eq!(shell.transcript()[0].content, "hello");
+            AsyncUiEvent::Failed(err) => {
                 assert!(!err.to_string().is_empty());
             }
+            other => panic!("expected failure event, got {other:?}"),
         }
+
+        assert_eq!(shell.transcript()[0].role, "user");
+        assert_eq!(shell.transcript()[0].content, "hello");
 
         unsafe {
             std::env::remove_var("OBERON4_DAEMON_BIN");
@@ -1385,8 +1591,15 @@ mod tests {
             receiver,
             started_at: Instant::now() - Duration::from_secs(2),
             timeout: Duration::from_millis(10),
+            assistant_line_index: 0,
+            tool_line_indices: BTreeMap::new(),
+            tool_state: BTreeMap::new(),
         });
         let mut shell = TuiShellState::default();
+        shell.transcript.push(UiLine {
+            role: "assistant".to_string(),
+            content: "...".to_string(),
+        });
 
         handle_pending_timeout(&mut pending, &mut shell);
 
@@ -1397,10 +1610,8 @@ mod tests {
 
     #[test]
     fn resolves_workspace_cargo_fallback_when_daemon_binary_is_missing() {
-        let root = std::env::temp_dir().join(format!(
-            "oberon4-tui-launcher-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("oberon4-tui-launcher-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("target/debug")).unwrap();
         std::fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();

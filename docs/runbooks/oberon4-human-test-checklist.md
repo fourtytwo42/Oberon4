@@ -15,14 +15,12 @@ Use this checklist only after automated gates through `EG-P8` are green.
 - `RUSTFLAGS='-C debuginfo=0'`
 
 ## Automated Preconditions
-- [ ] `cargo fmt --all -- --check`
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings`
-- [ ] `cargo test --workspace`
-- [ ] `cargo test -p oberon4-cli --test end_to_end`
+- [ ] `GATE_MODE=strict bash scripts/oberon4-gate.sh`
+  - if this fails, inspect `artifacts/failures/<timestamp>-oberon4-gate-<pid>/`
 
 ## Optional Live Endpoint Preconditions
-- [ ] `OBERON4_LIVE_BASE_URL=<base> scripts/live-hotspot-smoke.sh`
-- [ ] `OBERON4_LIVE_BASE_URL=<base> scripts/live-daemon-smoke.sh`
+- [ ] `bash scripts/live-local-smoke.sh`
+  - if this fails, inspect `artifacts/failures/<timestamp>-live-local-smoke-<pid>/`
 
 ## Manual Smoke Flow
 ### CLI
@@ -40,8 +38,8 @@ Use this checklist only after automated gates through `EG-P8` are green.
   - expect JSON log line with `request_id`
 - [ ] `cargo run -p oberon4-cli -- doctor`
   - expect success once daemon is running
-- [ ] optional live smoke: `OBERON4_LIVE_BASE_URL=<base> scripts/live-daemon-smoke.sh`
-  - expect daemon-backed `endpoint test` and `chat --message` to succeed against the live endpoint
+- [ ] optional live smoke: `bash scripts/live-local-smoke.sh`
+  - expect provider live smoke, daemon-backed smoke, and `doctor --json` to pass against the local LLM Hotspot
 
 ### Accounts
 - [ ] `cargo run -p oberon4-cli -- account connect --provider openai`
@@ -74,3 +72,4 @@ Use this checklist only after automated gates through `EG-P8` are green.
 - [ ] no panic or unclassified error observed
 - [ ] no secret/token values printed
 - [ ] any defects discovered are recorded before release
+- [ ] any failed automated precondition has an associated bundle in `artifacts/failures/` for follow-up diagnosis

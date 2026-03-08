@@ -2,13 +2,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::OberonError;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct AppConfig {
     pub endpoint: EndpointConfig,
     pub runtime: RuntimeConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct EndpointConfig {
     pub base_url: String,
     pub model: String,
@@ -16,10 +18,13 @@ pub struct EndpointConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RuntimeConfig {
     pub request_timeout_ms: u64,
+    pub stream_idle_timeout_ms: u64,
     pub max_retries: u8,
     pub log_level: String,
+    pub stream_responses: bool,
 }
 
 impl AppConfig {
@@ -32,19 +37,24 @@ impl AppConfig {
     }
 }
 
-impl Default for AppConfig {
+impl Default for EndpointConfig {
     fn default() -> Self {
         Self {
-            endpoint: EndpointConfig {
-                base_url: "https://api.openai.com".to_string(),
-                model: "gpt-4.1-mini".to_string(),
-                api_key_env: Some("OPENAI_API_KEY".to_string()),
-            },
-            runtime: RuntimeConfig {
-                request_timeout_ms: 30_000,
-                max_retries: 2,
-                log_level: "info".to_string(),
-            },
+            base_url: "https://api.openai.com".to_string(),
+            model: "gpt-4.1-mini".to_string(),
+            api_key_env: Some("OPENAI_API_KEY".to_string()),
+        }
+    }
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            request_timeout_ms: 30_000,
+            stream_idle_timeout_ms: 30_000,
+            max_retries: 2,
+            log_level: "info".to_string(),
+            stream_responses: true,
         }
     }
 }
@@ -65,5 +75,29 @@ mod tests {
     fn invalid_toml_returns_parse_error() {
         let err = AppConfig::from_toml("endpoint = [").expect_err("invalid TOML should fail");
         assert!(matches!(err, crate::error::OberonError::ConfigParse(_)));
+    }
+
+    #[test]
+    fn missing_runtime_fields_fall_back_to_defaults() {
+        let decoded = AppConfig::from_toml(
+            r#"
+[endpoint]
+base_url = "http://gateway.example.test"
+model = "gpt-5.1-codex-mini"
+api_key_env = "OPENAI_API_KEY"
+
+[runtime]
+request_timeout_ms = 8000
+max_retries = 0
+log_level = "info"
+stream_responses = true
+"#,
+        )
+        .expect("config with legacy runtime fields should parse");
+
+        assert_eq!(decoded.runtime.request_timeout_ms, 8000);
+        assert_eq!(decoded.runtime.stream_idle_timeout_ms, 30_000);
+        assert_eq!(decoded.runtime.max_retries, 0);
+        assert!(decoded.runtime.stream_responses);
     }
 }

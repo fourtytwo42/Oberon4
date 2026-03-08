@@ -42,10 +42,12 @@ fn live_hotspot_openai_chat_completions_round_trip() {
                 ChatMessage {
                     role: ChatRole::System,
                     content: "Reply in under six words.".to_string(),
+                    tool_calls: Vec::new(),
                 },
                 ChatMessage {
                     role: ChatRole::User,
                     content: "Say live endpoint ok".to_string(),
+                    tool_calls: Vec::new(),
                 },
             ],
         )

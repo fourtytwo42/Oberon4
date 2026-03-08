@@ -9,10 +9,11 @@ Status: active
 - [ ] `docs/plans/plan-oberon4-v0.1-build.md` has all tasks checked
 
 ## Verification Evidence
-- [ ] `cargo fmt --all -- --check`
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings`
-- [ ] `cargo test --workspace`
-- [ ] `cargo test -p oberon4-cli --test end_to_end`
+- [ ] `GATE_MODE=strict bash scripts/oberon4-gate.sh`
+- [ ] local real-endpoint wrapper: `bash scripts/live-local-smoke.sh`
+- [ ] optional live endpoint coverage: `OBERON4_LIVE_BASE_URL=<base> RUN_LIVE_ENDPOINT_SMOKE=1 GATE_MODE=smoke bash scripts/oberon4-gate.sh`
+- [ ] optional live daemon coverage: `OBERON4_LIVE_BASE_URL=<base> RUN_LIVE_DAEMON_SMOKE=1 GATE_MODE=smoke bash scripts/oberon4-gate.sh`
+- [ ] any failed gate/live verification preserved its troubleshooting bundle under `artifacts/failures/`
 
 ## Requirement Readiness
 - [ ] `FR-001` daemon runtime verified
@@ -24,6 +25,11 @@ Status: active
 - [ ] `FR-007` OpenAI and Anthropic OAuth flows verified
 - [ ] `FR-008` CLI surface verified
 - [ ] `FR-009` TUI surface verified
+
+## Diagnostic Readiness
+- [ ] `oberon4 doctor` returns success text on healthy configuration
+- [ ] `oberon4 doctor --json` returns valid JSON with no secret/token values
+- [ ] responders know to inspect `artifacts/failures/<timestamp>-<entrypoint>-<pid>/` for `summary.json`, `commands.txt`, `env.txt`, logs, and doctor output before retrying
 
 ## Human Test Entry
 - [ ] `docs/runbooks/oberon4-human-test-checklist.md` exists

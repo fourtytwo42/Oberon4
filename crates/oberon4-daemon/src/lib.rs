@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::{Read, Write},
+    io::{BufRead, BufReader, Read, Write},
     os::unix::net::{UnixListener, UnixStream},
     path::{Path, PathBuf},
 };
@@ -9,10 +9,10 @@ use serde::{Deserialize, Serialize};
 
 use oberon4_auth::{AccountMetadataStore, AccountRegistry, FileAccountMetadataStore, TokenBundle};
 use oberon4_core::{
-    AppConfig, ChatProvider, ChatProviderKind, ConfigStore, DaemonCommand, DaemonEvent,
-    DaemonStatus, FileConfigStore, FileSecretStore, FileSessionStore, InMemoryConfigStore,
-    InMemorySessionStore, OAuthProvider, OAuthProviderKind, OberonError, RequestId, SecretStore,
-    ServiceEnvelope, SessionStore,
+    AppConfig, ChatProvider, ChatProviderKind, ChatStreamEvent, ConfigStore, DaemonCommand,
+    DaemonEvent, DaemonStatus, FileConfigStore, FileSecretStore, FileSessionStore,
+    InMemoryConfigStore, InMemorySessionStore, OAuthProvider, OAuthProviderKind, OberonError,
+    RequestId, SecretStore, ServiceEnvelope, SessionStore,
 };
 
 pub fn daemon_status(config: &AppConfig) -> ServiceEnvelope<String> {
@@ -173,18 +173,23 @@ impl Default
         let config = AppConfig::default();
         let account_store = FileAccountMetadataStore::default();
         let accounts = account_store.load_registry().unwrap_or_default();
+        let mut client = oberon4_provider_openai::OpenAiCompatibleClient::new(
+            config.endpoint.base_url.clone(),
+            config.endpoint.api_key_env.clone(),
+            oberon4_provider_openai::RetryPolicy::from_config(&config),
+            oberon4_provider_openai::ReqwestTransport,
+        );
+        client.set_streaming_config(
+            config.runtime.stream_responses,
+            config.runtime.stream_idle_timeout_ms,
+        );
         Self::new(
             DaemonRuntime {
                 config_store: FileConfigStore::default(),
                 session_store: FileSessionStore::default(),
                 lifecycle: LifecycleState::Stopped,
             },
-            oberon4_provider_openai::OpenAiCompatibleClient::new(
-                config.endpoint.base_url.clone(),
-                config.endpoint.api_key_env.clone(),
-                oberon4_provider_openai::RetryPolicy::from_config(&config),
-                oberon4_provider_openai::ReqwestTransport,
-            ),
+            client,
             oberon4_auth::OpenAiOAuthAdapter::default(),
             oberon4_auth::AnthropicOAuthAdapter::default(),
             accounts,
@@ -301,24 +306,9 @@ where
                     should_shutdown: true,
                 })
             }
-            DaemonCommand::SendChat { messages, .. } => {
-                if self.runtime.lifecycle_state() != LifecycleState::Running {
-                    return Err(OberonError::Validation(
-                        "daemon must be running before chat requests".to_string(),
-                    ));
-                }
-                let config = self.runtime.load_config()?;
-                self.materialize_api_key_env(&config)?;
-                let reply = self.chat_provider.send_message(
-                    &config.endpoint.base_url,
-                    &config.endpoint.model,
-                    &messages,
-                )?;
-                Ok(CommandOutcome {
-                    event: DaemonEvent::ChatComplete { message: reply },
-                    should_shutdown: false,
-                })
-            }
+            DaemonCommand::SendChat { .. } => Err(OberonError::Validation(
+                "SendChat must be handled through the streaming IPC path".to_string(),
+            )),
             DaemonCommand::EndpointHealth => {
                 if self.runtime.lifecycle_state() != LifecycleState::Running {
                     return Err(OberonError::Validation(
@@ -460,6 +450,35 @@ where
     fn persist_accounts(&mut self) -> Result<(), OberonError> {
         self.account_store.save_registry(&self.accounts)
     }
+
+    fn handle_chat_stream(
+        &mut self,
+        messages: Vec<oberon4_core::ChatMessage>,
+        on_event: &mut dyn FnMut(DaemonEvent) -> Result<(), OberonError>,
+    ) -> Result<(), OberonError> {
+        if self.runtime.lifecycle_state() != LifecycleState::Running {
+            return Err(OberonError::Validation(
+                "daemon must be running before chat requests".to_string(),
+            ));
+        }
+
+        let config = self.runtime.load_config()?;
+        self.materialize_api_key_env(&config)?;
+        let reply = self.chat_provider.stream_message(
+            &config.endpoint.base_url,
+            &config.endpoint.model,
+            &messages,
+            &mut |event| match event {
+                ChatStreamEvent::TextDelta { content } => {
+                    on_event(DaemonEvent::ChatChunk { content })
+                }
+                ChatStreamEvent::ToolCallDelta(delta) => {
+                    on_event(DaemonEvent::ToolCallDelta { delta })
+                }
+            },
+        )?;
+        on_event(DaemonEvent::ChatComplete { message: reply })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -479,6 +498,27 @@ impl DaemonIpcClient {
     }
 
     pub fn send(&self, command: &DaemonCommand) -> Result<DaemonEvent, OberonError> {
+        let mut events = Vec::new();
+        self.send_stream(command, &mut |event| {
+            events.push(event);
+            Ok(())
+        })?;
+        match events.as_slice() {
+            [event] => Ok(event.clone()),
+            [] => Err(OberonError::Storage(
+                "daemon stream closed without any response events".to_string(),
+            )),
+            _ => Err(OberonError::Storage(
+                "daemon returned multiple events for unary request".to_string(),
+            )),
+        }
+    }
+
+    pub fn send_stream(
+        &self,
+        command: &DaemonCommand,
+        on_event: &mut dyn FnMut(DaemonEvent) -> Result<(), OberonError>,
+    ) -> Result<(), OberonError> {
         let mut stream = UnixStream::connect(&self.socket_path).map_err(|err| {
             OberonError::Storage(format!(
                 "daemon socket connect failed ({}): {err}",
@@ -492,13 +532,24 @@ impl DaemonIpcClient {
             .map_err(|err| OberonError::Storage(format!("ipc request write failed: {err}")))?;
         let _ = stream.shutdown(std::net::Shutdown::Write);
 
-        let mut response = Vec::new();
-        stream
-            .read_to_end(&mut response)
-            .map_err(|err| OberonError::Storage(format!("ipc response read failed: {err}")))?;
-
-        serde_json::from_slice(&response)
-            .map_err(|err| OberonError::Validation(format!("invalid ipc response payload: {err}")))
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let bytes = reader
+                .read_line(&mut line)
+                .map_err(|err| OberonError::Storage(format!("ipc response read failed: {err}")))?;
+            if bytes == 0 {
+                return Ok(());
+            }
+            if line.trim().is_empty() {
+                continue;
+            }
+            let event: DaemonEvent = serde_json::from_str(line.trim_end()).map_err(|err| {
+                OberonError::Validation(format!("invalid ipc response payload: {err}"))
+            })?;
+            on_event(event)?;
+        }
     }
 }
 
@@ -567,30 +618,51 @@ where
         .read_to_end(&mut input)
         .map_err(|err| OberonError::Storage(format!("ipc request read failed: {err}")))?;
 
-    let response = match serde_json::from_slice::<DaemonCommand>(&input) {
-        Ok(command) => match app.handle_command(command) {
-            Ok(outcome) => (outcome.event, outcome.should_shutdown),
-            Err(err) => (
-                DaemonEvent::Error {
-                    message: err.to_string(),
+    match serde_json::from_slice::<DaemonCommand>(&input) {
+        Ok(DaemonCommand::SendChat { messages, .. }) => {
+            let result = app.handle_chat_stream(messages, &mut |event| write_event(stream, &event));
+            if let Err(err) = result {
+                write_event(
+                    stream,
+                    &DaemonEvent::Error {
+                        message: err.to_string(),
+                    },
+                )?;
+            }
+            Ok(false)
+        }
+        Ok(command) => {
+            let response = match app.handle_command(command) {
+                Ok(outcome) => (outcome.event, outcome.should_shutdown),
+                Err(err) => (
+                    DaemonEvent::Error {
+                        message: err.to_string(),
+                    },
+                    false,
+                ),
+            };
+            write_event(stream, &response.0)?;
+            Ok(response.1)
+        }
+        Err(err) => {
+            write_event(
+                stream,
+                &DaemonEvent::Error {
+                    message: format!("validation failed: invalid IPC command payload: {err}"),
                 },
-                false,
-            ),
-        },
-        Err(err) => (
-            DaemonEvent::Error {
-                message: format!("validation failed: invalid IPC command payload: {err}"),
-            },
-            false,
-        ),
-    };
+            )?;
+            Ok(false)
+        }
+    }
+}
 
-    let encoded = serde_json::to_vec(&response.0)
+fn write_event(stream: &mut UnixStream, event: &DaemonEvent) -> Result<(), OberonError> {
+    let encoded = serde_json::to_vec(event)
         .map_err(|err| OberonError::Storage(format!("ipc response encode failed: {err}")))?;
     stream
         .write_all(&encoded)
-        .map_err(|err| OberonError::Storage(format!("ipc response write failed: {err}")))?;
-    Ok(response.1)
+        .and_then(|_| stream.write_all(b"\n"))
+        .map_err(|err| OberonError::Storage(format!("ipc response write failed: {err}")))
 }
 
 fn provider_name(provider: OAuthProviderKind) -> &'static str {
@@ -713,20 +785,21 @@ mod tests {
             other => panic!("unexpected event: {other:?}"),
         }
 
-        let chat = app
-            .handle_command(DaemonCommand::SendChat {
-                session_id: None,
-                messages: vec![ChatMessage {
-                    role: ChatRole::User,
-                    content: "hello".to_string(),
-                }],
-            })
-            .unwrap()
-            .event;
-        match chat {
-            DaemonEvent::ChatComplete { message } => {
-                assert_eq!(message.role, ChatRole::Assistant);
-            }
+        let mut events = Vec::new();
+        app.handle_chat_stream(
+            vec![ChatMessage {
+                role: ChatRole::User,
+                content: "hello".to_string(),
+                tool_calls: Vec::new(),
+            }],
+            &mut |event| {
+                events.push(event);
+                Ok(())
+            },
+        )
+        .unwrap();
+        match events.last().unwrap() {
+            DaemonEvent::ChatComplete { message } => assert_eq!(message.role, ChatRole::Assistant),
             other => panic!("unexpected event: {other:?}"),
         }
 
@@ -769,13 +842,14 @@ mod tests {
             InMemoryAccountMetadataStore::default(),
         );
         let err = app
-            .handle_command(DaemonCommand::SendChat {
-                session_id: None,
-                messages: vec![ChatMessage {
+            .handle_chat_stream(
+                vec![ChatMessage {
                     role: ChatRole::User,
                     content: "hello".to_string(),
+                    tool_calls: Vec::new(),
                 }],
-            })
+                &mut |_| Ok(()),
+            )
             .expect_err("chat should fail when daemon is stopped");
 
         assert_eq!(
@@ -848,6 +922,7 @@ mod tests {
             messages: vec![ChatMessage {
                 role: ChatRole::Assistant,
                 content: "hi".to_string(),
+                tool_calls: Vec::new(),
             }],
         };
 
@@ -937,9 +1012,12 @@ mod tests {
             .set_secret("env.OPENAI_API_KEY", "hs_test_key")
             .unwrap();
 
-        let transport = FakeTransport::new(vec![Ok(
-            r#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#.to_string(),
-        )]);
+        let transport = FakeTransport::new(vec![Ok(concat!(
+            "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
+            "data: [DONE]\n\n"
+        )
+        .to_string())]);
         let provider = OpenAiCompatibleClient::new(
             "http://gateway.example.test",
             Some("OPENAI_API_KEY".to_string()),
@@ -971,30 +1049,38 @@ mod tests {
                     },
                     runtime: oberon4_core::RuntimeConfig {
                         request_timeout_ms: 5_000,
+                        stream_idle_timeout_ms: 5_000,
                         max_retries: 0,
                         log_level: "info".to_string(),
+                        stream_responses: true,
                     },
                 },
             })
             .unwrap();
 
-        let event = app
-            .handle_command(DaemonCommand::SendChat {
-                session_id: None,
-                messages: vec![ChatMessage {
-                    role: ChatRole::User,
-                    content: "hello".to_string(),
-                }],
-            })
-            .unwrap()
-            .event;
+        let mut events = Vec::new();
+        app.handle_chat_stream(
+            vec![ChatMessage {
+                role: ChatRole::User,
+                content: "hello".to_string(),
+                tool_calls: Vec::new(),
+            }],
+            &mut |event| {
+                events.push(event);
+                Ok(())
+            },
+        )
+        .unwrap();
 
-        match event {
+        match events.last().unwrap() {
             DaemonEvent::ChatComplete { message } => assert_eq!(message.content, "ok"),
             other => panic!("unexpected event: {other:?}"),
         }
 
-        assert_eq!(std::env::var("OPENAI_API_KEY").ok().as_deref(), Some("hs_test_key"));
+        assert_eq!(
+            std::env::var("OPENAI_API_KEY").ok().as_deref(),
+            Some("hs_test_key")
+        );
         unsafe {
             std::env::remove_var("OPENAI_API_KEY");
         }

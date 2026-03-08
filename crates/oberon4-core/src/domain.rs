@@ -45,6 +45,23 @@ impl SessionId {
 pub struct ChatMessage {
     pub role: ChatRole,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ChatToolCall>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatToolCallDelta {
+    pub index: usize,
+    pub id_fragment: Option<String>,
+    pub name_fragment: Option<String>,
+    pub arguments_fragment: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,8 +98,8 @@ pub struct DaemonStatus {
 #[cfg(test)]
 mod tests {
     use super::{
-        AccountState, ChatMessage, ChatProviderKind, ChatRole, DaemonStatus, OAuthProviderKind,
-        SavedSession, SessionId, SessionSummary, StoredAccount,
+        AccountState, ChatMessage, ChatProviderKind, ChatRole, ChatToolCall, DaemonStatus,
+        OAuthProviderKind, SavedSession, SessionId, SessionSummary, StoredAccount,
     };
 
     #[test]
@@ -103,6 +120,7 @@ mod tests {
             messages: vec![ChatMessage {
                 role: ChatRole::User,
                 content: "hello".to_string(),
+                tool_calls: Vec::new(),
             }],
         };
 
@@ -134,5 +152,21 @@ mod tests {
 
         assert_eq!(account.provider, OAuthProviderKind::Anthropic);
         assert_eq!(account.state, AccountState::Disabled);
+    }
+
+    #[test]
+    fn assistant_message_can_hold_tool_calls() {
+        let message = ChatMessage {
+            role: ChatRole::Assistant,
+            content: "Working on it".to_string(),
+            tool_calls: vec![ChatToolCall {
+                id: "call_1".to_string(),
+                name: "lookup".to_string(),
+                arguments: "{\"q\":\"hi\"}".to_string(),
+            }],
+        };
+
+        assert_eq!(message.tool_calls.len(), 1);
+        assert_eq!(message.tool_calls[0].name, "lookup");
     }
 }
