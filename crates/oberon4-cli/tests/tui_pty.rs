@@ -3,13 +3,18 @@ use std::{
     io::{Read, Write},
     net::TcpListener,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    process::Command,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 struct MockHotspotServer {
     base_url: String,
+    shutdown: Arc<AtomicBool>,
     shutdown_handle: Option<thread::JoinHandle<()>>,
 }
 
@@ -20,32 +25,38 @@ impl MockHotspotServer {
         listener
             .set_nonblocking(true)
             .expect("listener should be nonblocking");
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_signal = Arc::clone(&shutdown);
 
         let shutdown_handle = thread::spawn(move || {
-            let deadline = std::time::Instant::now() + Duration::from_secs(5);
             loop {
-                if std::time::Instant::now() > deadline {
+                if shutdown_signal.load(Ordering::Relaxed) {
                     break;
                 }
 
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        let mut request = String::new();
+                        let mut buffer = [0_u8; 4096];
+                        let bytes_read = stream.read(&mut buffer).expect("request should read");
+                        let request = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
+                        if request.is_empty() {
+                            continue;
+                        }
                         stream
-                            .read_to_string(&mut request)
-                            .expect("request should be readable");
+                            .flush()
+                            .expect("stream should stay healthy during request parsing");
 
-                        let (status_line, body) =
-                            if request.starts_with("GET /v1/version HTTP/1.1") {
-                                ("HTTP/1.1 200 OK", r#"{"version":"test","git_hash":"mock"}"#)
-                            } else if request.starts_with("POST /v1/chat/completions HTTP/1.1") {
-                                (
-                                    "HTTP/1.1 200 OK",
-                                    r#"{"id":"chatcmpl-test","object":"chat.completion","created":1,"model":"gpt-5.1-codex-mini","choices":[{"index":0,"message":{"role":"assistant","content":"pty smoke ok","tool_calls":[]},"finish_reason":"stop"}]}"#,
-                                )
-                            } else {
-                                ("HTTP/1.1 404 Not Found", r#"{"error":"not found"}"#)
-                            };
+                        let (status_line, body) = if request.starts_with("GET /v1/version HTTP/1.1")
+                        {
+                            ("HTTP/1.1 200 OK", r#"{"version":"test","git_hash":"mock"}"#)
+                        } else if request.starts_with("POST /v1/chat/completions HTTP/1.1") {
+                            (
+                                "HTTP/1.1 200 OK",
+                                r#"{"id":"chatcmpl-test","object":"chat.completion","created":1,"model":"gpt-5.1-codex-mini","choices":[{"index":0,"message":{"role":"assistant","content":"pty smoke ok","tool_calls":[]},"finish_reason":"stop"}]}"#,
+                            )
+                        } else {
+                            ("HTTP/1.1 404 Not Found", r#"{"error":"not found"}"#)
+                        };
 
                         let response = format!(
                             "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -66,6 +77,7 @@ impl MockHotspotServer {
 
         Self {
             base_url: format!("http://127.0.0.1:{}", address.port()),
+            shutdown,
             shutdown_handle: Some(shutdown_handle),
         }
     }
@@ -73,6 +85,8 @@ impl MockHotspotServer {
 
 impl Drop for MockHotspotServer {
     fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        let _ = std::net::TcpStream::connect(self.base_url.trim_start_matches("http://"));
         if let Some(handle) = self.shutdown_handle.take() {
             let _ = handle.join();
         }
@@ -107,6 +121,7 @@ impl PtyHarness {
         command.env("OBERON4_SOCKET_PATH", socket_path);
         command.env("OBERON4_DAEMON_BIN", debug_binary("oberon4-daemon"));
         command.env("OBERON4_TUI_BIN", debug_binary("oberon4-tui"));
+        command.env("OPENAI_API_KEY", "test-key");
 
         let child = pair.slave.spawn_command(command).expect("tui should spawn");
         drop(pair.slave);
@@ -211,6 +226,90 @@ fn debug_binary(name: &str) -> PathBuf {
     debug_dir.join(name)
 }
 
+#[derive(Debug)]
+struct CliRun {
+    stdout: String,
+    stderr: String,
+}
+
+fn run_cli(cli: &Path, daemon: &Path, data_dir: &Path, socket_path: &Path, args: &[&str]) -> CliRun {
+    let output = Command::new(cli)
+        .args(args)
+        .env("OBERON4_DAEMON_BIN", daemon)
+        .env("OBERON4_DATA_DIR", data_dir)
+        .env("OBERON4_SOCKET_PATH", socket_path)
+        .env("OPENAI_API_KEY", "test-key")
+        .output()
+        .expect("cli should execute");
+
+    assert!(
+        output.status.success(),
+        "cli failed for {:?}: stdout={} stderr={}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    CliRun {
+        stdout: String::from_utf8(output.stdout).expect("stdout must be utf-8"),
+        stderr: String::from_utf8(output.stderr).expect("stderr must be utf-8"),
+    }
+}
+
+fn configure_daemon(cli: &Path, daemon: &Path, data_dir: &Path, socket_path: &Path, base_url: &str) {
+    let start = run_cli(cli, daemon, data_dir, socket_path, &["daemon", "start"]);
+    assert!(start.stdout.contains("running=true"));
+
+    let set_base = run_cli(
+        cli,
+        daemon,
+        data_dir,
+        socket_path,
+        &["config", "set", "endpoint.base_url", base_url],
+    );
+    assert!(set_base.stdout.contains("set endpoint.base_url="));
+
+    let set_model = run_cli(
+        cli,
+        daemon,
+        data_dir,
+        socket_path,
+        &["config", "set", "endpoint.model", "gpt-5.1-codex-mini"],
+    );
+    assert!(set_model.stdout.contains("set endpoint.model="));
+
+    let set_timeout = run_cli(
+        cli,
+        daemon,
+        data_dir,
+        socket_path,
+        &["config", "set", "runtime.request_timeout_ms", "3000"],
+    );
+    assert!(set_timeout.stdout.contains("set runtime.request_timeout_ms=3000"));
+
+    let set_retries = run_cli(
+        cli,
+        daemon,
+        data_dir,
+        socket_path,
+        &["config", "set", "runtime.max_retries", "0"],
+    );
+    assert!(set_retries.stdout.contains("set runtime.max_retries=0"));
+
+    let disable_streaming = run_cli(
+        cli,
+        daemon,
+        data_dir,
+        socket_path,
+        &["config", "set", "runtime.stream_responses", "false"],
+    );
+    assert!(
+        disable_streaming
+            .stdout
+            .contains("set runtime.stream_responses=false")
+    );
+}
+
 #[test]
 fn tui_pty_initial_render_and_quit() {
     let mock_server = MockHotspotServer::start();
@@ -230,6 +329,55 @@ fn tui_pty_initial_render_and_quit() {
 
     harness.send_line("/quit");
     harness.wait_for_exit();
+
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+#[test]
+fn tui_pty_command_and_prompt_flow() {
+    let mock_server = MockHotspotServer::start();
+    let cli = debug_binary("oberon4-cli");
+    let daemon = debug_binary("oberon4-daemon");
+    let data_dir = temp_dir("flow-data");
+    std::fs::create_dir_all(&data_dir).expect("data dir should exist");
+    let socket_path = data_dir.join("daemon.sock");
+
+    configure_daemon(&cli, &daemon, &data_dir, &socket_path, &mock_server.base_url);
+
+    let mut harness = PtyHarness::spawn(&cli, &data_dir, &socket_path);
+    harness.wait_for_text("Oberon4 TUI", Duration::from_secs(5));
+
+    harness.send_line("/help");
+    harness.wait_for_text("/help /quit /status", Duration::from_secs(5));
+
+    harness.send_line("/status");
+    harness.wait_for_text(
+        &format!(
+            "running=true endpoint={} model=gpt-5.1-codex-mini",
+            mock_server.base_url
+        ),
+        Duration::from_secs(5),
+    );
+
+    harness.send_line("say hello from pty");
+    harness.wait_for_text("waiting on provider response...", Duration::from_secs(5));
+    harness.wait_for_text("pty smoke ok", Duration::from_secs(5));
+
+    harness.send_line("/save smoke");
+    harness.wait_for_text("saved session smoke", Duration::from_secs(5));
+
+    harness.send_line("/clear");
+    harness.wait_for_text("transcript cleared", Duration::from_secs(5));
+
+    harness.send_line("/load smoke");
+    harness.wait_for_text("loaded session smoke", Duration::from_secs(5));
+    harness.wait_for_text("pty smoke ok", Duration::from_secs(5));
+
+    harness.send_line("/quit");
+    harness.wait_for_exit();
+
+    let stop = run_cli(&cli, &daemon, &data_dir, &socket_path, &["daemon", "stop"]);
+    assert!(stop.stdout.contains("running=false"), "stderr={}", stop.stderr);
 
     let _ = std::fs::remove_dir_all(&data_dir);
 }

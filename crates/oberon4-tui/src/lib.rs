@@ -26,7 +26,7 @@ use ratatui::{
     backend::CrosstermBackend,
     style::{Modifier, Style},
     text::{Line, Text},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -575,6 +575,9 @@ impl TuiShellState {
         self.should_quit = response.should_quit;
 
         if trimmed.starts_with('/') {
+            if trimmed == "/clear" {
+                self.transcript.clear();
+            }
             self.transcript.push(UiLine {
                 role: "system".to_string(),
                 content: format!("command: {trimmed}"),
@@ -979,7 +982,9 @@ fn render_terminal(frame: &mut Frame, shell: &TuiShellState) {
         .wrap(Wrap { trim: false });
 
     frame.render_widget(header_text, header);
+    frame.render_widget(Clear, body);
     frame.render_widget(transcript, body);
+    frame.render_widget(Clear, footer);
     frame.render_widget(input, footer);
     frame.set_cursor(
         footer.x.saturating_add(shell.input().len() as u16 + 1),
