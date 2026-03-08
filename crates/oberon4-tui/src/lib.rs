@@ -717,6 +717,17 @@ impl DaemonBackedTuiApp {
         }
     }
 
+    pub fn preview_session(&self, session_id: &str) -> Result<SavedSession, OberonError> {
+        match self
+            .client
+            .send(&oberon4_core::DaemonCommand::LoadSession {
+                session_id: session_id.to_string(),
+            })? {
+            oberon4_core::DaemonEvent::SessionLoaded { session } => Ok(session),
+            event => Err(protocol_error_inner(event)),
+        }
+    }
+
     pub fn list_accounts(&self) -> Result<Vec<StoredAccount>, OberonError> {
         match self
             .client
@@ -935,6 +946,16 @@ impl DaemonBackedTuiApp {
 }
 
 impl TuiShellState {
+    fn ui_lines_from_messages(messages: &[ChatMessage]) -> Vec<UiLine> {
+        messages
+            .iter()
+            .map(|message| UiLine {
+                role: role_label(message.role).to_string(),
+                content: message.content.clone(),
+            })
+            .collect()
+    }
+
     pub fn input(&self) -> &str {
         &self.input
     }
@@ -1419,6 +1440,45 @@ impl TuiShellState {
         }
     }
 
+    fn restore_active_chat_preview(&mut self, app: &DaemonBackedTuiApp) {
+        self.transcript = Self::ui_lines_from_messages(app.transcript());
+        self.scroll_transcript_to_bottom();
+    }
+
+    fn preview_selected_session(
+        &mut self,
+        app: &DaemonBackedTuiApp,
+    ) -> Result<(), OberonError> {
+        let Some(item) = self.session_sidebar_items().get(self.session_index).copied() else {
+            return Ok(());
+        };
+
+        match item {
+            SessionSidebarItem::CurrentChat => {
+                self.restore_active_chat_preview(app);
+                self.set_activity(ActivityState::Idle, "previewing current chat");
+            }
+            SessionSidebarItem::Saved(index) => {
+                let Some(session) = self.sessions.get(index) else {
+                    return Ok(());
+                };
+                let session_id = session.id.as_str().to_string();
+                let session_title = session.title.clone();
+                let preview = app.preview_session(&session_id)?;
+                self.transcript = Self::ui_lines_from_messages(&preview.messages);
+                self.scroll_transcript_to_bottom();
+                self.set_activity(ActivityState::Idle, format!("previewing {}", session_title));
+            }
+            SessionSidebarItem::NewSession => {
+                self.transcript.clear();
+                self.scroll_transcript_to_bottom();
+                self.set_activity(ActivityState::Idle, "previewing new session");
+            }
+        }
+
+        Ok(())
+    }
+
     fn autosave_current_session(
         &mut self,
         app: &mut DaemonBackedTuiApp,
@@ -1688,6 +1748,7 @@ impl TuiShellState {
                 {
                     match item {
                         SessionSidebarItem::CurrentChat => {
+                            self.restore_active_chat_preview(app);
                             self.set_workspace(Workspace::Chat);
                             self.focus = FocusTarget::Composer;
                             self.scroll_transcript_to_bottom();
@@ -1701,14 +1762,7 @@ impl TuiShellState {
                                     app.handle_command(TuiCommand::Load(name.clone()))?;
                                 self.set_activity(ActivityState::Idle, response.output);
                                 self.sync_loaded_session_from_id(&name);
-                                self.transcript = app
-                                    .transcript()
-                                    .iter()
-                                    .map(|message| UiLine {
-                                        role: role_label(message.role).to_string(),
-                                        content: message.content.clone(),
-                                    })
-                                    .collect();
+                                self.transcript = Self::ui_lines_from_messages(app.transcript());
                                 self.refresh_runtime_data(app);
                                 self.workspace = Workspace::Chat;
                                 self.screen_stack = vec![ScreenRoute::ChatRoot];
@@ -1801,6 +1855,7 @@ impl TuiShellState {
         } else if self.session_index >= item_count {
             self.session_index = item_count.saturating_sub(1);
         }
+        self.preview_selected_session(app)?;
         self.set_activity(ActivityState::Idle, format!("{message} ({session_title})"));
         Ok(true)
     }
@@ -2004,13 +2059,31 @@ fn run_inline_terminal_loop(
                 }
             }
             KeyCode::Char(ch) => {
-                if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && matches!(shell.focus, FocusTarget::List)
+                    && matches!(shell.workspace, Workspace::Chat)
+                    && ch == 'd'
+                {
+                    let _ = shell.delete_selected_session(app)?;
+                    rerender_workspace = true;
+                } else if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
                     shell.push_input_char(ch);
+                } else if matches!(shell.focus, FocusTarget::List)
+                    && matches!(shell.workspace, Workspace::Chat)
+                    && ch == 'd'
+                {
+                    let _ = shell.delete_selected_session(app)?;
+                    rerender_workspace = true;
                 }
             }
             KeyCode::Backspace => {
                 if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
                     shell.backspace();
+                } else if matches!(shell.focus, FocusTarget::List)
+                    && matches!(shell.workspace, Workspace::Chat)
+                {
+                    let _ = shell.delete_selected_session(app)?;
+                    rerender_workspace = true;
                 }
             }
             KeyCode::Tab if matches!(shell.focus, FocusTarget::Composer) => {
@@ -2023,7 +2096,10 @@ fn run_inline_terminal_loop(
                 }
                 FocusTarget::List => {
                     match shell.current_route() {
-                        ScreenRoute::SessionsRoot => shell.move_session_selection(-1),
+                        ScreenRoute::SessionsRoot => {
+                            shell.move_session_selection(-1);
+                            shell.preview_selected_session(app)?;
+                        }
                         ScreenRoute::AccountList { .. } => shell.move_account_selection(-1),
                         _ => {}
                     }
@@ -2038,7 +2114,10 @@ fn run_inline_terminal_loop(
                 }
                 FocusTarget::List => {
                     match shell.current_route() {
-                        ScreenRoute::SessionsRoot => shell.move_session_selection(1),
+                        ScreenRoute::SessionsRoot => {
+                            shell.move_session_selection(1);
+                            shell.preview_selected_session(app)?;
+                        }
                         ScreenRoute::AccountList { .. } => shell.move_account_selection(1),
                         _ => {}
                     }
@@ -2071,6 +2150,10 @@ fn run_inline_terminal_loop(
                 }
             }
             KeyCode::Esc => {
+                if matches!(shell.focus, FocusTarget::List) && matches!(shell.workspace, Workspace::Chat)
+                {
+                    shell.restore_active_chat_preview(app);
+                }
                 let previous_workspace = shell.workspace;
                 let previous_route = shell.current_route();
                 let previous_should_quit = shell.should_quit;
@@ -2159,8 +2242,19 @@ fn run_terminal_loop(
                         }
                     }
                     KeyCode::Char(ch) => {
-                        if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
+                        if key.modifiers.contains(KeyModifiers::CONTROL)
+                            && matches!(shell.focus, FocusTarget::List)
+                            && matches!(shell.workspace, Workspace::Chat)
+                            && ch == 'd'
+                        {
+                            let _ = shell.delete_selected_session(app)?;
+                        } else if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
                             shell.push_input_char(ch)
+                        } else if matches!(shell.focus, FocusTarget::List)
+                            && matches!(shell.workspace, Workspace::Chat)
+                            && ch == 'd'
+                        {
+                            let _ = shell.delete_selected_session(app)?;
                         }
                     }
                     KeyCode::Backspace => {
@@ -2180,7 +2274,8 @@ fn run_terminal_loop(
                         FocusTarget::List => match shell.current_route() {
                             ScreenRoute::AccountList { .. } => shell.move_account_selection(-1),
                             _ if matches!(shell.workspace, Workspace::Chat) => {
-                                shell.move_session_selection(-1)
+                                shell.move_session_selection(-1);
+                                shell.preview_selected_session(app)?;
                             }
                             _ => {}
                         },
@@ -2196,7 +2291,8 @@ fn run_terminal_loop(
                         FocusTarget::List => match shell.current_route() {
                             ScreenRoute::AccountList { .. } => shell.move_account_selection(1),
                             _ if matches!(shell.workspace, Workspace::Chat) => {
-                                shell.move_session_selection(1)
+                                shell.move_session_selection(1);
+                                shell.preview_selected_session(app)?;
                             }
                             _ => {}
                         },
@@ -2255,7 +2351,14 @@ fn run_terminal_loop(
                     KeyCode::Delete => {
                         let _ = shell.delete_selected_session(app)?;
                     }
-                    KeyCode::Esc => shell.handle_escape(),
+                    KeyCode::Esc => {
+                        if matches!(shell.focus, FocusTarget::List)
+                            && matches!(shell.workspace, Workspace::Chat)
+                        {
+                            shell.restore_active_chat_preview(app);
+                        }
+                        shell.handle_escape()
+                    }
                     _ => {}
                 }
             }
@@ -4220,6 +4323,79 @@ mod tests {
         assert!(deleted);
         assert_eq!(shell.sessions.len(), 0);
         assert!(shell.status().contains("deleted session demo"));
+
+        let client = DaemonIpcClient::new(&socket_path);
+        let _ = client.send(&oberon4_core::DaemonCommand::Shutdown).unwrap();
+        handle.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn session_rail_selection_previews_and_escape_restores_active_chat() {
+        let socket_path = std::env::temp_dir().join(format!(
+            "oberon4-tui-session-preview-test-{}.sock",
+            std::process::id()
+        ));
+        let thread_socket = socket_path.clone();
+        let handle = thread::spawn(move || {
+            let app = DaemonApp::new(
+                DaemonRuntime::default(),
+                FakeChatProvider {
+                    reply: "daemon reply".to_string(),
+                },
+                FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
+                FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+                AccountRegistry::default(),
+                InMemorySecretStore::default(),
+                InMemoryAccountMetadataStore::default(),
+            );
+            serve_unix_socket(&thread_socket, app)
+        });
+
+        for _ in 0..20 {
+            if socket_path.exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+
+        let mut app = DaemonBackedTuiApp::new(DaemonIpcClient::new(&socket_path));
+        app.handle_input("saved prompt").unwrap();
+        app.handle_command(TuiCommand::Save("saved-one".to_string()))
+            .unwrap();
+        app.handle_command(TuiCommand::Clear).unwrap();
+        app.handle_input("active prompt").unwrap();
+
+        let mut shell = TuiShellState::default();
+        shell.refresh_runtime_data(&app);
+        shell.restore_active_chat_preview(&app);
+        shell.focus = FocusTarget::List;
+        shell.session_index = 0;
+
+        assert!(
+            shell
+                .transcript()
+                .iter()
+                .any(|line| line.content.contains("active prompt"))
+        );
+
+        shell.move_session_selection(1);
+        shell.preview_selected_session(&app).unwrap();
+        assert!(
+            shell
+                .transcript()
+                .iter()
+                .any(|line| line.content.contains("saved prompt"))
+        );
+
+        shell.restore_active_chat_preview(&app);
+        shell.handle_escape();
+        assert!(matches!(shell.focus, FocusTarget::Composer));
+        assert!(
+            shell
+                .transcript()
+                .iter()
+                .any(|line| line.content.contains("active prompt"))
+        );
 
         let client = DaemonIpcClient::new(&socket_path);
         let _ = client.send(&oberon4_core::DaemonCommand::Shutdown).unwrap();
