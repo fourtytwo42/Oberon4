@@ -2048,19 +2048,64 @@ pub fn run_terminal_ui_with_options(options: TuiLaunchOptions) -> Result<(), Obe
     let mut shell = TuiShellState::default();
     shell.refresh_runtime_data(&app);
     if options.fullscreen {
-        let mut terminal = init_fullscreen_terminal()?;
-        let result = run_terminal_loop(&mut terminal, &mut app, &mut shell);
-        restore_fullscreen_terminal(&mut terminal)?;
-        result
+        let terminal = init_fullscreen_terminal()?;
+        let mut guard = FullscreenTerminalGuard::new(terminal);
+        run_terminal_loop(guard.terminal_mut(), &mut app, &mut shell)
     } else {
-        let mut stdout = init_inline_terminal()?;
-        let result = run_inline_terminal_loop(&mut stdout, &mut app, &mut shell);
-        restore_inline_terminal(&mut stdout)?;
-        result
+        let stdout = init_inline_terminal()?;
+        let mut guard = InlineTerminalGuard::new(stdout);
+        run_inline_terminal_loop(guard.stdout_mut(), &mut app, &mut shell)
+    }
+}
+
+struct FullscreenTerminalGuard {
+    terminal: Option<Terminal<CrosstermBackend<io::Stdout>>>,
+}
+
+impl FullscreenTerminalGuard {
+    fn new(terminal: Terminal<CrosstermBackend<io::Stdout>>) -> Self {
+        Self {
+            terminal: Some(terminal),
+        }
+    }
+
+    fn terminal_mut(&mut self) -> &mut Terminal<CrosstermBackend<io::Stdout>> {
+        self.terminal.as_mut().expect("terminal guard must hold terminal")
+    }
+}
+
+impl Drop for FullscreenTerminalGuard {
+    fn drop(&mut self) {
+        if let Some(terminal) = self.terminal.as_mut() {
+            let _ = restore_fullscreen_terminal(terminal);
+        }
+    }
+}
+
+struct InlineTerminalGuard {
+    stdout: Option<io::Stdout>,
+}
+
+impl InlineTerminalGuard {
+    fn new(stdout: io::Stdout) -> Self {
+        Self { stdout: Some(stdout) }
+    }
+
+    fn stdout_mut(&mut self) -> &mut io::Stdout {
+        self.stdout.as_mut().expect("inline terminal guard must hold stdout")
+    }
+}
+
+impl Drop for InlineTerminalGuard {
+    fn drop(&mut self) {
+        if let Some(stdout) = self.stdout.as_mut() {
+            let _ = restore_inline_terminal(stdout);
+        }
     }
 }
 
 fn init_inline_terminal() -> Result<io::Stdout, OberonError> {
+    sanitize_terminal_state()?;
     enable_raw_mode()
         .map_err(|err| OberonError::Storage(format!("enable raw mode failed: {err}")))?;
     Ok(io::stdout())
@@ -3627,6 +3672,7 @@ fn submit_inline_input(
 }
 
 fn init_fullscreen_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>, OberonError> {
+    sanitize_terminal_state()?;
     enable_raw_mode()
         .map_err(|err| OberonError::Storage(format!("raw mode enable failed: {err}")))?;
     let mut stdout = io::stdout();
@@ -3647,6 +3693,20 @@ fn restore_fullscreen_terminal(
     .map_err(|err| OberonError::Storage(format!("disable mouse capture failed: {err}")))?;
     disable_raw_mode()
         .map_err(|err| OberonError::Storage(format!("raw mode disable failed: {err}")))?;
+    Ok(())
+}
+
+fn sanitize_terminal_state() -> Result<(), OberonError> {
+    let mut stdout = io::stdout();
+    execute!(
+        stdout,
+        DisableMouseCapture,
+        LeaveAlternateScreen,
+        MoveToColumn(0),
+        Clear(ClearType::CurrentLine)
+    )
+    .map_err(|err| OberonError::Storage(format!("terminal sanitize failed: {err}")))?;
+    let _ = disable_raw_mode();
     Ok(())
 }
 
