@@ -1333,17 +1333,13 @@ fn finalize_streamed_assistant(
     message: &ChatMessage,
 ) {
     if let Some(line) = shell.transcript.get_mut(pending.assistant_line_index) {
-        let streamed = line.content.trim();
         let final_content = message.content.trim();
-        if final_content.is_empty() && streamed.is_empty() {
+        if final_content.is_empty() && line.content.trim().is_empty() {
             line.content.clear();
         } else if final_content.is_empty() {
-            line.content = streamed.to_string();
-        } else if streamed.is_empty() || streamed == "..." || final_content.len() >= streamed.len()
-        {
-            line.content = final_content.to_string();
+            line.content = line.content.trim().to_string();
         } else {
-            line.content = streamed.to_string();
+            line.content = final_content.to_string();
         }
     }
 
@@ -1856,13 +1852,14 @@ mod tests {
     use super::{
         AsyncUiEvent, BinaryLaunchTarget, DaemonBackedTuiApp, FocusTarget, PANEL_SPLIT_WIDTH,
         PendingSubmission, SidePanelTab, TuiApp, TuiCommand, TuiShellState, UiLine,
-        handle_async_ui_event, handle_pending_local_command, handle_pending_timeout,
-        parse_tui_command, resolve_binary_launch_target, start_async_submit, status_line,
+        finalize_streamed_assistant, handle_async_ui_event, handle_pending_local_command,
+        handle_pending_timeout, parse_tui_command, resolve_binary_launch_target,
+        start_async_submit, status_line,
     };
     use oberon4_auth::{AccountRegistry, InMemoryAccountMetadataStore};
     use oberon4_core::{
-        AppConfig, ChatRole, FakeChatProvider, FakeOAuthProvider, InMemorySecretStore,
-        OAuthProviderKind,
+        AppConfig, ChatMessage, ChatRole, FakeChatProvider, FakeOAuthProvider,
+        InMemorySecretStore, OAuthProviderKind,
     };
     use oberon4_daemon::{DaemonApp, DaemonIpcClient, DaemonRuntime, serve_unix_socket};
 
@@ -2297,6 +2294,33 @@ mod tests {
         let client = DaemonIpcClient::new(&socket_path);
         let _ = client.send(&oberon4_core::DaemonCommand::Shutdown).unwrap();
         handle.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn finalize_streamed_assistant_prefers_non_empty_final_message() {
+        let mut shell = TuiShellState::default();
+        shell.transcript.push(UiLine {
+            role: "assistant".to_string(),
+            content: "Hello! Hello!".to_string(),
+        });
+
+        let pending = PendingSubmission {
+            receiver: mpsc::channel().1,
+            started_at: Instant::now(),
+            timeout: Duration::from_secs(1),
+            assistant_line_index: 0,
+            tool_line_indices: BTreeMap::new(),
+            tool_state: BTreeMap::new(),
+        };
+        let message = ChatMessage {
+            role: ChatRole::Assistant,
+            content: "Hello!".to_string(),
+            tool_calls: Vec::new(),
+        };
+
+        finalize_streamed_assistant(&mut shell, &pending, &message);
+
+        assert_eq!(shell.transcript[0].content, "Hello!");
     }
 
     #[test]
