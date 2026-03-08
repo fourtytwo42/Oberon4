@@ -7,11 +7,11 @@ use std::{
     time::Duration,
 };
 
-use oberon4_auth::{AccountRegistry, AnthropicOAuthAdapter, OpenAiOAuthAdapter, TokenBundle};
+use oberon4_auth::{AccountRegistry, AnthropicOAuthAdapter, OpenAiOAuthAdapter};
 use oberon4_core::{
     AppConfig, ChatMessage, ChatProvider, ChatRole, ChatToolCallDelta, FileSecretStore,
     InMemoryConfigStore, InMemorySecretStore, InMemorySessionStore, OAuthProvider,
-    OAuthProviderKind, OberonError, SecretStore, default_data_dir,
+    OAuthProviderKind, OberonError, SecretStore, TokenBundle, default_data_dir,
 };
 use oberon4_daemon::{DaemonIpcClient, DaemonRuntime, LogLevel, default_socket_path, log_entry};
 use oberon4_provider_openai::{
@@ -350,21 +350,34 @@ impl CliApp {
                 }
             }
             CliCommand::AccountConnect { provider } => {
-                let authorization_url = match provider {
-                    OAuthProviderKind::OpenAi => self.openai_oauth.start_connect_flow()?,
-                    OAuthProviderKind::Anthropic => self.anthropic_oauth.start_connect_flow()?,
-                };
-                let bundle = TokenBundle {
-                    access_token: format!("access-{provider:?}").to_ascii_lowercase(),
-                    refresh_token: Some(format!("refresh-{provider:?}").to_ascii_lowercase()),
-                    expires_at_unix: 60,
-                    account_id: format!("{}-default", provider_name(provider)),
-                    label: format!("{} Default", provider_label(provider)),
+                let (start, bundle) = match provider {
+                    OAuthProviderKind::OpenAi => {
+                        let (start, _) = self.openai_oauth.start_connect_flow()?;
+                        let bundle = TokenBundle {
+                            access_token: "access-openai-local-cli".to_string(),
+                            refresh_token: Some("refresh-openai-local-cli".to_string()),
+                            expires_at_unix: 600,
+                            account_id: "acct-local-cli".to_string(),
+                            label: "OpenAI Local CLI".to_string(),
+                        };
+                        (start, bundle)
+                    }
+                    OAuthProviderKind::Anthropic => {
+                        let (start, _) = self.anthropic_oauth.start_connect_flow()?;
+                        let bundle = TokenBundle {
+                            access_token: "access-anthropic-local-cli".to_string(),
+                            refresh_token: Some("refresh-anthropic-local-cli".to_string()),
+                            expires_at_unix: 600,
+                            account_id: "acct-local-cli".to_string(),
+                            label: "Anthropic Local CLI".to_string(),
+                        };
+                        (start, bundle)
+                    }
                 };
                 let _ = self
                     .accounts
                     .connect(provider, &bundle, &mut self.secrets)?;
-                Ok(CliOutput::success(authorization_url))
+                Ok(CliOutput::success(start.authorization_url))
             }
             CliCommand::AccountList => {
                 let accounts = serde_json::to_string_pretty(&self.accounts.list())
@@ -1475,13 +1488,6 @@ fn provider_name(provider: OAuthProviderKind) -> &'static str {
     }
 }
 
-fn provider_label(provider: OAuthProviderKind) -> &'static str {
-    match provider {
-        OAuthProviderKind::OpenAi => "OpenAI",
-        OAuthProviderKind::Anthropic => "Anthropic",
-    }
-}
-
 fn apply_config_value(config: &mut AppConfig, key: &str, value: &str) -> Result<(), OberonError> {
     match key {
         "endpoint.base_url" => config.endpoint.base_url = value.to_string(),
@@ -1938,20 +1944,20 @@ mod tests {
         let listed = app.run(CliCommand::AccountList);
         let disable = app.run(CliCommand::AccountDisable {
             provider: oberon4_core::OAuthProviderKind::OpenAi,
-            account: "openai-default".to_string(),
+            account: "acct-local-cli".to_string(),
         });
         let activate = app.run(CliCommand::AccountActivate {
             provider: oberon4_core::OAuthProviderKind::OpenAi,
-            account: "openai-default".to_string(),
+            account: "acct-local-cli".to_string(),
         });
         let disconnect = app.run(CliCommand::AccountDisconnect {
             provider: oberon4_core::OAuthProviderKind::OpenAi,
-            account: "openai-default".to_string(),
+            account: "acct-local-cli".to_string(),
         });
 
         assert_eq!(connect.exit_code, 0);
         assert!(connect.stdout.contains("auth.openai.com"));
-        assert!(listed.stdout.contains("openai-default"));
+        assert!(listed.stdout.contains("acct-local-cli"));
         assert_eq!(disable.exit_code, 0);
         assert_eq!(activate.exit_code, 0);
         assert_eq!(disconnect.exit_code, 0);

@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
-    io::{self, Write},
+    io::{self, BufRead, BufReader, Write},
+    net::TcpListener,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::mpsc::{self, Receiver, TryRecvError},
@@ -67,6 +68,14 @@ pub struct TuiResponse {
 pub struct UiLine {
     pub role: String,
     pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthConnectStart {
+    pub provider: OAuthProviderKind,
+    pub flow_id: String,
+    pub url: String,
+    pub redirect_uri: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -746,12 +755,41 @@ impl DaemonBackedTuiApp {
         }
     }
 
-    pub fn connect_account(&self, provider: OAuthProviderKind) -> Result<String, OberonError> {
+    pub fn connect_account(
+        &self,
+        provider: OAuthProviderKind,
+    ) -> Result<OAuthConnectStart, OberonError> {
         match self
             .client
             .send(&oberon4_core::DaemonCommand::ConnectAccount { provider })?
         {
-            oberon4_core::DaemonEvent::OAuthStarted { url, .. } => Ok(url),
+            oberon4_core::DaemonEvent::OAuthStarted {
+                provider,
+                flow_id,
+                url,
+                redirect_uri,
+            } => Ok(OAuthConnectStart {
+                provider,
+                flow_id,
+                url,
+                redirect_uri,
+            }),
+            event => Err(protocol_error_inner(event)),
+        }
+    }
+
+    pub fn complete_oauth_connect(
+        &self,
+        flow_id: &str,
+        callback: oberon4_core::OAuthCallbackPayload,
+    ) -> Result<String, OberonError> {
+        match self
+            .client
+            .send(&oberon4_core::DaemonCommand::CompleteOAuthConnect {
+                flow_id: flow_id.to_string(),
+                callback,
+            })? {
+            oberon4_core::DaemonEvent::Ack { message } => Ok(message),
             event => Err(protocol_error_inner(event)),
         }
     }
@@ -1615,12 +1653,20 @@ impl TuiShellState {
                 } else {
                     OAuthProviderKind::Anthropic
                 };
-                match self.menu_index {
-                    0 => {
-                        let url = app.connect_account(provider)?;
-                        self.set_activity(ActivityState::Idle, format!("connect via {url}"));
-                        self.refresh_runtime_data(app);
-                    }
+                    match self.menu_index {
+                        0 => {
+                            self.set_activity(ActivityState::Loading, "starting oauth flow");
+                            let start = app.connect_account(provider)?;
+                            open_browser(&start.url)?;
+                            let callback = wait_for_oauth_callback(
+                                &start.redirect_uri,
+                                Duration::from_secs(300),
+                            )?;
+                            let message =
+                                app.complete_oauth_connect(&start.flow_id, callback)?;
+                            self.refresh_runtime_data(app);
+                            self.set_activity(ActivityState::Idle, message);
+                        }
                     1 => self.push_route(
                         ScreenRoute::AccountList {
                             provider,
@@ -3673,6 +3719,162 @@ fn protocol_error_inner(event: oberon4_core::DaemonEvent) -> OberonError {
     }
 }
 
+fn open_browser(url: &str) -> Result<(), OberonError> {
+    let commands: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
+        &[("open", &[])]
+    } else if cfg!(target_os = "windows") {
+        &[("cmd", &["/C", "start"])]
+    } else {
+        &[("xdg-open", &[]), ("gio", &["open"])]
+    };
+
+    for (program, args) in commands {
+        let mut command = Command::new(program);
+        command.args(*args).arg(url);
+        if command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .is_ok()
+        {
+            return Ok(());
+        }
+    }
+
+    Err(OberonError::Storage(format!(
+        "failed to open browser automatically; open this URL manually: {url}"
+    )))
+}
+
+fn parse_redirect_uri(redirect_uri: &str) -> Result<(String, u16, String), OberonError> {
+    let without_scheme = redirect_uri
+        .strip_prefix("http://")
+        .or_else(|| redirect_uri.strip_prefix("https://"))
+        .ok_or_else(|| OberonError::Validation("oauth redirect_uri must be http(s)".to_string()))?;
+    let mut parts = without_scheme.splitn(2, '/');
+    let host_port = parts.next().unwrap_or_default();
+    let path = format!("/{}", parts.next().unwrap_or_default());
+    let mut host_port_parts = host_port.splitn(2, ':');
+    let host = host_port_parts.next().unwrap_or_default().to_string();
+    let port = host_port_parts
+        .next()
+        .unwrap_or("80")
+        .parse::<u16>()
+        .map_err(|err| OberonError::Validation(format!("invalid oauth callback port: {err}")))?;
+    Ok((host, port, path))
+}
+
+fn decode_query_component(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'+' => {
+                decoded.push(b' ');
+                index += 1;
+            }
+            b'%' if index + 2 < bytes.len() => {
+                let hex = &value[index + 1..index + 3];
+                if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                    decoded.push(byte);
+                    index += 3;
+                } else {
+                    decoded.push(bytes[index]);
+                    index += 1;
+                }
+            }
+            other => {
+                decoded.push(other);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&decoded).to_string()
+}
+
+fn parse_callback_request(
+    request_line: &str,
+    expected_path: &str,
+) -> Result<oberon4_core::OAuthCallbackPayload, OberonError> {
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or_default();
+    let target = parts.next().unwrap_or_default();
+    if method != "GET" {
+        return Err(OberonError::Validation(
+            "oauth callback must use GET".to_string(),
+        ));
+    }
+    let mut target_parts = target.splitn(2, '?');
+    let path = target_parts.next().unwrap_or_default();
+    if path != expected_path {
+        return Err(OberonError::Validation(format!(
+            "oauth callback path mismatch: expected {expected_path}, got {path}"
+        )));
+    }
+
+    let mut state = None;
+    let mut code = None;
+    let mut return_to = None;
+    if let Some(query) = target_parts.next() {
+        for pair in query.split('&') {
+            let mut kv = pair.splitn(2, '=');
+            let key = kv.next().unwrap_or_default();
+            let value = decode_query_component(kv.next().unwrap_or_default());
+            match key {
+                "state" => state = Some(value),
+                "code" => code = Some(value),
+                "return_to" => return_to = Some(value),
+                _ => {}
+            }
+        }
+    }
+
+    Ok(oberon4_core::OAuthCallbackPayload {
+        state: state.unwrap_or_default(),
+        code: code.unwrap_or_default(),
+        return_to,
+    })
+}
+
+fn wait_for_oauth_callback(
+    redirect_uri: &str,
+    _timeout: Duration,
+) -> Result<oberon4_core::OAuthCallbackPayload, OberonError> {
+    let (host, port, expected_path) = parse_redirect_uri(redirect_uri)?;
+    let bind_host = if host == "localhost" {
+        "127.0.0.1".to_string()
+    } else {
+        host
+    };
+    let listener = TcpListener::bind((bind_host.as_str(), port))
+        .map_err(|err| OberonError::Storage(format!("oauth callback listener failed: {err}")))?;
+    let (mut stream, _) = listener
+        .accept()
+        .map_err(|err| OberonError::Storage(format!("oauth callback accept failed: {err}")))?;
+    let mut reader = BufReader::new(
+        stream
+            .try_clone()
+            .map_err(|err| OberonError::Storage(format!("oauth callback clone failed: {err}")))?,
+    );
+    let mut request_line = String::new();
+    reader
+        .read_line(&mut request_line)
+        .map_err(|err| OberonError::Storage(format!("oauth callback read failed: {err}")))?;
+    let callback = parse_callback_request(request_line.trim_end(), &expected_path)?;
+    let body = "<html><body><h1>Oberon4 OAuth complete</h1><p>You can return to the terminal.</p></body></html>";
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    stream
+        .write_all(response.as_bytes())
+        .map_err(|err| OberonError::Storage(format!("oauth callback response failed: {err}")))?;
+    Ok(callback)
+}
+
 fn spawn_daemon_process(socket_path: PathBuf) -> Result<(), OberonError> {
     let mut command = daemon_launch_command()?;
     command
@@ -3841,8 +4043,8 @@ mod tests {
         AsyncUiEvent, BinaryLaunchTarget, DaemonBackedTuiApp, FocusTarget, PendingSubmission,
         ScreenRoute, TuiApp, TuiCommand, TuiShellState, UiLine, Workspace,
         finalize_streamed_assistant, handle_async_ui_event, handle_pending_local_command,
-        handle_pending_timeout, parse_tui_command, resolve_binary_launch_target,
-        start_async_submit, status_line,
+        handle_pending_timeout, parse_callback_request, parse_tui_command,
+        resolve_binary_launch_target, start_async_submit, status_line,
     };
     use oberon4_auth::{AccountRegistry, InMemoryAccountMetadataStore};
     use oberon4_core::{
@@ -4297,6 +4499,19 @@ mod tests {
         let client = DaemonIpcClient::new(&socket_path);
         let _ = client.send(&oberon4_core::DaemonCommand::Shutdown).unwrap();
         handle.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn oauth_callback_parser_extracts_code_and_state() {
+        let callback = parse_callback_request(
+            "GET /auth/callback?code=demo-code&state=demo-state HTTP/1.1",
+            "/auth/callback",
+        )
+        .unwrap();
+
+        assert_eq!(callback.code, "demo-code");
+        assert_eq!(callback.state, "demo-state");
+        assert_eq!(callback.return_to, None);
     }
 
     #[test]

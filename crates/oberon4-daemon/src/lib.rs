@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     io::{BufRead, BufReader, Read, Write},
     os::unix::net::{UnixListener, UnixStream},
@@ -7,12 +8,12 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use oberon4_auth::{AccountMetadataStore, AccountRegistry, FileAccountMetadataStore, TokenBundle};
+use oberon4_auth::{AccountMetadataStore, AccountRegistry, FileAccountMetadataStore};
 use oberon4_core::{
     AppConfig, ChatProvider, ChatProviderKind, ChatStreamEvent, ConfigStore, DaemonCommand,
     DaemonEvent, DaemonStatus, FileConfigStore, FileSecretStore, FileSessionStore,
     InMemoryConfigStore, InMemorySessionStore, OAuthProvider, OAuthProviderKind, OberonError,
-    RequestId, SecretStore, ServiceEnvelope, SessionStore,
+    PendingOAuthFlow, RequestId, SecretStore, ServiceEnvelope, SessionStore,
 };
 
 pub fn daemon_status(config: &AppConfig) -> ServiceEnvelope<String> {
@@ -154,6 +155,7 @@ pub struct DaemonApp<C, S, P, OO, AO, SS, AS> {
     openai_oauth: OO,
     anthropic_oauth: AO,
     accounts: AccountRegistry,
+    pending_oauth_flows: BTreeMap<String, PendingOAuthFlow>,
     secrets: SS,
     account_store: AS,
 }
@@ -224,6 +226,7 @@ where
             openai_oauth,
             anthropic_oauth,
             accounts,
+            pending_oauth_flows: BTreeMap::new(),
             secrets,
             account_store,
         }
@@ -371,20 +374,39 @@ where
                 })
             }
             DaemonCommand::ConnectAccount { provider } => {
-                let url = self.oauth_provider(provider)?.start_connect_flow()?;
-                let bundle = TokenBundle {
-                    access_token: format!("access-{provider:?}").to_ascii_lowercase(),
-                    refresh_token: Some(format!("refresh-{provider:?}").to_ascii_lowercase()),
-                    expires_at_unix: 60,
-                    account_id: format!("{}-default", provider_name(provider)),
-                    label: format!("{} Default", provider_label(provider)),
-                };
-                let _ = self
+                let (start, pending) = self.oauth_provider(provider)?.start_connect_flow()?;
+                self.pending_oauth_flows
+                    .insert(start.flow_id.clone(), pending);
+                Ok(CommandOutcome {
+                    event: DaemonEvent::OAuthStarted {
+                        provider,
+                        flow_id: start.flow_id,
+                        url: start.authorization_url,
+                        redirect_uri: start.redirect_uri,
+                    },
+                    should_shutdown: false,
+                })
+            }
+            DaemonCommand::CompleteOAuthConnect { flow_id, callback } => {
+                let pending = self.pending_oauth_flows.remove(&flow_id).ok_or_else(|| {
+                    OberonError::NotFound(format!("oauth_flow:{flow_id}"))
+                })?;
+                let provider = pending.provider;
+                let bundle = self
+                    .oauth_provider(provider)?
+                    .exchange_callback(&pending, callback)?;
+                let account = self
                     .accounts
                     .connect(provider, &bundle, &mut self.secrets)?;
                 self.persist_accounts()?;
                 Ok(CommandOutcome {
-                    event: DaemonEvent::OAuthStarted { provider, url },
+                    event: DaemonEvent::Ack {
+                        message: format!(
+                            "connected {} {}",
+                            provider_name(provider),
+                            account.id
+                        ),
+                    },
                     should_shutdown: false,
                 })
             }
@@ -681,12 +703,6 @@ fn provider_name(provider: OAuthProviderKind) -> &'static str {
     }
 }
 
-fn provider_label(provider: OAuthProviderKind) -> &'static str {
-    match provider {
-        OAuthProviderKind::OpenAi => "OpenAI",
-        OAuthProviderKind::Anthropic => "Anthropic",
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -706,8 +722,8 @@ mod tests {
     use oberon4_core::{
         AppConfig, ChatMessage, ChatProviderKind, ChatRole, DaemonCommand, DaemonEvent,
         FakeChatProvider, FakeOAuthProvider, FileConfigStore, FileSecretStore, FileSessionStore,
-        InMemorySecretStore, OAuthProviderKind, OberonError, SavedSession, SecretStore, SessionId,
-        SessionSummary,
+        InMemorySecretStore, OAuthCallbackPayload, OAuthProviderKind, OberonError, SavedSession,
+        SecretStore, SessionId, SessionSummary,
     };
     use oberon4_provider_openai::{FakeTransport, OpenAiCompatibleClient, RetryPolicy};
 
@@ -818,13 +834,39 @@ mod tests {
             })
             .unwrap()
             .event;
-        match connect {
-            DaemonEvent::OAuthStarted { provider, url } => {
+        let (flow_id, state) = match connect {
+            DaemonEvent::OAuthStarted {
+                provider,
+                flow_id,
+                url,
+                redirect_uri,
+            } => {
                 assert_eq!(provider, OAuthProviderKind::OpenAi);
                 assert!(url.contains("openai"));
+                assert!(redirect_uri.contains("localhost:1455"));
+                let state = url
+                    .split("state=")
+                    .nth(1)
+                    .and_then(|fragment| fragment.split('&').next())
+                    .expect("state should be present")
+                    .to_string();
+                (flow_id, state)
             }
             other => panic!("unexpected event: {other:?}"),
-        }
+        };
+
+        let completed = app
+            .handle_command(DaemonCommand::CompleteOAuthConnect {
+                flow_id,
+                callback: OAuthCallbackPayload {
+                    state,
+                    code: "demo".to_string(),
+                    return_to: None,
+                },
+            })
+            .unwrap()
+            .event;
+        assert!(matches!(completed, DaemonEvent::Ack { .. }));
 
         let accounts = app
             .handle_command(DaemonCommand::ListAccounts)
@@ -833,7 +875,7 @@ mod tests {
         match accounts {
             DaemonEvent::AccountsListed { accounts } => {
                 assert_eq!(accounts.len(), 1);
-                assert_eq!(accounts[0].id, "openai-default");
+                assert_eq!(accounts[0].id, "acct-demo");
             }
             other => panic!("unexpected event: {other:?}"),
         }
@@ -993,9 +1035,32 @@ mod tests {
             FileAccountMetadataStore::new(&account_path),
         );
         let _ = app.start().unwrap();
-        let _ = app
+        let connect = app
             .handle_command(DaemonCommand::ConnectAccount {
                 provider: OAuthProviderKind::OpenAi,
+            })
+            .unwrap()
+            .event;
+        let (flow_id, state) = match connect {
+            DaemonEvent::OAuthStarted { flow_id, url, .. } => {
+                let state = url
+                    .split("state=")
+                    .nth(1)
+                    .and_then(|fragment| fragment.split('&').next())
+                    .expect("state should be present")
+                    .to_string();
+                (flow_id, state)
+            }
+            other => panic!("unexpected event: {other:?}"),
+        };
+        let _ = app
+            .handle_command(DaemonCommand::CompleteOAuthConnect {
+                flow_id,
+                callback: OAuthCallbackPayload {
+                    state,
+                    code: "demo".to_string(),
+                    return_to: None,
+                },
             })
             .unwrap();
 
@@ -1004,7 +1069,7 @@ mod tests {
         assert_eq!(registry.list().len(), 1);
         assert_eq!(
             registry.active_account_id(OAuthProviderKind::OpenAi),
-            Some("openai-default")
+            Some("acct-demo")
         );
 
         let reloaded = DaemonApp::new(
@@ -1021,7 +1086,7 @@ mod tests {
             store,
         );
         let status = reloaded.status().unwrap();
-        assert_eq!(status.active_account.as_deref(), Some("openai-default"));
+        assert_eq!(status.active_account.as_deref(), Some("acct-demo"));
 
         let _ = fs::remove_dir_all(dir);
     }

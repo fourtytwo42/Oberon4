@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AppConfig, ChatMessage, ChatToolCallDelta, DaemonStatus, OAuthProviderKind, SavedSession,
-    StoredAccount,
+    AppConfig, ChatMessage, ChatToolCallDelta, DaemonStatus, OAuthCallbackPayload,
+    OAuthProviderKind, SavedSession, StoredAccount,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,6 +31,10 @@ pub enum DaemonCommand {
     },
     ConnectAccount {
         provider: OAuthProviderKind,
+    },
+    CompleteOAuthConnect {
+        flow_id: String,
+        callback: OAuthCallbackPayload,
     },
     ListAccounts,
     ActivateAccount {
@@ -76,7 +80,9 @@ pub enum DaemonEvent {
     },
     OAuthStarted {
         provider: OAuthProviderKind,
+        flow_id: String,
         url: String,
+        redirect_uri: String,
     },
     Ack {
         message: String,
@@ -90,7 +96,8 @@ pub enum DaemonEvent {
 mod tests {
     use crate::{
         AppConfig, ChatMessage, ChatProviderKind, ChatRole, ChatToolCallDelta, DaemonCommand,
-        DaemonEvent, DaemonStatus, OAuthProviderKind, SavedSession, SessionId, SessionSummary,
+        DaemonEvent, DaemonStatus, OAuthCallbackPayload, OAuthProviderKind, SavedSession,
+        SessionId, SessionSummary,
     };
 
     #[test]
@@ -163,11 +170,29 @@ mod tests {
     fn oauth_started_event_carries_provider() {
         let event = DaemonEvent::OAuthStarted {
             provider: OAuthProviderKind::OpenAi,
+            flow_id: "flow-1".to_string(),
             url: "http://localhost/callback".to_string(),
+            redirect_uri: "http://localhost:1455/auth/callback".to_string(),
         };
 
         let encoded = serde_json::to_string(&event).unwrap();
         assert!(encoded.contains("\"provider\":\"open_ai\""));
+    }
+
+    #[test]
+    fn complete_oauth_connect_command_round_trips() {
+        let command = DaemonCommand::CompleteOAuthConnect {
+            flow_id: "flow-1".to_string(),
+            callback: OAuthCallbackPayload {
+                state: "state-1".to_string(),
+                code: "code-1".to_string(),
+                return_to: None,
+            },
+        };
+
+        let encoded = serde_json::to_string(&command).unwrap();
+        let decoded: DaemonCommand = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, command);
     }
 
     #[test]

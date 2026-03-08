@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    AppConfig, ChatMessage, ChatProvider, ChatRole, ChatStreamEvent, ConfigStore, OAuthProvider,
-    OAuthProviderKind, OberonError, SavedSession, SessionStore, StoredAccount,
+    AppConfig, ChatMessage, ChatProvider, ChatRole, ChatStreamEvent, ConfigStore,
+    OAuthCallbackPayload, OAuthProvider, OAuthProviderKind, OAuthStart, OberonError,
+    PendingOAuthFlow, SavedSession, SessionStore, TokenBundle,
 };
 
 #[derive(Debug, Clone)]
@@ -53,28 +54,61 @@ impl OAuthProvider for FakeOAuthProvider {
         self.kind
     }
 
-    fn start_connect_flow(&self) -> Result<String, OberonError> {
-        Ok(format!(
-            "https://example.test/oauth/{}",
-            match self.kind {
-                OAuthProviderKind::OpenAi => "openai",
-                OAuthProviderKind::Anthropic => "anthropic",
-            }
+    fn start_connect_flow(&self) -> Result<(OAuthStart, PendingOAuthFlow), OberonError> {
+        let provider_name = match self.kind {
+            OAuthProviderKind::OpenAi => "openai",
+            OAuthProviderKind::Anthropic => "anthropic",
+        };
+        let flow_id = format!("{provider_name}-flow");
+        let state = format!("{provider_name}-state");
+        let redirect_uri = match self.kind {
+            OAuthProviderKind::OpenAi => "http://localhost:1455/auth/callback".to_string(),
+            OAuthProviderKind::Anthropic => "http://localhost:1455/callback".to_string(),
+        };
+        Ok((
+            OAuthStart {
+                flow_id: flow_id.clone(),
+                provider: self.kind,
+                authorization_url: format!(
+                    "https://example.test/oauth/{provider_name}?state={state}"
+                ),
+                redirect_uri: redirect_uri.clone(),
+                expires_at_unix: 600,
+            },
+            PendingOAuthFlow {
+                flow_id,
+                provider: self.kind,
+                oauth_state: state,
+                code_verifier: format!("{provider_name}-verifier"),
+                redirect_uri,
+                expires_at_unix: 600,
+            },
         ))
     }
 
-    fn exchange_callback(&self, code: &str, _state: &str) -> Result<StoredAccount, OberonError> {
-        if code.trim().is_empty() {
+    fn exchange_callback(
+        &self,
+        flow: &PendingOAuthFlow,
+        callback: OAuthCallbackPayload,
+    ) -> Result<TokenBundle, OberonError> {
+        if callback.code.trim().is_empty() {
             return Err(OberonError::Validation(
                 "oauth code cannot be empty".to_string(),
             ));
         }
 
-        Ok(StoredAccount {
-            id: format!("acct-{}", code),
-            provider: self.kind,
+        if callback.state != flow.oauth_state {
+            return Err(OberonError::Validation(
+                "oauth callback state mismatch".to_string(),
+            ));
+        }
+
+        Ok(TokenBundle {
+            access_token: format!("access-{}", callback.code),
+            refresh_token: Some(format!("refresh-{}", callback.code)),
+            expires_at_unix: 600,
+            account_id: format!("acct-{}", callback.code),
             label: "fake-account".to_string(),
-            state: crate::AccountState::Active,
         })
     }
 }
@@ -145,11 +179,20 @@ mod tests {
     #[test]
     fn fake_oauth_provider_starts_flow_and_exchanges_account() {
         let provider = FakeOAuthProvider::new(OAuthProviderKind::Anthropic);
-        let url = provider.start_connect_flow().unwrap();
-        let account = provider.exchange_callback("demo", "state").unwrap();
+        let (start, flow) = provider.start_connect_flow().unwrap();
+        let bundle = provider
+            .exchange_callback(
+                &flow,
+                crate::OAuthCallbackPayload {
+                    code: "demo".to_string(),
+                    state: flow.oauth_state.clone(),
+                    return_to: None,
+                },
+            )
+            .unwrap();
 
-        assert!(url.contains("anthropic"));
-        assert_eq!(account.provider, OAuthProviderKind::Anthropic);
+        assert!(start.authorization_url.contains("anthropic"));
+        assert_eq!(bundle.account_id, "acct-demo");
     }
 
     #[test]

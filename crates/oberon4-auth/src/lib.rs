@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use oberon4_core::{
-    AccountState, OAuthProvider, OAuthProviderKind, OberonError, SecretStore, StoredAccount,
+    AccountState, OAuthCallbackPayload, OAuthProvider, OAuthProviderKind, OAuthStart,
+    OberonError, PendingOAuthFlow, SecretStore, StoredAccount, TokenBundle,
 };
 
 pub const OPENAI_CLIENT_ID: &str = "openai-desktop";
@@ -57,41 +58,6 @@ impl OAuthProviderConfig {
             state_ttl: Duration::from_secs(600),
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PendingOAuthFlow {
-    pub flow_id: String,
-    pub provider: OAuthProviderKind,
-    pub oauth_state: String,
-    pub code_verifier: String,
-    pub redirect_uri: String,
-    pub expires_at_unix: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OAuthStart {
-    pub flow_id: String,
-    pub provider: OAuthProviderKind,
-    pub authorization_url: String,
-    pub redirect_uri: String,
-    pub expires_at_unix: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OAuthCallbackPayload {
-    pub state: String,
-    pub code: String,
-    pub return_to: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TokenBundle {
-    pub access_token: String,
-    pub refresh_token: Option<String>,
-    pub expires_at_unix: u64,
-    pub account_id: String,
-    pub label: String,
 }
 
 pub trait OAuthTokenExchange {
@@ -452,6 +418,41 @@ impl OAuthFlowManager {
         )?;
         registry.connect(self.config.provider, &token, store)
     }
+
+    pub fn complete_flow_bundle<X: OAuthTokenExchange>(
+        &self,
+        flow: &PendingOAuthFlow,
+        callback: OAuthCallbackPayload,
+        exchange: &X,
+        now_unix: u64,
+    ) -> Result<TokenBundle, OberonError> {
+        if flow.provider != self.config.provider {
+            return Err(OberonError::Validation(
+                "oauth flow provider mismatch".to_string(),
+            ));
+        }
+        if now_unix > flow.expires_at_unix {
+            return Err(OberonError::Validation("oauth state expired".to_string()));
+        }
+        if callback.state.trim().is_empty() || callback.code.trim().is_empty() {
+            return Err(OberonError::Validation(
+                "oauth callback missing required fields".to_string(),
+            ));
+        }
+        if callback.state != flow.oauth_state {
+            return Err(OberonError::Validation(
+                "oauth callback state mismatch".to_string(),
+            ));
+        }
+        let _ = sanitize_return_to(callback.return_to.as_deref())?;
+
+        exchange.exchange_code(
+            &self.config,
+            &callback.code,
+            &flow.code_verifier,
+            &flow.redirect_uri,
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -478,18 +479,17 @@ impl OAuthProvider for OpenAiOAuthAdapter {
         OAuthProviderKind::OpenAi
     }
 
-    fn start_connect_flow(&self) -> Result<String, OberonError> {
-        let (start, _) = self.inner.start_flow("/auth/callback", None, now_unix())?;
-        Ok(start.authorization_url)
+    fn start_connect_flow(&self) -> Result<(OAuthStart, PendingOAuthFlow), OberonError> {
+        self.inner.start_flow("/auth/callback", None, now_unix())
     }
 
-    fn exchange_callback(&self, code: &str, state: &str) -> Result<StoredAccount, OberonError> {
-        Ok(StoredAccount {
-            id: format!("openai-{state}"),
-            provider: OAuthProviderKind::OpenAi,
-            label: format!("OpenAI {code}"),
-            state: AccountState::Active,
-        })
+    fn exchange_callback(
+        &self,
+        flow: &PendingOAuthFlow,
+        callback: OAuthCallbackPayload,
+    ) -> Result<TokenBundle, OberonError> {
+        self.inner
+            .complete_flow_bundle(flow, callback, &ReqwestOAuthTokenExchange, now_unix())
     }
 }
 
@@ -517,18 +517,17 @@ impl OAuthProvider for AnthropicOAuthAdapter {
         OAuthProviderKind::Anthropic
     }
 
-    fn start_connect_flow(&self) -> Result<String, OberonError> {
-        let (start, _) = self.inner.start_flow("/callback", None, now_unix())?;
-        Ok(start.authorization_url)
+    fn start_connect_flow(&self) -> Result<(OAuthStart, PendingOAuthFlow), OberonError> {
+        self.inner.start_flow("/callback", None, now_unix())
     }
 
-    fn exchange_callback(&self, code: &str, state: &str) -> Result<StoredAccount, OberonError> {
-        Ok(StoredAccount {
-            id: format!("anthropic-{state}"),
-            provider: OAuthProviderKind::Anthropic,
-            label: format!("Anthropic {code}"),
-            state: AccountState::Active,
-        })
+    fn exchange_callback(
+        &self,
+        flow: &PendingOAuthFlow,
+        callback: OAuthCallbackPayload,
+    ) -> Result<TokenBundle, OberonError> {
+        self.inner
+            .complete_flow_bundle(flow, callback, &ReqwestOAuthTokenExchange, now_unix())
     }
 }
 
@@ -727,16 +726,16 @@ mod tests {
 
         assert_eq!(openai.provider_kind(), OAuthProviderKind::OpenAi);
         assert_eq!(anthropic.provider_kind(), OAuthProviderKind::Anthropic);
+        let (openai_start, _) = openai.start_connect_flow().unwrap();
+        let (anthropic_start, _) = anthropic.start_connect_flow().unwrap();
         assert!(
-            openai
-                .start_connect_flow()
-                .unwrap()
+            openai_start
+                .authorization_url
                 .contains("auth.openai.com")
         );
         assert!(
-            anthropic
-                .start_connect_flow()
-                .unwrap()
+            anthropic_start
+                .authorization_url
                 .contains("console.anthropic.com")
         );
     }

@@ -1,12 +1,48 @@
 use crate::{
     AppConfig, ChatMessage, ChatToolCallDelta, DaemonStatus, OAuthProviderKind, OberonError,
-    SavedSession, StoredAccount,
+    SavedSession,
 };
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatStreamEvent {
     TextDelta { content: String },
     ToolCallDelta(ChatToolCallDelta),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingOAuthFlow {
+    pub flow_id: String,
+    pub provider: OAuthProviderKind,
+    pub oauth_state: String,
+    pub code_verifier: String,
+    pub redirect_uri: String,
+    pub expires_at_unix: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthStart {
+    pub flow_id: String,
+    pub provider: OAuthProviderKind,
+    pub authorization_url: String,
+    pub redirect_uri: String,
+    pub expires_at_unix: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthCallbackPayload {
+    pub state: String,
+    pub code: String,
+    pub return_to: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenBundle {
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    pub expires_at_unix: u64,
+    pub account_id: String,
+    pub label: String,
 }
 
 pub trait ChatProvider {
@@ -43,8 +79,12 @@ pub trait ChatProvider {
 
 pub trait OAuthProvider {
     fn provider_kind(&self) -> OAuthProviderKind;
-    fn start_connect_flow(&self) -> Result<String, OberonError>;
-    fn exchange_callback(&self, code: &str, state: &str) -> Result<StoredAccount, OberonError>;
+    fn start_connect_flow(&self) -> Result<(OAuthStart, PendingOAuthFlow), OberonError>;
+    fn exchange_callback(
+        &self,
+        flow: &PendingOAuthFlow,
+        callback: OAuthCallbackPayload,
+    ) -> Result<TokenBundle, OberonError>;
 }
 
 pub trait ConfigStore {

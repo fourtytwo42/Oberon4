@@ -35,11 +35,11 @@ fn end_to_end_oauth_account_connect_and_switch() {
     let list_after_openai = app.run(CliCommand::AccountList);
     let disable_openai = app.run(CliCommand::AccountDisable {
         provider: oberon4_core::OAuthProviderKind::OpenAi,
-        account: "openai-default".to_string(),
+        account: "acct-local-cli".to_string(),
     });
     let activate_openai = app.run(CliCommand::AccountActivate {
         provider: oberon4_core::OAuthProviderKind::OpenAi,
-        account: "openai-default".to_string(),
+        account: "acct-local-cli".to_string(),
     });
     let connect_anthropic = app.run(CliCommand::AccountConnect {
         provider: oberon4_core::OAuthProviderKind::Anthropic,
@@ -47,7 +47,7 @@ fn end_to_end_oauth_account_connect_and_switch() {
 
     assert_eq!(connect_openai.exit_code, 0);
     assert!(connect_openai.stdout.contains("auth.openai.com"));
-    assert!(list_after_openai.stdout.contains("openai-default"));
+    assert!(list_after_openai.stdout.contains("acct-local-cli"));
     assert_eq!(disable_openai.exit_code, 0);
     assert_eq!(activate_openai.exit_code, 0);
     assert_eq!(connect_anthropic.exit_code, 0);

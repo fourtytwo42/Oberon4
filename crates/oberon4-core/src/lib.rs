@@ -20,7 +20,10 @@ pub use ipc::{DaemonCommand, DaemonEvent};
 pub use mock::{FakeChatProvider, FakeOAuthProvider, InMemoryConfigStore, InMemorySessionStore};
 pub use persistence::{FileConfigStore, FileSessionStore, default_data_dir};
 pub use result::ServiceEnvelope;
-pub use service::{ChatProvider, ChatStreamEvent, ConfigStore, OAuthProvider, SessionStore};
+pub use service::{
+    ChatProvider, ChatStreamEvent, ConfigStore, OAuthCallbackPayload, OAuthProvider, OAuthStart,
+    PendingOAuthFlow, SessionStore, TokenBundle,
+};
 pub use state::{
     FileSecretStore, InMemorySecretStore, InMemoryStateStore, SecretStore, StateStore,
 };
