@@ -435,7 +435,7 @@ fn run_cli_via_daemon(command: CliCommand) -> CliOutput {
 fn execute_via_daemon(command: CliCommand) -> Result<CliOutput, OberonError> {
     match command {
         CliCommand::DaemonStart => {
-            ensure_daemon_running()?;
+            restart_daemon()?;
             format_status_output(daemon_client()?.send(&oberon4_core::DaemonCommand::GetStatus)?)
         }
         CliCommand::DaemonStop => {
@@ -852,6 +852,27 @@ fn ensure_daemon_running() -> Result<(), OberonError> {
 
     Err(OberonError::Storage(
         "daemon failed to become ready after spawn".to_string(),
+    ))
+}
+
+fn restart_daemon() -> Result<(), OberonError> {
+    let client = daemon_client()?;
+    if client.send(&oberon4_core::DaemonCommand::GetStatus).is_ok() {
+        let _ = client.send(&oberon4_core::DaemonCommand::Shutdown);
+        thread::sleep(Duration::from_millis(150));
+    }
+
+    spawn_daemon_process(client.socket_path().to_path_buf())?;
+
+    for _ in 0..40 {
+        if client.send(&oberon4_core::DaemonCommand::GetStatus).is_ok() {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    Err(OberonError::Storage(
+        "daemon failed to become ready after restart".to_string(),
     ))
 }
 

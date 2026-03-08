@@ -1653,20 +1653,24 @@ impl TuiShellState {
                 } else {
                     OAuthProviderKind::Anthropic
                 };
-                    match self.menu_index {
-                        0 => {
-                            self.set_activity(ActivityState::Loading, "starting oauth flow");
-                            let start = app.connect_account(provider)?;
-                            open_browser(&start.url)?;
-                            let callback = wait_for_oauth_callback(
-                                &start.redirect_uri,
-                                Duration::from_secs(300),
-                            )?;
-                            let message =
-                                app.complete_oauth_connect(&start.flow_id, callback)?;
-                            self.refresh_runtime_data(app);
-                            self.set_activity(ActivityState::Idle, message);
-                        }
+                match self.menu_index {
+                    0 => {
+                        self.set_activity(ActivityState::Loading, "starting oauth flow");
+                        let start = match app.connect_account(provider) {
+                            Ok(start) => start,
+                            Err(err) if oauth_connect_requires_daemon_refresh(&err) => {
+                                restart_daemon_process(app.client.socket_path().to_path_buf())?;
+                                app.connect_account(provider)?
+                            }
+                            Err(err) => return Err(err),
+                        };
+                        open_browser(&start.url)?;
+                        let callback =
+                            wait_for_oauth_callback(&start.redirect_uri, Duration::from_secs(300))?;
+                        let message = app.complete_oauth_connect(&start.flow_id, callback)?;
+                        self.refresh_runtime_data(app);
+                        self.set_activity(ActivityState::Idle, message);
+                    }
                     1 => self.push_route(
                         ScreenRoute::AccountList {
                             provider,
@@ -3909,6 +3913,14 @@ fn delete_session_requires_daemon_refresh(err: &OberonError) -> bool {
     let message = err.to_string();
     message.contains("unknown variant `delete_session`")
         || message.contains("unknown variant 'delete_session'")
+}
+
+fn oauth_connect_requires_daemon_refresh(err: &OberonError) -> bool {
+    let message = err.to_string();
+    message.contains("missing field `flow_id`")
+        || message.contains("missing field 'flow_id'")
+        || message.contains("unknown variant `complete_oauth_connect`")
+        || message.contains("unknown variant 'complete_oauth_connect'")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
