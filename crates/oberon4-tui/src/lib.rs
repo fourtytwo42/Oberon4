@@ -49,6 +49,7 @@ use ratatui::{
 pub enum TuiCommand {
     Help,
     Quit,
+    Stop,
     New,
     Status,
     Sessions,
@@ -235,9 +236,10 @@ impl Default for TuiLaunchOptions {
 const FOOTER_HEIGHT: u16 = 5;
 const CODE_BLOCK_BG: Color = Color::Rgb(28, 32, 40);
 const CODE_BLOCK_FG: Color = Color::Rgb(185, 220, 255);
-const COMMAND_CATALOG: [(&str, bool); 17] = [
+const COMMAND_CATALOG: [(&str, bool); 18] = [
     ("/help", false),
     ("/quit", false),
+    ("/stop", false),
     ("/new", false),
     ("/status", false),
     ("/sessions", false),
@@ -254,7 +256,7 @@ const COMMAND_CATALOG: [(&str, bool); 17] = [
     ("/load", true),
     ("/fork", true),
 ];
-const EXTENDED_HELP: &str = "/help /quit /new /status /sessions /settings /accounts /diagnostics /more /config /model <name> /endpoint <url> /system <text> /clear /save <name> /load <name> /fork <name>";
+const EXTENDED_HELP: &str = "/help /quit /stop /new /status /sessions /settings /accounts /diagnostics /more /config /model <name> /endpoint <url> /system <text> /clear /save <name> /load <name> /fork <name>";
 const SESSION_SIDEBAR_WIDTH: u16 = 18;
 const SESSION_VISIBLE_WIDTH: usize = 12;
 
@@ -389,6 +391,10 @@ impl TuiApp {
                 output: "quitting".to_string(),
                 should_quit: true,
             }),
+            TuiCommand::Stop => Ok(TuiResponse {
+                output: "no request in flight".to_string(),
+                should_quit: false,
+            }),
             TuiCommand::New => {
                 self.transcript.clear();
                 Ok(TuiResponse {
@@ -397,7 +403,7 @@ impl TuiApp {
                 })
             }
             TuiCommand::Sessions => Ok(TuiResponse {
-                output: "sessions workspace opened".to_string(),
+                output: "sessions focused".to_string(),
                 should_quit: false,
             }),
             TuiCommand::Settings => Ok(TuiResponse {
@@ -603,6 +609,10 @@ impl DaemonBackedTuiApp {
                 output: "quitting".to_string(),
                 should_quit: true,
             }),
+            TuiCommand::Stop => Ok(TuiResponse {
+                output: "no request in flight".to_string(),
+                should_quit: false,
+            }),
             TuiCommand::New => {
                 self.transcript.clear();
                 Ok(TuiResponse {
@@ -611,7 +621,7 @@ impl DaemonBackedTuiApp {
                 })
             }
             TuiCommand::Sessions => Ok(TuiResponse {
-                output: "sessions workspace opened".to_string(),
+                output: "sessions focused".to_string(),
                 should_quit: false,
             }),
             TuiCommand::Settings => Ok(TuiResponse {
@@ -1240,17 +1250,6 @@ impl TuiShellState {
     }
 
     fn handle_escape(&mut self) {
-        if matches!(self.workspace, Workspace::Sessions)
-            && matches!(self.current_route(), ScreenRoute::SessionsRoot)
-        {
-            if !self.session_picker.query.is_empty() {
-                self.clear_session_picker_query();
-                self.status = "session search cleared".to_string();
-            } else {
-                self.close_overlay();
-            }
-            return;
-        }
         if self.autocomplete.is_some() {
             self.autocomplete = None;
             return;
@@ -1501,12 +1500,9 @@ impl TuiShellState {
     fn open_route_for_command(&mut self, command: &TuiCommand) {
         match command {
             TuiCommand::Sessions => {
-                self.workspace = Workspace::Sessions;
-                self.screen_stack = vec![ScreenRoute::SessionsRoot];
+                self.workspace = Workspace::Chat;
+                self.screen_stack = vec![ScreenRoute::ChatRoot];
                 self.focus = FocusTarget::List;
-                self.session_picker = SessionPickerState::default();
-                self.refresh_session_picker_matches();
-                self.select_current_session_in_picker();
             }
             _ => {
                 if let Some(workspace) = Self::route_for_command(command) {
@@ -1570,6 +1566,7 @@ impl TuiShellState {
         }
     }
 
+    #[allow(dead_code)]
     fn refresh_session_picker_matches(&mut self) {
         let mut scored = self
             .session_sidebar_items()
@@ -1595,6 +1592,7 @@ impl TuiShellState {
         }
     }
 
+    #[allow(dead_code)]
     fn select_current_session_in_picker(&mut self) {
         self.session_picker.selected = self
             .session_picker
@@ -1604,12 +1602,14 @@ impl TuiShellState {
             .unwrap_or(0);
     }
 
+    #[allow(dead_code)]
     fn clear_session_picker_query(&mut self) {
         self.session_picker.query.clear();
         self.refresh_session_picker_matches();
         self.select_current_session_in_picker();
     }
 
+    #[allow(dead_code)]
     fn session_picker_label(&self, item: SessionSidebarItem) -> String {
         match item {
             SessionSidebarItem::CurrentChat => format!("{} (current)", self.current_chat_sidebar_title()),
@@ -1621,6 +1621,7 @@ impl TuiShellState {
         }
     }
 
+    #[allow(dead_code)]
     fn selected_session_picker_item(&self) -> Option<SessionSidebarItem> {
         self.session_picker
             .filtered_items
@@ -1628,6 +1629,7 @@ impl TuiShellState {
             .copied()
     }
 
+    #[allow(dead_code)]
     fn update_session_picker_query(
         &mut self,
         query: String,
@@ -2200,7 +2202,7 @@ impl TuiShellState {
                     match command {
                         TuiCommand::Help => "help overlay opened",
                         TuiCommand::Status => "status overlay opened",
-                        TuiCommand::Sessions => "session picker opened",
+                        TuiCommand::Sessions => "sessions focused",
                         TuiCommand::Settings | TuiCommand::Config => "settings overlay opened",
                         TuiCommand::Accounts => "accounts overlay opened",
                         TuiCommand::Diagnostics => "diagnostics overlay opened",
@@ -2707,7 +2709,7 @@ fn run_terminal_loop(
                         shell.session_picker = SessionPickerState::default();
                         shell.refresh_runtime_data(app);
                         shell.select_current_session_in_picker();
-                        shell.set_activity(ActivityState::Idle, "session picker opened");
+                        shell.set_activity(ActivityState::Idle, "sessions focused");
                     }
                     KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
@@ -2816,10 +2818,14 @@ fn run_terminal_loop(
                         {
                             shell.set_activity(ActivityState::Idle, "command completed");
                         } else if pending_submission.is_some() {
-                            if !handle_pending_local_command(shell)? {
+                            if matches!(parse_tui_command(shell.input.trim()), Ok(TuiCommand::Stop))
+                            {
+                                shell.input.clear();
+                                cancel_pending_submission(&mut pending_submission, shell);
+                            } else if !handle_pending_local_command(shell)? {
                                 shell.set_activity(
                                     ActivityState::Running,
-                                    "request in flight; wait, or press Esc/Ctrl+C to quit",
+                                    "request in flight; use /stop to cancel",
                                 );
                             }
                         } else if let Some(pending) = start_async_submit(app, shell)? {
@@ -2880,8 +2886,12 @@ fn handle_pending_local_command(shell: &mut TuiShellState) -> Result<bool, Obero
             output: "request in flight".to_string(),
             should_quit: false,
         },
+        TuiCommand::Stop => TuiResponse {
+            output: "response stopped".to_string(),
+            should_quit: false,
+        },
         TuiCommand::Sessions => TuiResponse {
-            output: "sessions workspace opened".to_string(),
+            output: "sessions focused".to_string(),
             should_quit: false,
         },
         TuiCommand::Settings | TuiCommand::Config => TuiResponse {
@@ -3035,6 +3045,26 @@ fn handle_pending_timeout(
         }
     }
     shell.set_activity(ActivityState::Error, "request timed out");
+}
+
+fn cancel_pending_submission(
+    pending_submission: &mut Option<PendingSubmission>,
+    shell: &mut TuiShellState,
+) -> bool {
+    let Some(pending) = pending_submission.take() else {
+        return false;
+    };
+
+    if let Some(line) = shell.transcript.get(pending.assistant_line_index) {
+        if (line.content == "..." || line.content.is_empty())
+            && pending.assistant_line_index < shell.transcript.len()
+        {
+            shell.transcript.remove(pending.assistant_line_index);
+        }
+    }
+    shell.scroll_transcript_to_bottom();
+    shell.set_activity(ActivityState::Idle, "response stopped");
+    true
 }
 
 fn handle_async_ui_event(
@@ -3861,6 +3891,7 @@ fn render_help_workspace(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
     frame.render_widget(
         Paragraph::new(Text::from(vec![
             Line::raw("/new         start fresh chat"),
+            Line::raw("/stop        stop current reply"),
             Line::raw("/sessions    browse chats"),
             Line::raw("/settings    open settings"),
             Line::raw("/status      show status"),
@@ -4048,7 +4079,7 @@ fn render_footer(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
         );
     } else {
         let hint = if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
-            "/new /help /sessions /settings /status /accounts /diagnostics /more /quit | Up/Down history"
+            "/new /stop /help /sessions /settings /status /accounts /diagnostics /more /quit | Up/Down history"
         } else if matches!(shell.workspace, Workspace::Sessions) {
             "Type to filter | Up/Down preview | Enter open | Esc clear/back"
         } else {
@@ -4304,7 +4335,7 @@ fn submit_inline_input(
                     match command {
                         TuiCommand::Help => "help opened",
                         TuiCommand::Status => "status opened",
-                        TuiCommand::Sessions => "session picker opened",
+                        TuiCommand::Sessions => "sessions focused",
                         TuiCommand::Settings | TuiCommand::Config => "settings opened",
                         TuiCommand::Accounts => "accounts opened",
                         TuiCommand::Diagnostics => "diagnostics opened",
@@ -4459,6 +4490,7 @@ pub fn parse_tui_command(input: &str) -> Result<TuiCommand, OberonError> {
     match command {
         "/help" => Ok(TuiCommand::Help),
         "/quit" => Ok(TuiCommand::Quit),
+        "/stop" => Ok(TuiCommand::Stop),
         "/new" => Ok(TuiCommand::New),
         "/status" => Ok(TuiCommand::Status),
         "/sessions" => Ok(TuiCommand::Sessions),
@@ -4482,6 +4514,7 @@ fn canonical_tui_command(command: &str) -> &str {
     match command.to_ascii_lowercase().as_str() {
         "/help" | "/halp" | "/commands" => "/help",
         "/quit" | "/exit" | "/close" => "/quit",
+        "/stop" | "/cancel" | "/abort" => "/stop",
         "/new" | "/fresh" | "/start" => "/new",
         "/status" | "/stat" | "/stats" => "/status",
         "/sessions" | "/session" | "/sessoins" | "/sessons" => "/sessions",
@@ -5098,6 +5131,7 @@ mod tests {
         PendingSubmission, ScreenRoute, SessionMatchScore, TuiApp, TuiCommand, TuiShellState,
         UiLine, Workspace,
         build_transcript_rows, build_transcript_viewport, finalize_streamed_assistant,
+        cancel_pending_submission,
         format_assistant_markdown, session_match_score,
         handle_async_ui_event, handle_pending_local_command,
         handle_pending_timeout, parse_callback_request, parse_tui_command,
@@ -5125,6 +5159,8 @@ mod tests {
         assert_eq!(parse_tui_command("/halp").unwrap(), TuiCommand::Help);
         assert_eq!(parse_tui_command("/new").unwrap(), TuiCommand::New);
         assert_eq!(parse_tui_command("/fresh").unwrap(), TuiCommand::New);
+        assert_eq!(parse_tui_command("/stop").unwrap(), TuiCommand::Stop);
+        assert_eq!(parse_tui_command("/cancel").unwrap(), TuiCommand::Stop);
         assert_eq!(
             parse_tui_command("/sessions").unwrap(),
             TuiCommand::Sessions
@@ -5864,11 +5900,10 @@ mod tests {
         };
         shell.submit(&mut app).unwrap();
 
-        assert_eq!(shell.status(), "session picker opened");
-        assert!(matches!(shell.workspace, Workspace::Sessions));
+        assert_eq!(shell.status(), "sessions focused");
+        assert!(matches!(shell.workspace, Workspace::Chat));
         assert!(matches!(shell.focus, FocusTarget::List));
         assert_eq!(shell.session_sidebar_items().len(), 1);
-        assert_eq!(shell.session_picker.filtered_items.len(), 1);
 
         let client = DaemonIpcClient::new(&socket_path);
         let _ = client.send(&oberon4_core::DaemonCommand::Shutdown).unwrap();
@@ -6012,133 +6047,6 @@ mod tests {
         assert_eq!(session_match_score("zzz", "alpha beta"), None);
     }
 
-    #[test]
-    fn session_picker_filters_and_escape_restores_active_chat() {
-        let socket_path = std::env::temp_dir().join(format!(
-            "oberon4-tui-session-picker-test-{}.sock",
-            std::process::id()
-        ));
-        let thread_socket = socket_path.clone();
-        let handle = thread::spawn(move || {
-            let app = DaemonApp::new(
-                DaemonRuntime::default(),
-                FakeChatProvider {
-                    reply: "daemon reply".to_string(),
-                },
-                FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
-                FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
-                AccountRegistry::default(),
-                InMemorySecretStore::default(),
-                InMemoryAccountMetadataStore::default(),
-            );
-            serve_unix_socket(&thread_socket, app)
-        });
-
-        for _ in 0..20 {
-            if socket_path.exists() {
-                break;
-            }
-            thread::sleep(Duration::from_millis(25));
-        }
-
-        let mut app = DaemonBackedTuiApp::new(DaemonIpcClient::new(&socket_path));
-        app.handle_input("alpha prompt").unwrap();
-        app.handle_command(TuiCommand::Save("alpha-room".to_string()))
-            .unwrap();
-        app.handle_command(TuiCommand::Clear).unwrap();
-        app.handle_input("beta prompt").unwrap();
-        app.handle_command(TuiCommand::Save("beta-room".to_string()))
-            .unwrap();
-        app.handle_command(TuiCommand::Clear).unwrap();
-        app.handle_input("active prompt").unwrap();
-
-        let mut shell = TuiShellState {
-            input: "/sessions".to_string(),
-            ..TuiShellState::default()
-        };
-        shell.submit(&mut app).unwrap();
-        assert!(matches!(shell.workspace, Workspace::Sessions));
-
-        shell
-            .update_session_picker_query("beta".to_string(), &app)
-            .unwrap();
-        assert_eq!(shell.session_picker.filtered_items.len(), 1);
-        shell.preview_selected_session(&app).unwrap();
-        assert!(shell
-            .transcript()
-            .iter()
-            .any(|line| line.content.contains("beta prompt")));
-
-        shell.handle_escape();
-        assert!(shell.session_picker.query.is_empty());
-        shell.restore_active_chat_preview(&app);
-        assert!(shell
-            .transcript()
-            .iter()
-            .any(|line| line.content.contains("active prompt")));
-
-        let client = DaemonIpcClient::new(&socket_path);
-        let _ = client.send(&oberon4_core::DaemonCommand::Shutdown).unwrap();
-        handle.join().unwrap().unwrap();
-    }
-
-    #[test]
-    fn session_picker_enter_loads_selection_and_returns_to_composer() {
-        let socket_path = std::env::temp_dir().join(format!(
-            "oberon4-tui-session-picker-enter-test-{}.sock",
-            std::process::id()
-        ));
-        let thread_socket = socket_path.clone();
-        let handle = thread::spawn(move || {
-            let app = DaemonApp::new(
-                DaemonRuntime::default(),
-                FakeChatProvider {
-                    reply: "daemon reply".to_string(),
-                },
-                FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
-                FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
-                AccountRegistry::default(),
-                InMemorySecretStore::default(),
-                InMemoryAccountMetadataStore::default(),
-            );
-            serve_unix_socket(&thread_socket, app)
-        });
-
-        for _ in 0..20 {
-            if socket_path.exists() {
-                break;
-            }
-            thread::sleep(Duration::from_millis(25));
-        }
-
-        let mut app = DaemonBackedTuiApp::new(DaemonIpcClient::new(&socket_path));
-        app.handle_input("alpha prompt").unwrap();
-        app.handle_command(TuiCommand::Save("alpha-room".to_string()))
-            .unwrap();
-        app.handle_command(TuiCommand::Clear).unwrap();
-        app.handle_input("active prompt").unwrap();
-
-        let mut shell = TuiShellState {
-            input: "/sessions".to_string(),
-            ..TuiShellState::default()
-        };
-        shell.submit(&mut app).unwrap();
-        shell
-            .update_session_picker_query("alpha".to_string(), &app)
-            .unwrap();
-        shell.activate_current_list_item(&mut app).unwrap();
-
-        assert!(matches!(shell.workspace, Workspace::Chat));
-        assert!(matches!(shell.focus, FocusTarget::Composer));
-        assert!(shell
-            .transcript()
-            .iter()
-            .any(|line| line.content.contains("alpha prompt")));
-
-        let client = DaemonIpcClient::new(&socket_path);
-        let _ = client.send(&oberon4_core::DaemonCommand::Shutdown).unwrap();
-        handle.join().unwrap().unwrap();
-    }
 
     #[test]
     fn async_submit_completes_and_updates_shell() {
@@ -6256,9 +6164,41 @@ mod tests {
         assert_eq!(shell.status(), "request in flight");
         assert!(!shell.should_quit());
 
+        shell.input = "/stop".to_string();
+        assert!(handle_pending_local_command(&mut shell).unwrap());
+        assert_eq!(shell.status(), "response stopped");
+        assert!(!shell.should_quit());
+
         shell.input = "/quit".to_string();
         assert!(handle_pending_local_command(&mut shell).unwrap());
         assert!(shell.should_quit());
+    }
+
+    #[test]
+    fn cancel_pending_submission_stops_stream_and_keeps_partial_reply() {
+        let mut shell = TuiShellState::default();
+        shell.transcript.push(UiLine {
+            role: "user".to_string(),
+            content: "hello".to_string(),
+        });
+        shell.transcript.push(UiLine {
+            role: "assistant".to_string(),
+            content: "partial".to_string(),
+        });
+        let mut pending = Some(PendingSubmission {
+            receiver: mpsc::channel().1,
+            started_at: Instant::now(),
+            timeout: Duration::from_secs(1),
+            assistant_line_index: 1,
+            tool_line_indices: BTreeMap::new(),
+            tool_state: BTreeMap::new(),
+        });
+
+        assert!(cancel_pending_submission(&mut pending, &mut shell));
+        assert!(pending.is_none());
+        assert_eq!(shell.status(), "response stopped");
+        assert_eq!(shell.transcript().len(), 2);
+        assert_eq!(shell.transcript()[1].content, "partial");
     }
 
     #[test]
