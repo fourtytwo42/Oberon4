@@ -194,9 +194,15 @@ pub struct TuiShellState {
     transcript_follow: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TuiLaunchOptions {
     pub fullscreen: bool,
+}
+
+impl Default for TuiLaunchOptions {
+    fn default() -> Self {
+        Self { fullscreen: true }
+    }
 }
 
 const FOOTER_HEIGHT: u16 = 5;
@@ -1041,9 +1047,26 @@ impl TuiShellState {
         }
     }
 
+    fn overlay_open(&self) -> bool {
+        !matches!(self.workspace, Workspace::Chat)
+    }
+
+    fn close_overlay(&mut self) {
+        self.workspace = Workspace::Chat;
+        self.screen_stack = vec![ScreenRoute::ChatRoot];
+        self.menu_index = 0;
+        self.form_action = None;
+        self.focus = FocusTarget::Composer;
+    }
+
     fn handle_escape(&mut self) {
         if self.autocomplete.is_some() {
             self.autocomplete = None;
+            return;
+        }
+        if matches!(self.focus, FocusTarget::List) && matches!(self.workspace, Workspace::Chat) {
+            self.focus = FocusTarget::Composer;
+            self.status = "returned to composer".to_string();
             return;
         }
         if matches!(self.focus, FocusTarget::Form) && !self.input.is_empty() {
@@ -1062,7 +1085,7 @@ impl TuiShellState {
             return;
         }
         if !matches!(self.workspace, Workspace::Chat) {
-            self.set_workspace(Workspace::Chat);
+            self.close_overlay();
             return;
         }
         if !self.input.is_empty() {
@@ -1274,12 +1297,17 @@ impl TuiShellState {
     }
 
     fn open_route_for_command(&mut self, command: &TuiCommand) {
-        if let Some(workspace) = Self::route_for_command(command) {
-            if matches!(workspace, Workspace::Sessions) {
-                self.set_workspace(workspace);
+        match command {
+            TuiCommand::Sessions => {
+                self.workspace = Workspace::Chat;
+                self.screen_stack = vec![ScreenRoute::ChatRoot];
                 self.session_index = 0;
-            } else {
-                self.set_workspace(workspace);
+                self.focus = FocusTarget::List;
+            }
+            _ => {
+                if let Some(workspace) = Self::route_for_command(command) {
+                    self.set_workspace(workspace);
+                }
             }
         }
     }
@@ -1641,7 +1669,9 @@ impl TuiShellState {
         app: &mut DaemonBackedTuiApp,
     ) -> Result<bool, OberonError> {
         match self.current_route() {
-            ScreenRoute::SessionsRoot => {
+            ScreenRoute::ChatRoot | ScreenRoute::SessionsRoot
+                if matches!(self.workspace, Workspace::Chat) =>
+            {
                 if let Some(item) = self
                     .session_sidebar_items()
                     .get(self.session_index)
@@ -1671,7 +1701,8 @@ impl TuiShellState {
                                     })
                                     .collect();
                                 self.refresh_runtime_data(app);
-                                self.set_workspace(Workspace::Chat);
+                                self.workspace = Workspace::Chat;
+                                self.screen_stack = vec![ScreenRoute::ChatRoot];
                                 self.focus = FocusTarget::Composer;
                                 self.scroll_transcript_to_bottom();
                                 return Ok(true);
@@ -1683,7 +1714,8 @@ impl TuiShellState {
                             self.current_session_id = None;
                             self.current_session_title = None;
                             self.baseline_signature = None;
-                            self.set_workspace(Workspace::Chat);
+                            self.workspace = Workspace::Chat;
+                            self.screen_stack = vec![ScreenRoute::ChatRoot];
                             self.focus = FocusTarget::Composer;
                             self.scroll_transcript_to_bottom();
                             self.set_activity(ActivityState::Idle, "new session opened");
@@ -1770,14 +1802,14 @@ impl TuiShellState {
                 self.set_activity(
                     ActivityState::Idle,
                     match command {
-                        TuiCommand::Help => "help workspace opened",
-                        TuiCommand::Status => "status workspace opened",
-                        TuiCommand::Sessions => "sessions workspace opened",
-                        TuiCommand::Settings | TuiCommand::Config => "settings workspace opened",
-                        TuiCommand::Accounts => "accounts workspace opened",
-                        TuiCommand::Diagnostics => "diagnostics workspace opened",
-                        TuiCommand::More => "more workspace opened",
-                        _ => "workspace opened",
+                        TuiCommand::Help => "help overlay opened",
+                        TuiCommand::Status => "status overlay opened",
+                        TuiCommand::Sessions => "sessions focused",
+                        TuiCommand::Settings | TuiCommand::Config => "settings overlay opened",
+                        TuiCommand::Accounts => "accounts overlay opened",
+                        TuiCommand::Diagnostics => "diagnostics overlay opened",
+                        TuiCommand::More => "more overlay opened",
+                        _ => "overlay opened",
                     },
                 );
                 return Ok(());
@@ -2010,7 +2042,8 @@ fn run_inline_terminal_loop(
             _ => {}
         }
 
-        if matches!(shell.workspace, Workspace::Chat) && !matches!(previous_workspace, Workspace::Chat)
+        if matches!(shell.workspace, Workspace::Chat)
+            && !matches!(previous_workspace, Workspace::Chat)
         {
             print_inline_transcript(stdout, shell)?;
         } else if rerender_workspace {
@@ -2070,9 +2103,12 @@ fn run_terminal_loop(
                         shell.set_activity(ActivityState::Idle, "quitting");
                     }
                     KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        shell.set_workspace(Workspace::Sessions);
+                        shell.workspace = Workspace::Chat;
+                        shell.screen_stack = vec![ScreenRoute::ChatRoot];
+                        shell.focus = FocusTarget::List;
+                        shell.session_index = 0;
                         shell.refresh_runtime_data(app);
-                        shell.set_activity(ActivityState::Idle, "sessions workspace opened");
+                        shell.set_activity(ActivityState::Idle, "sessions focused");
                     }
                     KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
@@ -2095,8 +2131,10 @@ fn run_terminal_loop(
                     KeyCode::Up => match shell.focus {
                         FocusTarget::Menu => shell.move_menu_selection(-1),
                         FocusTarget::List => match shell.current_route() {
-                            ScreenRoute::SessionsRoot => shell.move_session_selection(-1),
                             ScreenRoute::AccountList { .. } => shell.move_account_selection(-1),
+                            _ if matches!(shell.workspace, Workspace::Chat) => {
+                                shell.move_session_selection(-1)
+                            }
                             _ => {}
                         },
                         FocusTarget::Composer
@@ -2109,8 +2147,10 @@ fn run_terminal_loop(
                     KeyCode::Down => match shell.focus {
                         FocusTarget::Menu => shell.move_menu_selection(1),
                         FocusTarget::List => match shell.current_route() {
-                            ScreenRoute::SessionsRoot => shell.move_session_selection(1),
                             ScreenRoute::AccountList { .. } => shell.move_account_selection(1),
+                            _ if matches!(shell.workspace, Workspace::Chat) => {
+                                shell.move_session_selection(1)
+                            }
                             _ => {}
                         },
                         FocusTarget::Composer
@@ -2471,8 +2511,8 @@ fn finalize_streamed_assistant(
 fn render_terminal(frame: &mut Frame, shell: &TuiShellState) {
     let area = frame.size();
     let [header, body, footer] = Layout::vertical([
-        Constraint::Length(4),
-        Constraint::Min(5),
+        Constraint::Length(3),
+        Constraint::Min(8),
         Constraint::Length(FOOTER_HEIGHT),
     ])
     .areas(area);
@@ -2495,64 +2535,53 @@ fn render_terminal(frame: &mut Frame, shell: &TuiShellState) {
 fn render_header(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
     let session = shell.session_title_for_header();
     let dirty = if shell.is_dirty() { "*" } else { "" };
-    let header_lines = Text::from(vec![
-        Line::styled(
-            "Oberon4 TUI",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Line::raw(format!(
-            "workspace={} daemon={} activity={} endpoint={} model={} account={} session={}{}",
-            shell.workspace_title(),
+    let mode = if shell.overlay_open() {
+        format!("overlay={}", shell.workspace_title())
+    } else if matches!(shell.focus, FocusTarget::List) {
+        "focus=sessions".to_string()
+    } else {
+        "focus=chat".to_string()
+    };
+    let header_lines = Text::from(vec![Line::styled(
+        format!(
+            " Oberon4 | {} | daemon={} | {} | model={} | account={} | session={}{} | {} ",
+            shell.status_snapshot.endpoint,
             if shell.status_snapshot.running {
                 "running"
             } else {
                 "stopped"
             },
             shell.activity_label(),
-            shell.status_snapshot.endpoint,
             shell.status_snapshot.model,
             shell.status_snapshot.active_account,
             session,
             dirty,
-        )),
-    ]);
-    let header_widget = Paragraph::new(header_lines)
-        .block(Block::default().borders(Borders::ALL).title("Overview"));
+            mode,
+        ),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )]);
+    let header_widget =
+        Paragraph::new(header_lines).block(Block::default().borders(Borders::ALL).title("Chat"));
     frame.render_widget(header_widget, area);
 }
 
 fn render_body(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
-    match shell.workspace {
-        Workspace::Chat => render_chat_workspace(frame, area, shell, false),
-        Workspace::Sessions => render_chat_workspace(frame, area, shell, true),
-        Workspace::Settings => render_settings_workspace(frame, area, shell),
-        Workspace::Status => render_status_workspace(frame, area, shell),
-        Workspace::Help => render_help_workspace(frame, area, shell),
-        Workspace::Accounts => render_accounts_workspace(frame, area, shell),
-        Workspace::Diagnostics => render_diagnostics_workspace(frame, area, shell),
-        Workspace::Reserved => render_reserved_workspace(frame, area, shell),
+    render_chat_workspace(frame, area, shell);
+    if shell.overlay_open() {
+        render_overlay(frame, area, shell);
     }
 }
 
-fn render_chat_workspace(
-    frame: &mut Frame,
-    area: Rect,
-    shell: &TuiShellState,
-    show_sessions: bool,
-) {
-    if show_sessions && shell.session_sidebar_items().len() > 1 {
-        let [sidebar, main] = Layout::horizontal([
-            Constraint::Length(SESSION_SIDEBAR_WIDTH),
-            Constraint::Min(20),
-        ])
-        .areas(area);
-        render_sessions_sidebar(frame, sidebar, shell);
-        render_transcript(frame, main, shell);
-    } else {
-        render_transcript(frame, area, shell);
-    }
+fn render_chat_workspace(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
+    let [sidebar, main] = Layout::horizontal([
+        Constraint::Length(SESSION_SIDEBAR_WIDTH),
+        Constraint::Min(20),
+    ])
+    .areas(area);
+    render_sessions_sidebar(frame, sidebar, shell);
+    render_transcript(frame, main, shell);
 }
 
 fn render_transcript(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
@@ -2661,9 +2690,50 @@ fn render_sessions_sidebar(frame: &mut Frame, area: Rect, shell: &TuiShellState)
         })
         .collect();
     frame.render_widget(
-        List::new(items).block(Block::default().borders(Borders::ALL).title("Sessions")),
+        List::new(items).block(Block::default().borders(Borders::ALL).title(
+            if matches!(shell.focus, FocusTarget::List) {
+                "Sessions *"
+            } else {
+                "Sessions"
+            },
+        )),
         area,
     );
+}
+
+fn overlay_area(area: Rect) -> Rect {
+    let width = area
+        .width
+        .saturating_mul(3)
+        .saturating_div(4)
+        .max(40)
+        .min(area.width);
+    let height = area
+        .height
+        .saturating_mul(3)
+        .saturating_div(4)
+        .max(10)
+        .min(area.height);
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
+
+fn render_overlay(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
+    let overlay = overlay_area(area);
+    frame.render_widget(WidgetClear, overlay);
+    match shell.workspace {
+        Workspace::Settings => render_settings_workspace(frame, overlay, shell),
+        Workspace::Status => render_status_workspace(frame, overlay, shell),
+        Workspace::Help => render_help_workspace(frame, overlay, shell),
+        Workspace::Accounts => render_accounts_workspace(frame, overlay, shell),
+        Workspace::Diagnostics => render_diagnostics_workspace(frame, overlay, shell),
+        Workspace::Reserved => render_reserved_workspace(frame, overlay, shell),
+        Workspace::Chat | Workspace::Sessions => {}
+    }
 }
 
 fn render_settings_workspace(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
@@ -4005,7 +4075,7 @@ mod tests {
         }
         shell.submit(&mut app).unwrap();
 
-        assert_eq!(shell.status(), "help workspace opened");
+        assert_eq!(shell.status(), "help overlay opened");
         assert!(matches!(shell.workspace, Workspace::Help));
 
         let client = DaemonIpcClient::new(&socket_path);
@@ -4049,8 +4119,8 @@ mod tests {
         };
         shell.submit(&mut app).unwrap();
 
-        assert_eq!(shell.status(), "sessions workspace opened");
-        assert!(matches!(shell.workspace, Workspace::Sessions));
+        assert_eq!(shell.status(), "sessions focused");
+        assert!(matches!(shell.workspace, Workspace::Chat));
         assert!(matches!(shell.focus, FocusTarget::List));
         assert_eq!(shell.session_sidebar_items().len(), 2);
 

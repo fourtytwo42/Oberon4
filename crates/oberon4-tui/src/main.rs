@@ -1,7 +1,7 @@
 fn main() {
     let options = match std::env::args().skip(1).collect::<Vec<_>>().as_slice() {
         [] => oberon4_tui::TuiLaunchOptions::default(),
-        [flag] if flag == "--no-alt-screen" => oberon4_tui::TuiLaunchOptions::default(),
+        [flag] if flag == "--no-alt-screen" => oberon4_tui::TuiLaunchOptions { fullscreen: false },
         [flag] if flag == "--fullscreen" => oberon4_tui::TuiLaunchOptions { fullscreen: true },
         _ => {
             eprintln!("usage: oberon4-tui [--fullscreen|--no-alt-screen]");

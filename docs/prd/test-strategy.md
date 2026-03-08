@@ -79,7 +79,7 @@ Rules:
 - `FR-001`: lifecycle tests (start, health, graceful stop)
 - `FR-002`: command parsing + render output tests plus PTY smoke for the real slash-command chat flow and `/help`, `/status`, `/sessions`, `/settings`, prompt, `/save`, `/load`, `/quit` path
   - include unit coverage for screen-stack `Esc` precedence, slash autocomplete, multiline composer behavior, session-browser state transitions, `/fork`, auto-titled session persistence, and settings/account menu actions
-  - include PTY coverage for the default inline chat render, session-browser/menu behavior, prompt round-trip, `/sessions`, `/settings`, `/status`, `/help`, save/fork/load path, and explicit `--fullscreen` launch mode
+  - include PTY coverage for the default structured fullscreen chat render, permanent session rail behavior, overlay navigation for `/settings`, `/status`, `/help`, `/accounts`, `/diagnostics`, prompt round-trip, save/fork/load path, and explicit `--no-alt-screen` compatibility mode
 - `FR-003`: endpoint config validation + mapping tests + timeout tests
 - `FR-004`: crate API contract tests
 - `FR-005`: tray adapter tests for action mapping and unsupported platform fallback

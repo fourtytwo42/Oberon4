@@ -37,7 +37,7 @@ Status: active
 - [ ] `FR-007` OpenAI and Anthropic OAuth flows verified
 - [ ] `FR-008` CLI surface verified
 - [ ] `FR-009` TUI surface verified
-  - includes default inline `oberon4 tui`, explicit `oberon4 tui --fullscreen`, slash-command navigation, `/sessions`, `/settings`, `/accounts`, `/diagnostics`, `/more`, `/fork`, multiline drafting, session-browser UX, automatic session titling, and terminal scrollback-friendly behavior coverage
+  - includes default fullscreen `oberon4 tui`, explicit inline compatibility `oberon4 tui --no-alt-screen`, slash-command overlay navigation, permanent session rail UX, `/sessions`, `/settings`, `/accounts`, `/diagnostics`, `/more`, `/fork`, multiline drafting, and automatic session titling coverage
 - [ ] account metadata compatibility coverage present for legacy/additive registry shapes
 
 ## Diagnostic Readiness

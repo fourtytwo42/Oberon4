@@ -854,6 +854,8 @@ fn launch_tui(fullscreen: bool) -> Result<CliOutput, OberonError> {
     let mut command = launch_command(binary_launch_target("oberon4-tui", "OBERON4_TUI_BIN")?);
     if fullscreen {
         command.arg("--fullscreen");
+    } else {
+        command.arg("--no-alt-screen");
     }
     let status = command
         .stdin(Stdio::inherit())
@@ -1329,7 +1331,7 @@ pub fn parse_command(args: &[String]) -> Result<CliCommand, OberonError> {
             )),
         },
         "tui" => match parts.next() {
-            None => Ok(CliCommand::Tui { fullscreen: false }),
+            None => Ok(CliCommand::Tui { fullscreen: true }),
             Some("--no-alt-screen") if parts.next().is_none() => {
                 Ok(CliCommand::Tui { fullscreen: false })
             }
@@ -1698,6 +1700,12 @@ mod tests {
     }
 
     #[test]
+    fn parses_tui_default_to_fullscreen() {
+        let command = parse_command(&["tui".into()]).unwrap();
+        assert_eq!(command, CliCommand::Tui { fullscreen: true });
+    }
+
+    #[test]
     fn parses_tui_fullscreen_command() {
         let command = parse_command(&["tui".into(), "--fullscreen".into()]).unwrap();
         assert_eq!(command, CliCommand::Tui { fullscreen: true });
@@ -1965,7 +1973,7 @@ mod tests {
         }
 
         let mut app = CliApp::default();
-        let output = app.run(CliCommand::Tui { fullscreen: false });
+        let output = app.run(CliCommand::Tui { fullscreen: true });
 
         assert_eq!(output.exit_code, 0);
 
@@ -1982,7 +1990,7 @@ mod tests {
         }
 
         let mut app = CliApp::default();
-        let output = app.run(CliCommand::Tui { fullscreen: false });
+        let output = app.run(CliCommand::Tui { fullscreen: true });
 
         assert_eq!(output.exit_code, 3);
         assert!(output.stderr.contains("tui exited with status"));

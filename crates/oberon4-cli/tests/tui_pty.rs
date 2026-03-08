@@ -378,9 +378,10 @@ fn tui_pty_initial_render_and_quit() {
     let socket_path = data_dir.join("daemon.sock");
 
     let mut harness = PtyHarness::spawn(&cli, &data_dir, &socket_path, &[]);
-    harness.wait_for_text("Oberon4 TUI", Duration::from_secs(5));
-    harness.wait_for_text("Inline mode.", Duration::from_secs(5));
-    harness.wait_for_text("you>", Duration::from_secs(5));
+    harness.wait_for_text("Oberon4 |", Duration::from_secs(5));
+    harness.wait_for_text("Transcript", Duration::from_secs(5));
+    harness.wait_for_text("Sessions", Duration::from_secs(5));
+    harness.wait_for_text("Composer", Duration::from_secs(5));
 
     let _ = mock_server.base_url;
 
@@ -408,29 +409,30 @@ fn tui_pty_command_and_prompt_flow() {
     );
 
     let mut harness = PtyHarness::spawn(&cli, &data_dir, &socket_path, &[]);
-    harness.wait_for_text("Oberon4 TUI", Duration::from_secs(5));
-    harness.wait_for_text("Inline mode.", Duration::from_secs(5));
+    harness.wait_for_text("Oberon4 |", Duration::from_secs(5));
+    harness.wait_for_text("Transcript", Duration::from_secs(5));
+    harness.wait_for_text("Sessions", Duration::from_secs(5));
 
     harness.send_line("/settings");
     harness.wait_for_text("Settings", Duration::from_secs(5));
     harness.wait_for_text("OpenAI OAuth", Duration::from_secs(5));
 
     harness.send_bytes(&[27]);
-    harness.wait_for_text("you>", Duration::from_secs(5));
+    harness.wait_for_text("Composer", Duration::from_secs(5));
 
     harness.send_line("/status");
     harness.wait_for_text("Status", Duration::from_secs(5));
     harness.wait_for_text("endpoint:", Duration::from_secs(5));
 
     harness.send_bytes(&[27]);
-    harness.wait_for_text("you>", Duration::from_secs(5));
+    harness.wait_for_text("Composer", Duration::from_secs(5));
 
     harness.send_line("/help");
     harness.wait_for_text("Help", Duration::from_secs(5));
     harness.wait_for_text("/sessions", Duration::from_secs(5));
 
     harness.send_bytes(&[27]);
-    harness.wait_for_text("you>", Duration::from_secs(5));
+    harness.wait_for_text("Composer", Duration::from_secs(5));
 
     harness.send_line("say hello from pty");
     harness.wait_for_text("pty smoke ok", Duration::from_secs(5));
@@ -442,10 +444,10 @@ fn tui_pty_command_and_prompt_flow() {
     harness.wait_for_text("forked session smoke-copy", Duration::from_secs(5));
 
     harness.send_line("/sessions");
-    harness.wait_for_text("Sessions", Duration::from_secs(5));
+    harness.wait_for_text("Sessions *", Duration::from_secs(5));
     harness.send_bytes(b"\x1b[B");
     harness.send_bytes(b"\r");
-    harness.wait_for_text("you>", Duration::from_secs(5));
+    harness.wait_for_text("Composer", Duration::from_secs(5));
     let output = harness.raw_output();
     assert!(!output.contains("command: /load"));
     assert!(!output.contains("loaded session"));
@@ -464,17 +466,17 @@ fn tui_pty_command_and_prompt_flow() {
 }
 
 #[test]
-fn tui_pty_fullscreen_mode_preserves_structured_render() {
+fn tui_pty_inline_mode_preserves_compatibility_path() {
     let mock_server = MockHotspotServer::start();
     let cli = debug_binary("oberon4-cli");
     let data_dir = temp_dir("inline-data");
     std::fs::create_dir_all(&data_dir).expect("data dir should exist");
     let socket_path = data_dir.join("daemon.sock");
 
-    let mut harness = PtyHarness::spawn(&cli, &data_dir, &socket_path, &["--fullscreen"]);
+    let mut harness = PtyHarness::spawn(&cli, &data_dir, &socket_path, &["--no-alt-screen"]);
     harness.wait_for_text("Oberon4 TUI", Duration::from_secs(5));
-    harness.wait_for_text("Overview", Duration::from_secs(5));
-    harness.wait_for_text("workspace=Chat", Duration::from_secs(5));
+    harness.wait_for_text("Inline mode.", Duration::from_secs(5));
+    harness.wait_for_text("you>", Duration::from_secs(5));
 
     let _ = mock_server.base_url;
 

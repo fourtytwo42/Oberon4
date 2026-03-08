@@ -74,7 +74,7 @@ Build a local-first, modular agent host with:
 - `FR-008` CLI command surface
   - `AC-008.1`: CLI exposes `daemon start`, `daemon stop`, and `daemon status`.
   - `AC-008.2`: CLI exposes `tui` to launch the interactive terminal UI in inline scrollback-native mode.
-  - `AC-008.2a`: CLI exposes `tui --fullscreen` for the structured full-screen workspace UI and keeps `tui --no-alt-screen` as a backward-compatible alias for inline mode.
+  - `AC-008.2a`: CLI launches the structured full-screen chat UI by default and keeps `tui --no-alt-screen` as an explicit inline compatibility mode.
   - `AC-008.3`: CLI exposes `config show` and `config set <key> <value>` for endpoint/model/runtime configuration.
   - `AC-008.4`: CLI exposes `endpoint test` to validate the configured OpenAI-compatible endpoint.
   - `AC-008.5`: CLI exposes one-shot `chat --message <text>` execution for scripting and smoke checks.
@@ -169,8 +169,10 @@ Build a local-first, modular agent host with:
   - prints daemon status, pid when available, uptime, and endpoint health summary
 - `oberon4 tui`
   - launches the interactive terminal UI in inline scrollback-native mode and connects to the local daemon
+- `oberon4 tui`
+  - launches the structured full-screen chat UI with left sessions rail and overlay menus
 - `oberon4 tui --fullscreen`
-  - launches the structured full-screen workspace UI explicitly
+  - explicit alias for the same structured full-screen UI
 - `oberon4 config show`
   - prints effective runtime configuration with secrets redacted
 - `oberon4 config set <key> <value>`
