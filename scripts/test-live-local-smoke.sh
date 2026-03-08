@@ -66,6 +66,12 @@ if [[ "${1:-}" == "run" && "${2:-}" == "-p" && "${3:-}" == "oberon4-cli" && "${4
       ;;
     config)
       printf 'doctor_config_%s\n' "${3:-unknown}" >>"${ORDER_FILE}"
+      if [[ "${2:-}" == "show" ]]; then
+        printf '{"endpoint":{"base_url":"%s","model":"%s","api_key_env":"<redacted>"}}\n' \
+          "${OBERON4_LIVE_BASE_URL:-}" \
+          "${OBERON4_LIVE_OPENAI_MODEL:-}"
+        exit 0
+      fi
       echo "set ${3:-}=${4:-}"
       exit 0
       ;;
@@ -195,11 +201,14 @@ FAIL_BUNDLE_DIR="$(latest_bundle_dir)"
 [[ "$(summary_value "${FAIL_SUMMARY}" stages.live_daemon_smoke)" == "fail" ]] || exit 1
 [[ "$(summary_value "${FAIL_SUMMARY}" stages.doctor_json)" == "pending" ]] || exit 1
 [[ -f "${FAIL_BUNDLE_DIR}/summary.json" ]] || { echo "missing failure summary" >&2; exit 1; }
+[[ -f "${FAIL_BUNDLE_DIR}/bundle-meta.json" ]] || { echo "missing bundle meta" >&2; exit 1; }
 [[ -f "${FAIL_BUNDLE_DIR}/commands.txt" ]] || { echo "missing failure commands.txt" >&2; exit 1; }
 [[ -f "${FAIL_BUNDLE_DIR}/env.txt" ]] || { echo "missing failure env.txt" >&2; exit 1; }
 [[ -f "${FAIL_BUNDLE_DIR}/doctor.json" ]] || { echo "missing fallback doctor.json" >&2; exit 1; }
+[[ -f "${FAIL_BUNDLE_DIR}/effective-config.json" ]] || { echo "missing effective-config.json" >&2; exit 1; }
 [[ -f "${FAIL_BUNDLE_DIR}/logs/live_daemon_smoke.log" ]] || { echo "missing daemon log in bundle" >&2; exit 1; }
 assert_contains "${FAIL_OUTPUT}" "stage=live_daemon_smoke status=fail bundle=${FAIL_BUNDLE_DIR} log=${FAIL_RUN_DIR}/live_daemon_smoke.log"
+assert_contains "${FAIL_BUNDLE_DIR}/bundle-meta.json" '"entrypoint": "live-local-smoke"'
 assert_contains "${FAIL_BUNDLE_DIR}/commands.txt" "live_daemon_smoke: bash scripts/live-daemon-smoke.sh"
 assert_contains "${FAIL_BUNDLE_DIR}/env.txt" "OBERON4_LIVE_API_KEY_ENV=TEST_LIVE_KEY"
 assert_contains "${FAIL_BUNDLE_DIR}/env.txt" "OBERON4_LIVE_API_KEY_STATUS=set"
@@ -220,6 +229,7 @@ HOTSPOT_FAIL_BUNDLE_DIR="$(latest_bundle_dir)"
 [[ "$(summary_value "${HOTSPOT_FAIL_SUMMARY}" stages.live_daemon_smoke)" == "pending" ]] || exit 1
 assert_contains "${HOTSPOT_FAIL_OUTPUT}" "stage=live_hotspot_smoke status=fail bundle=${HOTSPOT_FAIL_BUNDLE_DIR} log=${HOTSPOT_FAIL_RUN_DIR}/live_hotspot_smoke.log"
 [[ -f "${HOTSPOT_FAIL_BUNDLE_DIR}/logs/live_hotspot_smoke.log" ]] || { echo "missing hotspot log in bundle" >&2; exit 1; }
+[[ -f "${HOTSPOT_FAIL_BUNDLE_DIR}/effective-config.json" ]] || { echo "missing hotspot effective-config.json" >&2; exit 1; }
 
 DOCTOR_FAIL_OUTPUT="${TMP_DIR}/doctor-fail.out"
 if run_wrapper "${DOCTOR_FAIL_OUTPUT}" MOCK_DOCTOR_INVALID_JSON=1; then
@@ -232,6 +242,7 @@ DOCTOR_FAIL_BUNDLE_DIR="$(latest_bundle_dir)"
 [[ "$(summary_value "${DOCTOR_FAIL_SUMMARY}" stages.doctor_json)" == "fail" ]] || exit 1
 assert_contains "${DOCTOR_FAIL_OUTPUT}" "stage=doctor_json status=fail bundle=${DOCTOR_FAIL_BUNDLE_DIR} log=${DOCTOR_FAIL_RUN_DIR}/doctor_json.log"
 [[ -f "${DOCTOR_FAIL_BUNDLE_DIR}/doctor.json" ]] || { echo "missing doctor.json in bundle" >&2; exit 1; }
+[[ -f "${DOCTOR_FAIL_BUNDLE_DIR}/bundle-meta.json" ]] || { echo "missing doctor bundle meta" >&2; exit 1; }
 assert_contains "${DOCTOR_FAIL_BUNDLE_DIR}/doctor.json" "not-json"
 
 echo "test-live-local-smoke.sh: PASS"

@@ -146,6 +146,36 @@ run_doctor_json_command() {
   "${cli_env[@]}" cargo run -p oberon4-cli -- doctor --json
 }
 
+run_doctor_config_show_command() {
+  local cli_env=(
+    env
+    "OBERON4_DATA_DIR=${DOCTOR_DATA_DIR}"
+    "OBERON4_SOCKET_PATH=${DOCTOR_SOCKET_PATH}"
+  )
+  local daemon_bin="${ROOT_DIR}/target/debug/oberon4-daemon"
+  if [[ -x "${daemon_bin}" ]]; then
+    cli_env+=("OBERON4_DAEMON_BIN=${daemon_bin}")
+  fi
+
+  local started=0
+  cleanup() {
+    if [[ "${started:-0}" == "1" ]]; then
+      "${cli_env[@]}" cargo run -p oberon4-cli -- daemon stop >/dev/null 2>&1 || true
+    fi
+  }
+  trap cleanup RETURN
+
+  "${cli_env[@]}" cargo run -p oberon4-cli -- daemon start >/dev/null
+  started=1
+  "${cli_env[@]}" cargo run -p oberon4-cli -- config set endpoint.base_url "${DOCTOR_BASE_URL}" >/dev/null
+  "${cli_env[@]}" cargo run -p oberon4-cli -- config set endpoint.model "${OBERON4_LIVE_OPENAI_MODEL}" >/dev/null
+  if [[ -n "${OBERON4_LIVE_API_KEY_ENV}" ]]; then
+    "${cli_env[@]}" cargo run -p oberon4-cli -- config set endpoint.api_key_env "${OBERON4_LIVE_API_KEY_ENV}" >/dev/null
+  fi
+
+  "${cli_env[@]}" cargo run -p oberon4-cli -- config show
+}
+
 capture_live_failure_bundle() {
   local failed_stage="$1"
   local primary_log_path="$2"
@@ -155,6 +185,11 @@ capture_live_failure_bundle() {
   if [[ -f "${SUMMARY_PATH}" ]]; then
     cp "${SUMMARY_PATH}" "${bundle_dir}/summary.json"
   fi
+  failure_bundle_write_metadata \
+    "${bundle_dir}/bundle-meta.json" \
+    "live-local-smoke" \
+    "${failed_stage}" \
+    "${primary_log_path}"
   write_commands_file "${bundle_dir}/commands.txt"
   write_live_env_file "${bundle_dir}/env.txt"
   find "${RUN_DIR}" -maxdepth 1 -type f -name '*.log' -print0 | while IFS= read -r -d '' log_file; do
@@ -166,6 +201,7 @@ capture_live_failure_bundle() {
   else
     failure_bundle_capture_doctor "${bundle_dir}" run_doctor_json_command
   fi
+  failure_bundle_capture_effective_config "${bundle_dir}" run_doctor_config_show_command
   printf '%s\n' "${bundle_dir}"
 }
 

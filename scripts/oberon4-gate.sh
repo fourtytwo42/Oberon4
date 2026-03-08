@@ -79,34 +79,25 @@ write_gate_env_file() {
   } >"${output_path}"
 }
 
-write_gate_failure_summary() {
-  local output_path="$1"
-  local failed_stage="$2"
-  local primary_log_path="$3"
-  cat >"${output_path}" <<EOF
-{
-  "timestamp_utc": "$(failure_bundle_json_escape "$(date -u +%Y-%m-%dT%H:%M:%SZ)")",
-  "entrypoint": "oberon4-gate",
-  "status": "fail",
-  "failed_stage": "$(failure_bundle_json_escape "${failed_stage}")",
-  "primary_log_path": "$(failure_bundle_json_escape "${primary_log_path}")"
-}
-EOF
-}
-
 capture_gate_failure_bundle() {
   local failed_stage="$1"
   local primary_log_path="$2"
   local bundle_dir
   bundle_dir="$(failure_bundle_create_dir "${ROOT_DIR}" "oberon4-gate")"
   mkdir -p "${bundle_dir}/logs"
-  write_gate_failure_summary "${bundle_dir}/summary.json" "${failed_stage}" "${primary_log_path}"
+  failure_bundle_write_metadata \
+    "${bundle_dir}/summary.json" \
+    "oberon4-gate" \
+    "${failed_stage}" \
+    "${primary_log_path}"
+  cp "${bundle_dir}/summary.json" "${bundle_dir}/bundle-meta.json"
   write_commands_file "${bundle_dir}/commands.txt"
   write_gate_env_file "${bundle_dir}/env.txt"
   find "${GATE_LOG_DIR}" -maxdepth 1 -type f -name '*.log' -print0 | while IFS= read -r -d '' log_file; do
     failure_bundle_copy_file "${log_file}" "${bundle_dir}/logs"
   done
   failure_bundle_capture_doctor "${bundle_dir}" cargo run -p oberon4-cli -- doctor --json
+  failure_bundle_capture_effective_config "${bundle_dir}" cargo run -p oberon4-cli -- config show
   printf '%s\n' "${bundle_dir}"
 }
 

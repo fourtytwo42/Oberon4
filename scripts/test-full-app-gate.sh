@@ -42,6 +42,10 @@ if [[ "${1:-}" == "run" && "${2:-}" == "-p" && "${3:-}" == "oberon4-cli" && "${4
   echo '{"running":false,"ready":false,"endpoint_check":"fail","error":"mocked"}'
   exit 1
 fi
+if [[ "${1:-}" == "run" && "${2:-}" == "-p" && "${3:-}" == "oberon4-cli" && "${4:-}" == "--" && "${5:-}" == "config" && "${6:-}" == "show" ]]; then
+  echo '{"endpoint":{"base_url":"http://example.test","model":"gpt-test","api_key_env":"<redacted>"}}'
+  exit 0
+fi
 echo "unexpected cargo invocation: $*" >&2
 exit 1
 SH
@@ -145,10 +149,13 @@ if [[ ! -f "${LOG_DIR}/cargo_test_workspace.log" ]]; then
 fi
 [[ -d "${BUNDLE_DIR}" ]] || { echo "missing failure bundle" >&2; exit 1; }
 [[ -f "${BUNDLE_DIR}/summary.json" ]] || { echo "missing bundle summary.json" >&2; exit 1; }
+[[ -f "${BUNDLE_DIR}/bundle-meta.json" ]] || { echo "missing bundle bundle-meta.json" >&2; exit 1; }
 [[ -f "${BUNDLE_DIR}/commands.txt" ]] || { echo "missing bundle commands.txt" >&2; exit 1; }
 [[ -f "${BUNDLE_DIR}/env.txt" ]] || { echo "missing bundle env.txt" >&2; exit 1; }
 [[ -f "${BUNDLE_DIR}/doctor-output.txt" ]] || { echo "missing bundle doctor-output.txt" >&2; exit 1; }
 [[ -f "${BUNDLE_DIR}/doctor-status.txt" ]] || { echo "missing bundle doctor-status.txt" >&2; exit 1; }
+[[ -f "${BUNDLE_DIR}/effective-config.json" ]] || { echo "missing bundle effective-config.json" >&2; exit 1; }
+[[ -f "${BUNDLE_DIR}/effective-config-status.txt" ]] || { echo "missing bundle effective-config-status.txt" >&2; exit 1; }
 [[ -f "${BUNDLE_DIR}/logs/cargo_test_workspace.log" ]] || { echo "missing copied workspace log" >&2; exit 1; }
 assert_contains "${FAIL_OUTPUT}" "[gate] failure summary (${LOG_DIR}/cargo_test_workspace.log):"
 assert_contains "${FAIL_OUTPUT}" "[gate] failure summary"
@@ -158,6 +165,7 @@ assert_contains "${FAIL_OUTPUT}" "starting at line 1"
 assert_contains "${FAIL_OUTPUT}" "mocked regression"
 assert_contains "${FAIL_OUTPUT}" "[gate] failure_bundle stage=cargo_test_workspace bundle=${BUNDLE_DIR} log=${LOG_DIR}/cargo_test_workspace.log"
 assert_contains "${BUNDLE_DIR}/summary.json" '"failed_stage": "cargo_test_workspace"'
+assert_contains "${BUNDLE_DIR}/bundle-meta.json" '"entrypoint": "oberon4-gate"'
 assert_contains "${BUNDLE_DIR}/commands.txt" "cargo_test_workspace: cargo test --workspace"
 assert_contains "${BUNDLE_DIR}/env.txt" "OBERON4_LIVE_BASE_URL=http://example.test/v1"
 assert_contains "${BUNDLE_DIR}/env.txt" "OBERON4_LIVE_OPENAI_MODEL=gpt-test"

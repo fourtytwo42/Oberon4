@@ -29,6 +29,22 @@ failure_bundle_copy_file() {
   fi
 }
 
+failure_bundle_write_metadata() {
+  local output_path="$1"
+  local entrypoint="$2"
+  local failed_stage="$3"
+  local primary_log_path="$4"
+  cat >"${output_path}" <<EOF
+{
+  "timestamp_utc": "$(failure_bundle_json_escape "$(date -u +%Y-%m-%dT%H:%M:%SZ)")",
+  "entrypoint": "$(failure_bundle_json_escape "${entrypoint}")",
+  "status": "fail",
+  "failed_stage": "$(failure_bundle_json_escape "${failed_stage}")",
+  "primary_log_path": "$(failure_bundle_json_escape "${primary_log_path}")"
+}
+EOF
+}
+
 failure_bundle_capture_doctor() {
   local bundle_dir="$1"
   shift
@@ -43,6 +59,22 @@ failure_bundle_capture_doctor() {
   else
     local exit_code=$?
     printf 'exit_code=%s\n' "${exit_code}" >"${doctor_status_file}"
+    return 0
+  fi
+}
+
+failure_bundle_capture_effective_config() {
+  local bundle_dir="$1"
+  shift
+
+  local config_output_file="${bundle_dir}/effective-config.json"
+  local config_status_file="${bundle_dir}/effective-config-status.txt"
+
+  if "$@" >"${config_output_file}" 2>&1; then
+    printf 'exit_code=0\n' >"${config_status_file}"
+  else
+    local exit_code=$?
+    printf 'exit_code=%s\n' "${exit_code}" >"${config_status_file}"
     return 0
   fi
 }
