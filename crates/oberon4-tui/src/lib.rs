@@ -3672,7 +3672,7 @@ fn render_footer(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
         );
     } else {
         let hint = if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
-            "Enter apply/send | Ctrl+J newline | Up/Down or mouse wheel scroll | Home/End jump | Esc back/clear/quit"
+            "/help /sessions /settings /status /accounts /diagnostics /more /quit"
         } else {
             "Up/Down navigate | Enter select | mouse wheel scroll | Home/End jump | Esc back"
         };
