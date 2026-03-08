@@ -18,6 +18,7 @@ files=(
   "scripts/install-git-hooks.ps1"
   "scripts/lib/common.sh"
   "scripts/reset-state.sh"
+  "scripts/oberon4-security-gate.sh"
   "scripts/security-gate.sh"
   "scripts/run-agent.sh"
   "scripts/run-agent.ps1"

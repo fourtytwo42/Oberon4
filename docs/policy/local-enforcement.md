@@ -174,6 +174,12 @@ Notes:
     - at least 2 verification commands in commit messages
     - explicit rollback note in commit messages
   - Runs local security gate (if installed): secret scan, SAST, dependency audit
+  - Oberon4 canonical security gate is `bash scripts/oberon4-security-gate.sh`
+    - required tools: `gitleaks`, `semgrep`, `cargo-audit`
+    - current rollout is opt-in-first; it is not part of default Oberon4 pre-push local CI in this slice
+    - explicit operator invocation:
+      - `bash scripts/oberon4-security-gate.sh`
+      - `RUN_SECURITY_GATE=1 GATE_MODE=smoke bash scripts/oberon4-gate.sh`
   - Blocks oversized pushes by default:
     - max changed files: `15`
     - max changed lines: `500`

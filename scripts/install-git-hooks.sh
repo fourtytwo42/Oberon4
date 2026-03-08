@@ -23,6 +23,8 @@ chmod +x \
   scripts/repair-loop.sh \
   scripts/test-repair-loop.sh \
   scripts/tui-pty-smoke.sh \
+  scripts/oberon4-security-gate.sh \
+  scripts/test-security-gate.sh \
   scripts/check-policy-stack.sh \
   scripts/bootstrap-policy-stack.sh \
   scripts/policy-doctor.sh \

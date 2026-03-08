@@ -41,6 +41,10 @@ if [[ "${1:-}" == "test" ]]; then
   echo "cargo test $*"
   exit 0
 fi
+if [[ "${1:-}" == "audit" ]]; then
+  echo "cargo-audit ok"
+  exit 0
+fi
 if [[ "${1:-}" == "run" && "${2:-}" == "-p" && "${3:-}" == "oberon4-cli" && "${4:-}" == "--" && "${5:-}" == "doctor" && "${6:-}" == "--json" ]]; then
   echo '{"running":false,"ready":false,"endpoint_check":"fail","error":"mocked"}'
   exit 1
@@ -57,6 +61,31 @@ echo "unexpected cargo invocation: $*" >&2
 exit 1
 SH
 chmod +x "${MOCK_BIN}/cargo"
+
+cat > "${MOCK_BIN}/gitleaks" <<'SH'
+#!/usr/bin/bash
+set -euo pipefail
+if [[ "${MOCK_SECURITY_GATE_FAIL:-0}" == "1" ]]; then
+  echo "gitleaks synthetic failure" >&2
+  exit 1
+fi
+echo "gitleaks ok"
+SH
+chmod +x "${MOCK_BIN}/gitleaks"
+
+cat > "${MOCK_BIN}/semgrep" <<'SH'
+#!/usr/bin/bash
+set -euo pipefail
+echo "semgrep ok"
+SH
+chmod +x "${MOCK_BIN}/semgrep"
+
+cat > "${MOCK_BIN}/cargo-audit" <<'SH'
+#!/usr/bin/bash
+set -euo pipefail
+echo "cargo-audit ok"
+SH
+chmod +x "${MOCK_BIN}/cargo-audit"
 
 cat > "${MOCK_BIN}/bash" <<'SH'
 #!/usr/bin/bash
@@ -221,6 +250,24 @@ if [[ ! -f "${LOG_DIR}/tui_pty_smoke.log" ]]; then
   echo "assertion failed: tui PTY smoke should be logged when enabled" >&2
   exit 1
 fi
+
+SECURITY_OUTPUT="${TMP_DIR}/security.out"
+run_gate "${SECURITY_OUTPUT}" GATE_MODE=smoke RUN_SECURITY_GATE=1
+if [[ ! -f "${LOG_DIR}/security_gate.log" ]]; then
+  echo "assertion failed: security gate should be logged when enabled" >&2
+  exit 1
+fi
+assert_contains "${LOG_DIR}/security_gate.log" "[security-gate] PASS: Oberon4 security verification satisfied."
+
+SECURITY_FAIL_OUTPUT="${TMP_DIR}/security-fail.out"
+if run_gate "${SECURITY_FAIL_OUTPUT}" GATE_MODE=smoke RUN_SECURITY_GATE=1 MOCK_SECURITY_GATE_FAIL=1; then
+  echo "assertion failed: failing security gate should exit non-zero" >&2
+  exit 1
+fi
+SECURITY_FAIL_BUNDLE_DIR="$(latest_bundle_dir)"
+assert_contains "${SECURITY_FAIL_OUTPUT}" "[gate] failure_bundle stage=security_gate bundle=${SECURITY_FAIL_BUNDLE_DIR} log=${LOG_DIR}/security_gate.log"
+[[ -f "${SECURITY_FAIL_BUNDLE_DIR}/logs/security_gate.log" ]] || { echo "missing copied security gate log" >&2; exit 1; }
+assert_contains "${SECURITY_FAIL_BUNDLE_DIR}/logs/security_gate.log" "[security-gate] step=secret_scan status=fail"
 
 WRAPPER_OUTPUT="${TMP_DIR}/wrapper.out"
 env PATH="${MOCK_BIN}:$PATH" \

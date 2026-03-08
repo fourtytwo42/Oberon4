@@ -12,12 +12,14 @@ Status: active
 - [ ] `bash scripts/repair-loop.sh`
 - [ ] `GATE_MODE=strict bash scripts/oberon4-gate.sh`
 - [ ] PTY TUI smoke: `bash scripts/tui-pty-smoke.sh`
+- [ ] security gate: `bash scripts/oberon4-security-gate.sh`
 - [ ] local real-endpoint wrapper: `bash scripts/live-local-smoke.sh`
 - [ ] optional repair-loop live coverage: `RUN_LIVE_LOCAL_SMOKE=1 bash scripts/repair-loop.sh`
 - [ ] optional remediation path exercised when needed: `RUN_REPAIR_REMEDIATE=1 bash scripts/repair-loop.sh`
 - [ ] optional live endpoint coverage: `OBERON4_LIVE_BASE_URL=<base> RUN_LIVE_ENDPOINT_SMOKE=1 GATE_MODE=smoke bash scripts/oberon4-gate.sh`
 - [ ] optional live daemon coverage: `OBERON4_LIVE_BASE_URL=<base> RUN_LIVE_DAEMON_SMOKE=1 GATE_MODE=smoke bash scripts/oberon4-gate.sh`
 - [ ] optional PTY TUI coverage through gate: `RUN_TUI_PTY_SMOKE=1 GATE_MODE=smoke bash scripts/oberon4-gate.sh`
+- [ ] optional security coverage through gate: `RUN_SECURITY_GATE=1 GATE_MODE=smoke bash scripts/oberon4-gate.sh`
 - [ ] any failed gate/live verification preserved its troubleshooting bundle under `artifacts/failures/`
 - [ ] repair-loop evidence preserved under `artifacts/repair-loop/`
 
@@ -44,6 +46,7 @@ Status: active
 - [ ] responders understand remediation mode is optional local recovery evidence, not a routine release gate requirement
 - [ ] live-local smoke confirms the configured model is advertised by `/v1/models` and that `/v1/auth/status` plus `/v1/diagnostics` return valid JSON
 - [ ] optional maintenance command `bash scripts/prune-artifacts.sh --dry-run` has been reviewed before pruning old runtime evidence
+- [ ] operators understand the security gate is opt-in-first in this slice and not yet a default pre-push requirement
 
 ## Human Test Entry
 - [ ] `docs/runbooks/oberon4-human-test-checklist.md` exists
