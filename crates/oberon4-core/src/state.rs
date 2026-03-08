@@ -200,4 +200,22 @@ mod tests {
         assert_eq!(store.get_secret("provider.openai").unwrap(), "token");
         let _ = fs::remove_file(path);
     }
+
+    #[test]
+    fn file_secret_store_tolerates_missing_keys_in_existing_file() {
+        let path = temp_path("secret-partial");
+        fs::write(
+            &path,
+            include_str!("../tests/fixtures/secrets-partial.json"),
+        )
+        .unwrap();
+
+        let store = FileSecretStore::new(&path);
+        assert_eq!(store.get_secret("provider.openai").unwrap(), "token-1");
+        let err = store
+            .get_secret("provider.anthropic")
+            .expect_err("missing key should remain a not-found error");
+        assert!(matches!(err, OberonError::NotFound(_)));
+        let _ = fs::remove_file(path);
+    }
 }

@@ -19,6 +19,8 @@ Use this checklist only after automated gates through `EG-P8` are green.
   - if this fails, inspect `artifacts/repair-loop/<timestamp>-<pid>/summary.json`
 - [ ] `GATE_MODE=strict bash scripts/oberon4-gate.sh`
   - if this fails, inspect `artifacts/failures/<timestamp>-oberon4-gate-<pid>/`
+- [ ] `cargo run -p oberon4-cli -- doctor --json`
+  - expect `version_check=pass`, `models_check=pass`, `auth_check=pass`, and `diagnostics_check=pass` in the JSON output before manual troubleshooting continues
 
 ## Optional Live Endpoint Preconditions
 - [ ] `bash scripts/live-local-smoke.sh`
@@ -43,7 +45,7 @@ Use this checklist only after automated gates through `EG-P8` are green.
 - [ ] `cargo run -p oberon4-cli -- doctor`
   - expect success once daemon is running
 - [ ] optional live smoke: `bash scripts/live-local-smoke.sh`
-  - expect provider live smoke, daemon-backed smoke, and `doctor --json` to pass against the local LLM Hotspot
+  - expect control-plane validation, provider live smoke, daemon-backed smoke, and `doctor --json` to pass against the local LLM Hotspot
 
 ### Accounts
 - [ ] `cargo run -p oberon4-cli -- account connect --provider openai`

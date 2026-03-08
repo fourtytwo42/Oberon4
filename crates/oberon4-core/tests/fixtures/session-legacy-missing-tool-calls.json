@@ -1,0 +1,14 @@
+{
+  "summary": {
+    "id": "legacy-session",
+    "title": "Legacy",
+    "provider": "open_ai_compatible",
+    "model": "gpt-5.1-codex-mini"
+  },
+  "messages": [
+    {
+      "role": "assistant",
+      "content": "hello from legacy session"
+    }
+  ]
+}

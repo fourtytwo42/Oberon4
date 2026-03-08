@@ -55,10 +55,10 @@ ORDER_FILE="${ORDER_FILE:?}"
 if [[ "${1:-}" == "run" && "${2:-}" == "-p" && "${3:-}" == "oberon4-cli" && "${4:-}" == "--" && "${5:-}" == "doctor" && "${6:-}" == "--json" ]]; then
   printf 'doctor_json\n' >>"${ORDER_FILE}"
   if [[ "${MOCK_DOCTOR_FAIL:-0}" == "1" ]]; then
-    echo '{"running":false,"ready":false,"endpoint_check":"fail","error":"mock-doctor-fail"}'
+    echo '{"running":false,"ready":false,"endpoint_check":"fail","error":"mock-doctor-fail","version_check":"fail","models_check":"skip","auth_check":"skip","diagnostics_check":"skip"}'
     exit 1
   fi
-  echo '{"running":true,"ready":true,"endpoint_check":"pass","error":null,"config_path":"/tmp/config.toml","data_dir":"/tmp/data","socket_path":"/tmp/daemon.sock","api_key_env":"OPENAI_API_KEY","config_exists":true,"daemon_reachable":true}'
+  echo '{"running":true,"ready":true,"endpoint_check":"pass","error":null,"config_path":"/tmp/config.toml","data_dir":"/tmp/data","socket_path":"/tmp/daemon.sock","api_key_env":"OPENAI_API_KEY","config_exists":true,"daemon_reachable":true,"version_check":"pass","models_check":"pass","auth_check":"pass","diagnostics_check":"pass"}'
   exit 0
 fi
 echo "unexpected cargo invocation: $*" >&2

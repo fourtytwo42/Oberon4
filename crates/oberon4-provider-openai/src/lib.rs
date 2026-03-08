@@ -384,6 +384,23 @@ where
             .map(|_| ())
     }
 
+    pub fn control_plane_text(
+        &self,
+        endpoint_override: Option<&str>,
+        route: &str,
+    ) -> Result<String, OberonError> {
+        let url = format!(
+            "{}/{}",
+            self.effective_base_url(endpoint_override),
+            route.trim_start_matches('/')
+        );
+        self.transport.get_text(
+            &url,
+            self.retry_policy.timeout_ms,
+            self.bearer_token()?.as_deref(),
+        )
+    }
+
     fn effective_base_url(&self, endpoint_override: Option<&str>) -> String {
         endpoint_override
             .filter(|value| !value.trim().is_empty())
@@ -1073,6 +1090,27 @@ mod tests {
         let requests = client.transport.recorded_requests();
         assert_eq!(requests[0].0, "GET");
         assert_eq!(requests[0].1, "https://api.openai.com/v1/version");
+        assert_eq!(requests[0].2, "");
+    }
+
+    #[test]
+    fn control_plane_text_uses_requested_route() {
+        let transport = FakeTransport::new(vec![Ok(r#"{"ok":true}"#.to_string())]);
+        let client = OpenAiCompatibleClient::new(
+            "https://api.openai.com",
+            None,
+            RetryPolicy::from_config(&AppConfig::default()),
+            transport,
+        );
+
+        let body = client
+            .control_plane_text(None, "/v1/models")
+            .expect("control plane request should succeed");
+
+        assert_eq!(body, r#"{"ok":true}"#);
+        let requests = client.transport.recorded_requests();
+        assert_eq!(requests[0].0, "GET");
+        assert_eq!(requests[0].1, "https://api.openai.com/v1/models");
         assert_eq!(requests[0].2, "");
     }
 

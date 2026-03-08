@@ -1,0 +1,10 @@
+[endpoint]
+base_url = "http://gateway.example.test"
+model = "gpt-5.1-codex-mini"
+
+[runtime]
+request_timeout_ms = 12000
+stream_idle_timeout_ms = 9000
+max_retries = 1
+log_level = "debug"
+stream_responses = false

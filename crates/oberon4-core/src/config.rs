@@ -79,25 +79,47 @@ mod tests {
 
     #[test]
     fn missing_runtime_fields_fall_back_to_defaults() {
-        let decoded = AppConfig::from_toml(
-            r#"
-[endpoint]
-base_url = "http://gateway.example.test"
-model = "gpt-5.1-codex-mini"
-api_key_env = "OPENAI_API_KEY"
-
-[runtime]
-request_timeout_ms = 8000
-max_retries = 0
-log_level = "info"
-stream_responses = true
-"#,
-        )
+        let decoded = AppConfig::from_toml(include_str!(
+            "../tests/fixtures/config-legacy-missing-runtime.toml"
+        ))
         .expect("config with legacy runtime fields should parse");
 
         assert_eq!(decoded.runtime.request_timeout_ms, 8000);
         assert_eq!(decoded.runtime.stream_idle_timeout_ms, 30_000);
         assert_eq!(decoded.runtime.max_retries, 0);
         assert!(decoded.runtime.stream_responses);
+    }
+
+    #[test]
+    fn missing_api_key_env_falls_back_to_default() {
+        let decoded = AppConfig::from_toml(include_str!(
+            "../tests/fixtures/config-legacy-missing-api-key-env.toml"
+        ))
+        .expect("config without api_key_env should parse");
+
+        assert_eq!(decoded.endpoint.base_url, "http://gateway.example.test");
+        assert_eq!(decoded.endpoint.model, "gpt-5.1-codex-mini");
+        assert_eq!(
+            decoded.endpoint.api_key_env.as_deref(),
+            Some("OPENAI_API_KEY")
+        );
+        assert_eq!(decoded.runtime.request_timeout_ms, 12_000);
+        assert_eq!(decoded.runtime.stream_idle_timeout_ms, 9_000);
+        assert!(!decoded.runtime.stream_responses);
+    }
+
+    #[test]
+    fn endpoint_only_config_uses_runtime_defaults() {
+        let decoded =
+            AppConfig::from_toml(include_str!("../tests/fixtures/config-endpoint-only.toml"))
+                .expect("endpoint-only config should parse");
+
+        assert_eq!(decoded.endpoint.base_url, "http://gateway.example.test");
+        assert_eq!(decoded.endpoint.model, "gpt-5.1-codex-mini");
+        assert_eq!(
+            decoded.endpoint.api_key_env.as_deref(),
+            Some("OPENAI_API_KEY")
+        );
+        assert_eq!(decoded.runtime, super::RuntimeConfig::default());
     }
 }

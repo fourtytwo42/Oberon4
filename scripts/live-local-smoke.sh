@@ -248,7 +248,11 @@ process.stdin.on("end", () => {
   if (
     decoded.running !== true ||
     decoded.ready !== true ||
-    decoded.endpoint_check !== "pass"
+    decoded.endpoint_check !== "pass" ||
+    decoded.version_check !== "pass" ||
+    decoded.models_check !== "pass" ||
+    decoded.auth_check !== "pass" ||
+    decoded.diagnostics_check !== "pass"
   ) {
     console.error(`doctor JSON did not report healthy state: ${input}`);
     process.exit(1);

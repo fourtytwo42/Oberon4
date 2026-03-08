@@ -192,4 +192,43 @@ mod tests {
         assert_eq!(store.list_sessions().unwrap().len(), 1);
         let _ = fs::remove_dir_all(dir);
     }
+
+    #[test]
+    fn file_config_store_loads_legacy_config_shapes() {
+        let dir = temp_dir("config-legacy");
+        let path = dir.join("config.toml");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            &path,
+            include_str!("../tests/fixtures/config-endpoint-only.toml"),
+        )
+        .unwrap();
+
+        let store = FileConfigStore::new(&path);
+        let loaded = store.load().unwrap();
+
+        assert_eq!(loaded.endpoint.base_url, "http://gateway.example.test");
+        assert_eq!(loaded.endpoint.model, "gpt-5.1-codex-mini");
+        assert_eq!(loaded.runtime.request_timeout_ms, 30_000);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn file_session_store_loads_legacy_messages_without_tool_calls() {
+        let dir = temp_dir("sessions-legacy");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("legacy-session.json"),
+            include_str!("../tests/fixtures/session-legacy-missing-tool-calls.json"),
+        )
+        .unwrap();
+
+        let store = FileSessionStore::new(&dir);
+        let session = store.load_session("legacy-session").unwrap();
+
+        assert_eq!(session.summary.id.as_str(), "legacy-session");
+        assert_eq!(session.messages.len(), 1);
+        assert!(session.messages[0].tool_calls.is_empty());
+        let _ = fs::remove_dir_all(dir);
+    }
 }

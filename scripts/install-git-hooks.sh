@@ -16,6 +16,7 @@ chmod +x \
   scripts/local-ci-gate.sh \
   scripts/oberon4-gate.sh \
   scripts/live-local-smoke.sh \
+  scripts/test-live-hotspot-smoke.sh \
   scripts/test-live-local-smoke.sh \
   scripts/repair-loop.sh \
   scripts/test-repair-loop.sh \

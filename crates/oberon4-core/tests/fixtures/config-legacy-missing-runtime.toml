@@ -1,0 +1,10 @@
+[endpoint]
+base_url = "http://gateway.example.test"
+model = "gpt-5.1-codex-mini"
+api_key_env = "OPENAI_API_KEY"
+
+[runtime]
+request_timeout_ms = 8000
+max_retries = 0
+log_level = "info"
+stream_responses = true

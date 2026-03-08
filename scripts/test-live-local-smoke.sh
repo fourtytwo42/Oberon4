@@ -78,14 +78,14 @@ if [[ "${1:-}" == "run" && "${2:-}" == "-p" && "${3:-}" == "oberon4-cli" && "${4
     doctor)
       printf 'doctor_json\n' >>"${ORDER_FILE}"
       if [[ "${MOCK_DOCTOR_FAIL:-0}" == "1" ]]; then
-        echo '{"running":false,"ready":false,"endpoint_check":"fail","error":"bad"}'
+        echo '{"running":false,"ready":false,"endpoint_check":"fail","error":"bad","version_check":"fail","models_check":"skip","auth_check":"skip","diagnostics_check":"skip"}'
         exit 0
       fi
       if [[ "${MOCK_DOCTOR_INVALID_JSON:-0}" == "1" ]]; then
         echo 'not-json'
         exit 0
       fi
-      printf '{"running":true,"ready":true,"endpoint_base_url":"%s","model":"%s","endpoint_check":"pass","error":null}\n' \
+      printf '{"running":true,"ready":true,"endpoint_base_url":"%s","model":"%s","endpoint_check":"pass","error":null,"version_check":"pass","models_check":"pass","auth_check":"pass","diagnostics_check":"pass"}\n' \
         "${OBERON4_LIVE_BASE_URL:-}" \
         "${OBERON4_LIVE_OPENAI_MODEL:-}"
       exit 0

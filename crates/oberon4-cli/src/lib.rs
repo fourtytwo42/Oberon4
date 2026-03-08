@@ -14,7 +14,9 @@ use oberon4_core::{
     default_data_dir,
 };
 use oberon4_daemon::{DaemonIpcClient, DaemonRuntime, LogLevel, default_socket_path, log_entry};
-use oberon4_provider_openai::{FakeTransport, OpenAiCompatibleClient, RetryPolicy};
+use oberon4_provider_openai::{
+    FakeTransport, OpenAiCompatibleClient, OpenAiTransport, RetryPolicy,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliCommand {
@@ -108,6 +110,51 @@ struct DoctorSnapshot {
     api_key_env: Option<String>,
     config_exists: bool,
     daemon_reachable: bool,
+    version_check: String,
+    models_check: String,
+    auth_check: String,
+    diagnostics_check: String,
+    available_models: Vec<String>,
+    endpoint_version: Option<String>,
+    auth_summary: Option<String>,
+    diagnostics_summary: Option<String>,
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct DoctorControlPlane {
+    version_check: String,
+    models_check: String,
+    auth_check: String,
+    diagnostics_check: String,
+    available_models: Vec<String>,
+    endpoint_version: Option<String>,
+    auth_summary: Option<String>,
+    diagnostics_summary: Option<String>,
+    last_error: Option<String>,
+}
+
+impl DoctorControlPlane {
+    fn skipped() -> Self {
+        Self {
+            version_check: "skip".to_string(),
+            models_check: "skip".to_string(),
+            auth_check: "skip".to_string(),
+            diagnostics_check: "skip".to_string(),
+            available_models: Vec::new(),
+            endpoint_version: None,
+            auth_summary: None,
+            diagnostics_summary: None,
+            last_error: None,
+        }
+    }
+
+    fn all_pass(&self) -> bool {
+        self.version_check == "pass"
+            && self.models_check == "pass"
+            && self.auth_check == "pass"
+            && self.diagnostics_check == "pass"
+    }
 }
 
 impl Default for CliApp {
@@ -215,6 +262,15 @@ impl CliApp {
                     api_key_env: config.endpoint.api_key_env.clone(),
                     config_exists: config_path.exists(),
                     daemon_reachable: health.running,
+                    version_check: "skip".to_string(),
+                    models_check: "skip".to_string(),
+                    auth_check: "skip".to_string(),
+                    diagnostics_check: "skip".to_string(),
+                    available_models: Vec::new(),
+                    endpoint_version: None,
+                    auth_summary: None,
+                    diagnostics_summary: None,
+                    last_error: None,
                 };
                 if !health.ready {
                     return if json {
@@ -223,18 +279,58 @@ impl CliApp {
                         Ok(CliOutput::error("daemon is not running", 3))
                     };
                 }
-                match self
+                let endpoint_result = self
                     .provider_client
-                    .endpoint_health(Some(&health.endpoint_base_url), &health.model)
-                {
-                    Ok(()) if json => doctor_json_output(&snapshot),
+                    .endpoint_health(Some(&health.endpoint_base_url), &health.model);
+                let control_plane = probe_control_plane(
+                    &self.provider_client,
+                    Some(&health.endpoint_base_url),
+                    &health.model,
+                );
+                match endpoint_result {
+                    Ok(()) if json => {
+                        let healthy = control_plane.all_pass();
+                        doctor_json_output(&DoctorSnapshot {
+                            error: if healthy {
+                                None
+                            } else {
+                                control_plane.last_error.clone()
+                            },
+                            exit_code: if healthy { 0 } else { 3 },
+                            version_check: control_plane.version_check,
+                            models_check: control_plane.models_check,
+                            auth_check: control_plane.auth_check,
+                            diagnostics_check: control_plane.diagnostics_check,
+                            available_models: control_plane.available_models,
+                            endpoint_version: control_plane.endpoint_version,
+                            auth_summary: control_plane.auth_summary,
+                            diagnostics_summary: control_plane.diagnostics_summary,
+                            last_error: control_plane.last_error,
+                            ..snapshot
+                        })
+                    }
                     Ok(()) => Ok(CliOutput::success("doctor passed")),
-                    Err(err) if json => doctor_json_output(&DoctorSnapshot {
-                        endpoint_check: "fail".to_string(),
-                        error: Some(err.to_string()),
-                        exit_code: 3,
-                        ..snapshot
-                    }),
+                    Err(err) if json => {
+                        let mut control_plane = control_plane;
+                        if control_plane.last_error.is_none() {
+                            control_plane.last_error = Some(err.to_string());
+                        }
+                        doctor_json_output(&DoctorSnapshot {
+                            endpoint_check: "fail".to_string(),
+                            error: Some(err.to_string()),
+                            exit_code: 3,
+                            version_check: control_plane.version_check,
+                            models_check: control_plane.models_check,
+                            auth_check: control_plane.auth_check,
+                            diagnostics_check: control_plane.diagnostics_check,
+                            available_models: control_plane.available_models,
+                            endpoint_version: control_plane.endpoint_version,
+                            auth_summary: control_plane.auth_summary,
+                            diagnostics_summary: control_plane.diagnostics_summary,
+                            last_error: control_plane.last_error,
+                            ..snapshot
+                        })
+                    }
                     Err(err) => Err(err),
                 }
             }
@@ -396,11 +492,21 @@ fn execute_via_daemon(command: CliCommand) -> Result<CliOutput, OberonError> {
                 api_key_env: default.endpoint.api_key_env.clone(),
                 config_exists: config_path.exists(),
                 daemon_reachable: false,
+                version_check: "skip".to_string(),
+                models_check: "skip".to_string(),
+                auth_check: "skip".to_string(),
+                diagnostics_check: "skip".to_string(),
+                available_models: Vec::new(),
+                endpoint_version: None,
+                auth_summary: None,
+                diagnostics_summary: None,
+                last_error: None,
             };
             if let Err(err) = ensure_daemon_running() {
                 return if json {
                     doctor_json_output(&DoctorSnapshot {
                         error: Some(err.to_string()),
+                        last_error: Some(err.to_string()),
                         ..default_snapshot
                     })
                 } else {
@@ -465,6 +571,15 @@ fn execute_via_daemon(command: CliCommand) -> Result<CliOutput, OberonError> {
                 api_key_env: config.endpoint.api_key_env.clone(),
                 config_exists: config_path.exists(),
                 daemon_reachable: true,
+                version_check: "skip".to_string(),
+                models_check: "skip".to_string(),
+                auth_check: "skip".to_string(),
+                diagnostics_check: "skip".to_string(),
+                available_models: Vec::new(),
+                endpoint_version: None,
+                auth_summary: None,
+                diagnostics_summary: None,
+                last_error: None,
             };
 
             if !status.running {
@@ -475,9 +590,38 @@ fn execute_via_daemon(command: CliCommand) -> Result<CliOutput, OberonError> {
                 };
             }
 
-            match client.send(&oberon4_core::DaemonCommand::EndpointHealth) {
+            let endpoint_result = client.send(&oberon4_core::DaemonCommand::EndpointHealth);
+            let control_plane = probe_control_plane_with_transport(
+                &OpenAiCompatibleClient::new(
+                    config.endpoint.base_url.clone(),
+                    config.endpoint.api_key_env.clone(),
+                    RetryPolicy::from_config(&config),
+                    oberon4_provider_openai::ReqwestTransport,
+                ),
+                Some(&config.endpoint.base_url),
+                &config.endpoint.model,
+            );
+            match endpoint_result {
                 Ok(oberon4_core::DaemonEvent::Ack { message: _ }) if json => {
-                    doctor_json_output(&base_snapshot)
+                    let healthy = control_plane.all_pass();
+                    doctor_json_output(&DoctorSnapshot {
+                        error: if healthy {
+                            None
+                        } else {
+                            control_plane.last_error.clone()
+                        },
+                        exit_code: if healthy { 0 } else { 3 },
+                        version_check: control_plane.version_check,
+                        models_check: control_plane.models_check,
+                        auth_check: control_plane.auth_check,
+                        diagnostics_check: control_plane.diagnostics_check,
+                        available_models: control_plane.available_models,
+                        endpoint_version: control_plane.endpoint_version,
+                        auth_summary: control_plane.auth_summary,
+                        diagnostics_summary: control_plane.diagnostics_summary,
+                        last_error: control_plane.last_error,
+                        ..base_snapshot
+                    })
                 }
                 Ok(oberon4_core::DaemonEvent::Ack { message }) => {
                     Ok(CliOutput::success(if message == "endpoint test passed" {
@@ -490,10 +634,23 @@ fn execute_via_daemon(command: CliCommand) -> Result<CliOutput, OberonError> {
                     let err =
                         OberonError::Storage(format!("unexpected daemon response: {event:?}"));
                     if json {
+                        let mut control_plane = control_plane;
+                        if control_plane.last_error.is_none() {
+                            control_plane.last_error = Some(err.to_string());
+                        }
                         doctor_json_output(&DoctorSnapshot {
                             endpoint_check: "fail".to_string(),
                             error: Some(err.to_string()),
                             exit_code: 3,
+                            version_check: control_plane.version_check,
+                            models_check: control_plane.models_check,
+                            auth_check: control_plane.auth_check,
+                            diagnostics_check: control_plane.diagnostics_check,
+                            available_models: control_plane.available_models,
+                            endpoint_version: control_plane.endpoint_version,
+                            auth_summary: control_plane.auth_summary,
+                            diagnostics_summary: control_plane.diagnostics_summary,
+                            last_error: control_plane.last_error,
                             ..base_snapshot
                         })
                     } else {
@@ -502,10 +659,23 @@ fn execute_via_daemon(command: CliCommand) -> Result<CliOutput, OberonError> {
                 }
                 Err(err) => {
                     if json {
+                        let mut control_plane = control_plane;
+                        if control_plane.last_error.is_none() {
+                            control_plane.last_error = Some(err.to_string());
+                        }
                         doctor_json_output(&DoctorSnapshot {
                             endpoint_check: "fail".to_string(),
                             error: Some(err.to_string()),
                             exit_code: 3,
+                            version_check: control_plane.version_check,
+                            models_check: control_plane.models_check,
+                            auth_check: control_plane.auth_check,
+                            diagnostics_check: control_plane.diagnostics_check,
+                            available_models: control_plane.available_models,
+                            endpoint_version: control_plane.endpoint_version,
+                            auth_summary: control_plane.auth_summary,
+                            diagnostics_summary: control_plane.diagnostics_summary,
+                            last_error: control_plane.last_error,
                             ..base_snapshot
                         })
                     } else {
@@ -864,6 +1034,15 @@ fn doctor_json_output(snapshot: &DoctorSnapshot) -> Result<CliOutput, OberonErro
         "api_key_env": snapshot.api_key_env,
         "config_exists": snapshot.config_exists,
         "daemon_reachable": snapshot.daemon_reachable,
+        "version_check": snapshot.version_check,
+        "models_check": snapshot.models_check,
+        "auth_check": snapshot.auth_check,
+        "diagnostics_check": snapshot.diagnostics_check,
+        "available_models": snapshot.available_models,
+        "endpoint_version": snapshot.endpoint_version,
+        "auth_summary": snapshot.auth_summary,
+        "diagnostics_summary": snapshot.diagnostics_summary,
+        "last_error": snapshot.last_error,
     }))
     .map_err(|err| OberonError::Storage(err.to_string()))?;
 
@@ -874,6 +1053,180 @@ fn doctor_json_output(snapshot: &DoctorSnapshot) -> Result<CliOutput, OberonErro
         stdout_emitted: false,
         stderr_emitted: false,
     })
+}
+
+fn probe_control_plane<T>(
+    client: &OpenAiCompatibleClient<T>,
+    endpoint_override: Option<&str>,
+    required_model: &str,
+) -> DoctorControlPlane
+where
+    T: OpenAiTransport,
+{
+    probe_control_plane_with_transport(client, endpoint_override, required_model)
+}
+
+fn probe_control_plane_with_transport<T>(
+    client: &OpenAiCompatibleClient<T>,
+    endpoint_override: Option<&str>,
+    required_model: &str,
+) -> DoctorControlPlane
+where
+    T: OpenAiTransport,
+{
+    let mut result = DoctorControlPlane::skipped();
+
+    match client.control_plane_text(endpoint_override, "/v1/version") {
+        Ok(body) => match serde_json::from_str::<serde_json::Value>(&body) {
+            Ok(value) => {
+                result.version_check = if extract_endpoint_version(&value).is_some() {
+                    "pass".to_string()
+                } else {
+                    result.last_error = Some("version response missing version field".to_string());
+                    "fail".to_string()
+                };
+                result.endpoint_version = extract_endpoint_version(&value);
+            }
+            Err(err) => {
+                result.version_check = "fail".to_string();
+                result.last_error = Some(format!("invalid version response: {err}"));
+            }
+        },
+        Err(err) => {
+            result.version_check = "fail".to_string();
+            result.last_error = Some(err.to_string());
+        }
+    }
+
+    match client.control_plane_text(endpoint_override, "/v1/models") {
+        Ok(body) => match serde_json::from_str::<serde_json::Value>(&body) {
+            Ok(value) => {
+                result.available_models = extract_model_ids(&value);
+                if result
+                    .available_models
+                    .iter()
+                    .any(|model| model == required_model)
+                {
+                    result.models_check = "pass".to_string();
+                } else {
+                    result.models_check = "fail".to_string();
+                    result.last_error = Some(format!(
+                        "models response missing required model: {required_model}"
+                    ));
+                }
+            }
+            Err(err) => {
+                result.models_check = "fail".to_string();
+                result.last_error = Some(format!("invalid models response: {err}"));
+            }
+        },
+        Err(err) => {
+            result.models_check = "fail".to_string();
+            result.last_error = Some(err.to_string());
+        }
+    }
+
+    match client.control_plane_text(endpoint_override, "/v1/auth/status") {
+        Ok(body) => match serde_json::from_str::<serde_json::Value>(&body) {
+            Ok(value) => {
+                result.auth_check = "pass".to_string();
+                result.auth_summary = summarize_json_object(&value);
+            }
+            Err(err) => {
+                result.auth_check = "fail".to_string();
+                result.last_error = Some(format!("invalid auth status response: {err}"));
+            }
+        },
+        Err(err) => {
+            result.auth_check = "fail".to_string();
+            result.last_error = Some(err.to_string());
+        }
+    }
+
+    match client.control_plane_text(endpoint_override, "/v1/diagnostics") {
+        Ok(body) => match serde_json::from_str::<serde_json::Value>(&body) {
+            Ok(value) => {
+                result.diagnostics_check = "pass".to_string();
+                result.diagnostics_summary = summarize_json_object(&value);
+            }
+            Err(err) => {
+                result.diagnostics_check = "fail".to_string();
+                result.last_error = Some(format!("invalid diagnostics response: {err}"));
+            }
+        },
+        Err(err) => {
+            result.diagnostics_check = "fail".to_string();
+            result.last_error = Some(err.to_string());
+        }
+    }
+
+    result
+}
+
+fn extract_endpoint_version(value: &serde_json::Value) -> Option<String> {
+    value
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn extract_model_ids(value: &serde_json::Value) -> Vec<String> {
+    let items = value
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .or_else(|| value.as_array());
+
+    items
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            item.as_str()
+                .map(ToOwned::to_owned)
+                .or_else(|| {
+                    item.get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToOwned::to_owned)
+                })
+                .or_else(|| {
+                    item.get("model")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToOwned::to_owned)
+                })
+        })
+        .collect()
+}
+
+fn summarize_json_object(value: &serde_json::Value) -> Option<String> {
+    let object = value.as_object()?;
+    let mut fragments = Vec::new();
+    for (key, value) in object.iter().take(4) {
+        let rendered = if let Some(string) = value.as_str() {
+            string.to_string()
+        } else if let Some(boolean) = value.as_bool() {
+            boolean.to_string()
+        } else if let Some(number) = value.as_i64() {
+            number.to_string()
+        } else if let Some(number) = value.as_u64() {
+            number.to_string()
+        } else if let Some(number) = value.as_f64() {
+            number.to_string()
+        } else if let Some(array) = value.as_array() {
+            format!("array[{}]", array.len())
+        } else if value.is_object() {
+            "object".to_string()
+        } else if value.is_null() {
+            "null".to_string()
+        } else {
+            continue;
+        };
+        fragments.push(format!("{key}={rendered}"));
+    }
+
+    if fragments.is_empty() {
+        Some(format!("keys={}", object.len()))
+    } else {
+        Some(fragments.join(", "))
+    }
 }
 
 pub fn parse_command(args: &[String]) -> Result<CliCommand, OberonError> {
@@ -1106,6 +1459,8 @@ fn ok_response(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use std::{
+        io::{Read, Write},
+        net::TcpListener,
         path::PathBuf,
         sync::{Mutex, OnceLock},
         thread,
@@ -1114,10 +1469,11 @@ mod tests {
 
     use oberon4_auth::{AccountRegistry, InMemoryAccountMetadataStore};
     use oberon4_core::{
-        DaemonCommand, DaemonEvent, FakeChatProvider, FakeOAuthProvider, InMemorySecretStore,
-        OAuthProviderKind,
+        AppConfig, DaemonCommand, DaemonEvent, FakeChatProvider, FakeOAuthProvider,
+        InMemorySecretStore, OAuthProviderKind,
     };
     use oberon4_daemon::{DaemonApp, DaemonIpcClient, DaemonRuntime, serve_unix_socket};
+    use oberon4_provider_openai::{FakeTransport, OpenAiCompatibleClient, RetryPolicy};
 
     use super::{
         BinaryLaunchTarget, CliApp, CliCommand, default_data_dir, default_socket_path,
@@ -1127,6 +1483,76 @@ mod tests {
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        env_lock().lock().unwrap_or_else(|err| err.into_inner())
+    }
+
+    fn local_doctor_provider() -> OpenAiCompatibleClient<FakeTransport> {
+        OpenAiCompatibleClient::new(
+            "https://api.openai.com",
+            None,
+            RetryPolicy {
+                timeout_ms: 30_000,
+                max_retries: 0,
+            },
+            FakeTransport::new(vec![
+                Ok(r#"{"version":"test-1.0.0"}"#.to_string()),
+                Ok(r#"{"version":"test-1.0.0"}"#.to_string()),
+                Ok(r#"{"data":[{"id":"gpt-4.1-mini"},{"id":"o4-mini"}]}"#.to_string()),
+                Ok(r#"{"entitled":true,"mode":"oauth"}"#.to_string()),
+                Ok(r#"{"requests":7,"failovers":1}"#.to_string()),
+            ]),
+        )
+    }
+
+    fn spawn_control_plane_server(model: &str) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind control-plane server");
+        let addr = listener.local_addr().expect("local addr");
+        let model = model.to_string();
+        let handle = thread::spawn(move || {
+            for _ in 0..4 {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let mut buffer = [0_u8; 4096];
+                let bytes = stream.read(&mut buffer).expect("read");
+                let request = String::from_utf8_lossy(&buffer[..bytes]);
+                let (status_line, body) = if request.starts_with("GET /v1/version HTTP/1.1") {
+                    (
+                        "HTTP/1.1 200 OK",
+                        r#"{"version":"test","git_hash":"mock"}"#.to_string(),
+                    )
+                } else if request.starts_with("GET /v1/models HTTP/1.1") {
+                    (
+                        "HTTP/1.1 200 OK",
+                        format!(r#"{{"data":[{{"id":"{model}"}},{{"id":"fallback-model"}}]}}"#),
+                    )
+                } else if request.starts_with("GET /v1/auth/status HTTP/1.1") {
+                    (
+                        "HTTP/1.1 200 OK",
+                        r#"{"entitled":true,"mode":"oauth"}"#.to_string(),
+                    )
+                } else if request.starts_with("GET /v1/diagnostics HTTP/1.1") {
+                    (
+                        "HTTP/1.1 200 OK",
+                        r#"{"requests":11,"failovers":0}"#.to_string(),
+                    )
+                } else {
+                    (
+                        "HTTP/1.1 404 Not Found",
+                        r#"{"error":"not-found"}"#.to_string(),
+                    )
+                };
+                let response = format!(
+                    "{status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("write response");
+            }
+        });
+        (format!("http://{}", addr), handle)
     }
 
     #[test]
@@ -1203,6 +1629,11 @@ mod tests {
 
     #[test]
     fn doctor_json_reports_unhealthy_local_state() {
+        let _guard = env_guard();
+        unsafe {
+            std::env::remove_var("OBERON4_SOCKET_PATH");
+            std::env::remove_var("OBERON4_DAEMON_BIN");
+        }
         let mut app = CliApp::default();
         let output = app.run(CliCommand::Doctor { json: true });
         let value: serde_json::Value = serde_json::from_str(&output.stdout).unwrap();
@@ -1227,6 +1658,15 @@ mod tests {
         assert_eq!(value["api_key_env"], "OPENAI_API_KEY");
         assert_eq!(value["config_exists"], expected_config_path.exists());
         assert_eq!(value["daemon_reachable"], false);
+        assert_eq!(value["version_check"], "skip");
+        assert_eq!(value["models_check"], "skip");
+        assert_eq!(value["auth_check"], "skip");
+        assert_eq!(value["diagnostics_check"], "skip");
+        assert_eq!(value["available_models"], serde_json::json!([]));
+        assert!(value["endpoint_version"].is_null());
+        assert!(value["auth_summary"].is_null());
+        assert!(value["diagnostics_summary"].is_null());
+        assert!(value["last_error"].is_null());
         assert!(
             !output.stdout.contains("test-key"),
             "doctor JSON must not leak secret values"
@@ -1235,7 +1675,15 @@ mod tests {
 
     #[test]
     fn doctor_json_reports_healthy_local_state() {
-        let mut app = CliApp::default();
+        let _guard = env_guard();
+        unsafe {
+            std::env::remove_var("OBERON4_SOCKET_PATH");
+            std::env::remove_var("OBERON4_DAEMON_BIN");
+        }
+        let mut app = CliApp {
+            provider_client: local_doctor_provider(),
+            ..CliApp::default()
+        };
         let _ = app.run(CliCommand::DaemonStart);
         let output = app.run(CliCommand::Doctor { json: true });
         let value: serde_json::Value = serde_json::from_str(&output.stdout).unwrap();
@@ -1247,6 +1695,28 @@ mod tests {
         assert!(value["error"].is_null());
         assert_eq!(value["api_key_env"], "OPENAI_API_KEY");
         assert_eq!(value["daemon_reachable"], true);
+        assert_eq!(value["version_check"], "pass");
+        assert_eq!(value["models_check"], "pass");
+        assert_eq!(value["auth_check"], "pass");
+        assert_eq!(value["diagnostics_check"], "pass");
+        assert_eq!(
+            value["available_models"],
+            serde_json::json!(["gpt-4.1-mini", "o4-mini"])
+        );
+        assert_eq!(value["endpoint_version"], "test-1.0.0");
+        assert_eq!(value["last_error"], serde_json::Value::Null);
+        assert!(
+            value["auth_summary"]
+                .as_str()
+                .unwrap()
+                .contains("entitled=true")
+        );
+        assert!(
+            value["diagnostics_summary"]
+                .as_str()
+                .unwrap()
+                .contains("requests=7")
+        );
     }
 
     #[test]
@@ -1298,7 +1768,7 @@ mod tests {
 
     #[test]
     fn tui_command_launches_override_binary() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = env_guard();
         unsafe {
             std::env::set_var("OBERON4_TUI_BIN", "/bin/true");
         }
@@ -1315,7 +1785,7 @@ mod tests {
 
     #[test]
     fn tui_command_reports_override_binary_failure() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = env_guard();
         unsafe {
             std::env::set_var("OBERON4_TUI_BIN", "/bin/false");
         }
@@ -1371,7 +1841,9 @@ mod tests {
 
     #[test]
     fn doctor_json_reports_healthy_daemon_backed_state() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = env_guard();
+        let model = "gpt-4.1-mini";
+        let (base_url, server_handle) = spawn_control_plane_server(model);
         let socket_path = std::env::temp_dir().join(format!(
             "oberon4-cli-doctor-json-{}.sock",
             std::process::id()
@@ -1404,6 +1876,18 @@ mod tests {
             thread::sleep(Duration::from_millis(25));
         }
 
+        let mut config = AppConfig::default();
+        config.endpoint.base_url = base_url.clone();
+        config.endpoint.model = model.to_string();
+        config.endpoint.api_key_env = None;
+        let save = DaemonIpcClient::new(&socket_path)
+            .send(&DaemonCommand::SaveConfig { config })
+            .unwrap();
+        match save {
+            DaemonEvent::ConfigLoaded { .. } => {}
+            other => panic!("unexpected save event: {other:?}"),
+        }
+
         let output = run_cli(&["doctor".into(), "--json".into()]);
         let value: serde_json::Value = serde_json::from_str(&output.stdout).unwrap();
         assert_eq!(output.exit_code, 0);
@@ -1411,13 +1895,22 @@ mod tests {
         assert_eq!(value["ready"], true);
         assert_eq!(value["endpoint_check"], "pass");
         assert!(value["error"].is_null());
-        assert_eq!(value["api_key_env"], "OPENAI_API_KEY");
+        assert_eq!(value["api_key_env"], serde_json::Value::Null);
         let expected_data_dir = std::env::var_os("OBERON4_DATA_DIR")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(default_data_dir);
         let expected_config_path = expected_data_dir.join("config.toml");
         assert_eq!(value["config_exists"], expected_config_path.exists());
         assert_eq!(value["daemon_reachable"], true);
+        assert_eq!(value["version_check"], "pass");
+        assert_eq!(value["models_check"], "pass");
+        assert_eq!(value["auth_check"], "pass");
+        assert_eq!(value["diagnostics_check"], "pass");
+        assert_eq!(value["endpoint_version"], "test");
+        assert_eq!(
+            value["available_models"],
+            serde_json::json!(["gpt-4.1-mini", "fallback-model"])
+        );
         assert_eq!(
             value["socket_path"],
             socket_path.display().to_string(),
@@ -1432,6 +1925,7 @@ mod tests {
             other => panic!("unexpected stop event: {other:?}"),
         }
         handle.join().unwrap().unwrap();
+        server_handle.join().unwrap();
 
         unsafe {
             std::env::remove_var("OBERON4_SOCKET_PATH");
@@ -1440,7 +1934,7 @@ mod tests {
 
     #[test]
     fn doctor_json_reports_daemon_start_failure() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = env_guard();
         let socket_path = std::env::temp_dir().join(format!(
             "oberon4-cli-doctor-json-fail-{}.sock",
             std::process::id()
@@ -1460,8 +1954,18 @@ mod tests {
         assert_eq!(value["ready"], false);
         assert_eq!(value["endpoint_check"], "fail");
         assert_eq!(value["daemon_reachable"], false);
+        assert_eq!(value["version_check"], "skip");
+        assert_eq!(value["models_check"], "skip");
+        assert_eq!(value["auth_check"], "skip");
+        assert_eq!(value["diagnostics_check"], "skip");
         assert!(
             value["error"]
+                .as_str()
+                .unwrap()
+                .contains("daemon failed to become ready after spawn")
+        );
+        assert!(
+            value["last_error"]
                 .as_str()
                 .unwrap()
                 .contains("daemon failed to become ready after spawn")
