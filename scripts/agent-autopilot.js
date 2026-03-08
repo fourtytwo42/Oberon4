@@ -54,6 +54,15 @@ function nowSlug() {
   return new Date().toISOString().replace(/[:.]/g, '-');
 }
 
+function sanitizePathSegment(value, fallback = 'item') {
+  const normalized = String(value || fallback)
+    .replace(/[^A-Za-z0-9._-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^\.+/, '')
+    .replace(/^[-]+|[-]+$/g, '');
+  return normalized || fallback;
+}
+
 function loadState(stateFile) {
   return JSON.parse(fs.readFileSync(stateFile, 'utf8'));
 }
@@ -229,7 +238,12 @@ function moduleHintsForJob(job) {
 
 function writePrompt(job, phase) {
   fs.mkdirSync(PROMPT_DIR, { recursive: true });
-  const promptPath = path.join(PROMPT_DIR, `${job.id}-${phase}-${nowSlug()}.txt`);
+  const promptName = [
+    sanitizePathSegment(job.id, 'job'),
+    sanitizePathSegment(phase, 'phase'),
+    sanitizePathSegment(nowSlug(), 'timestamp'),
+  ].join('-');
+  const promptPath = path.join(PROMPT_DIR, `${promptName}.txt`);
   fs.writeFileSync(promptPath, buildPrompt(job, phase));
   return promptPath;
 }

@@ -1,0 +1,8 @@
+title = "Oberon4 gitleaks config"
+
+[allowlist]
+description = "Ignore generated security gate outputs and the tracked baseline artifact."
+paths = [
+  '''^security/gitleaks-baseline\.json$''',
+  '''^artifacts/security-gate/''',
+]

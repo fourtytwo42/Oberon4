@@ -12,6 +12,7 @@ Status: active
 - [ ] `bash scripts/repair-loop.sh`
 - [ ] `GATE_MODE=strict bash scripts/oberon4-gate.sh`
 - [ ] PTY TUI smoke: `bash scripts/tui-pty-smoke.sh`
+- [ ] security bootstrap: `bash scripts/bootstrap-security-tools.sh`
 - [ ] security gate: `bash scripts/oberon4-security-gate.sh`
 - [ ] local real-endpoint wrapper: `bash scripts/live-local-smoke.sh`
 - [ ] optional repair-loop live coverage: `RUN_LIVE_LOCAL_SMOKE=1 bash scripts/repair-loop.sh`
@@ -39,6 +40,8 @@ Status: active
 - [ ] `oberon4 doctor` returns success text on healthy configuration
 - [ ] `oberon4 doctor --json` returns valid JSON with no secret/token values and includes local runtime metadata (`config_path`, `data_dir`, `socket_path`, `api_key_env`, `config_exists`, `daemon_reachable`) plus control-plane fields (`version_check`, `models_check`, `auth_check`, `diagnostics_check`, `available_models`, `endpoint_version`, `auth_summary`, `diagnostics_summary`, `last_error`)
 - [ ] diagnostics and live verification succeed when the configured API-key env is available either from the exported shell env or the local Oberon4 secret store
+- [ ] `security/gitleaks-baseline.json` is present, reviewed, and only suppresses approved existing findings
+- [ ] `docs/security/runbook-secret-triage.md` and `docs/security/security-checklist-secret-triage.md` are current
 - [ ] responders know to inspect `artifacts/failures/<timestamp>-<entrypoint>-<pid>/` for `summary.json`, `commands.txt`, `env.txt`, logs, `effective-config.json`, and doctor output before retrying
 - [ ] responders know failure bundles now include `daemon-runtime.txt` plus best-effort `daemon-out.log` and `daemon-err.log`
 - [ ] responders know failure bundles now include `logs-tail.txt`, `request-summary.txt`, and `evidence-summary.json` before manual reproduction starts
@@ -46,6 +49,7 @@ Status: active
 - [ ] responders understand remediation mode is optional local recovery evidence, not a routine release gate requirement
 - [ ] live-local smoke confirms the configured model is advertised by `/v1/models` and that `/v1/auth/status` plus `/v1/diagnostics` return valid JSON
 - [ ] optional maintenance command `bash scripts/prune-artifacts.sh --dry-run` has been reviewed before pruning old runtime evidence
+- [ ] security run artifacts under `artifacts/security-gate/` are available for the latest security gate run
 - [ ] operators understand the security gate is opt-in-first in this slice and not yet a default pre-push requirement
 
 ## Human Test Entry

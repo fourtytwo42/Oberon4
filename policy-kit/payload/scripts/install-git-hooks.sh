@@ -15,6 +15,8 @@ chmod +x \
   scripts/exception-debt-report.sh \
   scripts/local-ci-gate.sh \
   scripts/oberon4-gate.sh \
+  scripts/bootstrap-security-tools.sh \
+  scripts/test-bootstrap-security-tools.sh \
   scripts/oberon4-security-gate.sh \
   scripts/check-policy-stack.sh \
   scripts/bootstrap-policy-stack.sh \

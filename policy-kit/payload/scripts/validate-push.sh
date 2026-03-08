@@ -16,11 +16,12 @@ run_exception_debt_report="${HOOKS_RUN_EXCEPTION_DEBT_REPORT:-1}"
 exception_debt_strict="${HOOKS_EXCEPTION_DEBT_STRICT:-0}"
 exception_debt_horizon_days="${HOOKS_EXCEPTION_DEBT_HORIZON_DAYS:-14}"
 auto_sync_policy_kit_on_push="${HOOKS_AUTO_SYNC_POLICY_KIT_ON_PUSH:-0}"
-policy_kit_sync_path_regex="${POLICY_KIT_SYNC_PATH_REGEX:-^AGENTS\.md$|^\.githooks/|^scripts/(validate-|check-policy-stack|bootstrap-policy-stack|policy-doctor|risk-classifier|run-agent|oberon4-security-gate|security-gate|hooks\.env|lib/common\.sh|install-git-hooks|install-drift-cron|run-drift-watch|policy-drift-audit|exception-debt-report|local-ci-gate|sync-policy-kit)\.?(sh|ps1)?$|^docs/policy/|^docs/templates/|^docs/examples/commit-messages/|^tests/policy/|^policy-kit/}"
+policy_kit_sync_path_regex="${POLICY_KIT_SYNC_PATH_REGEX:-^AGENTS\.md$|^\.githooks/|^scripts/(validate-|check-policy-stack|bootstrap-policy-stack|bootstrap-security-tools|policy-doctor|risk-classifier|run-agent|oberon4-security-gate|security-gate|hooks\.env|lib/common\.sh|install-git-hooks|install-drift-cron|run-drift-watch|policy-drift-audit|exception-debt-report|local-ci-gate|sync-policy-kit)\.?(sh|ps1)?$|^docs/policy/|^docs/security/|^docs/templates/|^docs/examples/commit-messages/|^tests/policy/|^policy-kit/|^security/}"
 did_run_security_gate=0
 did_run_policy_drift_audit=0
 did_run_exception_debt_report=0
 did_sync_policy_kit=0
+run_dedicated_security_gate_on_push="${HOOKS_RUN_DEDICATED_SECURITY_GATE_ON_PUSH:-0}"
 
 validate_issue_open() {
   local issue_id="$1"
@@ -316,7 +317,7 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   # Local CI safety net: smoke + tests + build.
   bash scripts/local-ci-gate.sh
 
-  if [[ "$did_run_security_gate" -eq 0 ]]; then
+  if [[ "$run_dedicated_security_gate_on_push" == "1" && "$did_run_security_gate" -eq 0 ]]; then
     scripts/security-gate.sh .
     did_run_security_gate=1
   fi

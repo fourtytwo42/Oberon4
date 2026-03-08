@@ -12,6 +12,7 @@ Required scopes:
 - canonical gate: `GATE_MODE=strict bash scripts/oberon4-gate.sh`
 - smoke gate: `GATE_MODE=smoke bash scripts/oberon4-gate.sh`
 - canonical repair loop: `bash scripts/repair-loop.sh`
+- security tool bootstrap: `bash scripts/bootstrap-security-tools.sh`
 - canonical security gate: `bash scripts/oberon4-security-gate.sh`
 - artifact pruning: `bash scripts/prune-artifacts.sh --dry-run`
 - local baseline: `cargo test`
@@ -32,7 +33,9 @@ Gate behavior:
 - failed gate or local-live runs write a troubleshooting bundle under `artifacts/failures/<timestamp>-<entrypoint>-<pid>/`
 - repair-loop runs write machine-readable stage logs and `summary.json` under `artifacts/repair-loop/<timestamp>-<pid>/`
 - failure bundles now include `logs-tail.txt`, `request-summary.txt`, and `evidence-summary.json` in addition to the existing doctor/config/runtime artifacts
-- the security gate requires `gitleaks`, `semgrep`, and `cargo-audit`; missing tools are hard failures for `scripts/oberon4-security-gate.sh`
+- the security gate requires `gitleaks`, `semgrep`, and `cargo-audit`; `bash scripts/bootstrap-security-tools.sh` is the canonical bootstrap path and missing tools are hard failures for `scripts/oberon4-security-gate.sh`
+- the security gate writes machine-readable run artifacts under `artifacts/security-gate/<timestamp>-<pid>/`, including `summary.json`, per-stage logs, and stage reports
+- existing approved secret findings are quarantined only through `security/gitleaks-baseline.json`; new findings outside the baseline remain blocking
 
 ## 2.1 Optional Live Hotspot Smoke
 Use this when a real LLM Hotspot universal endpoint is available and you want live-provider evidence in addition to deterministic tests.
@@ -64,7 +67,7 @@ Rules:
 - prefer `scripts/repair-loop.sh` as the first local recovery command because it runs `doctor --json`, the strict gate, PTY smoke, and optionally the live-local wrapper in one fixed order
 - if the initial `doctor --json` stage fails and local recovery is appropriate, use `RUN_REPAIR_REMEDIATE=1 bash scripts/repair-loop.sh` to attempt a local rebuild plus daemon restart before re-running diagnosis
 - use `scripts/prune-artifacts.sh --dry-run` to review stale runtime evidence before removing old bundles
-- prefer the security gate as an explicit operator command for now; it is intentionally not part of default `strict` or pre-push enforcement in this slice
+- bootstrap security tools before local enforcement if the security profile has not been provisioned on the machine yet
 
 ## 3. Coverage Expectations by Requirement
 - `FR-001`: lifecycle tests (start, health, graceful stop)
@@ -85,3 +88,4 @@ Rules:
 - treat `.live-manual/`, `artifacts/failures/`, `artifacts/repair-loop/`, and `artifacts/live-local-smoke/` as ephemeral runtime evidence, not review artifacts to commit
 - config, session, and secret-store changes require fixture-backed compatibility coverage for additive legacy shapes
 - account metadata persistence changes require fixture-backed compatibility coverage for additive legacy registry shapes
+- security hardening changes require reviewed updates to `security/gitleaks.toml`, `security/gitleaks-baseline.json`, and the secret triage runbook/checklist when the baseline changes

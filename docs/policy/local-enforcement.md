@@ -173,11 +173,15 @@ Notes:
     - at least one commit marked `Risk: high`
     - at least 2 verification commands in commit messages
     - explicit rollback note in commit messages
-  - Runs local security gate (if installed): secret scan, SAST, dependency audit
+  - Runs local security gate: secret scan, SAST, dependency audit
   - Oberon4 canonical security gate is `bash scripts/oberon4-security-gate.sh`
     - required tools: `gitleaks`, `semgrep`, `cargo-audit`
-    - current rollout is opt-in-first; it is not part of default Oberon4 pre-push local CI in this slice
+    - canonical bootstrap: `bash scripts/bootstrap-security-tools.sh`
+    - local enforcement now expects the security profile to be present by default
+    - existing approved findings must live in `security/gitleaks-baseline.json`
+    - troubleshoot and refresh baseline only through `docs/security/runbook-secret-triage.md`
     - explicit operator invocation:
+      - `bash scripts/bootstrap-security-tools.sh`
       - `bash scripts/oberon4-security-gate.sh`
       - `RUN_SECURITY_GATE=1 GATE_MODE=smoke bash scripts/oberon4-gate.sh`
   - Blocks oversized pushes by default:

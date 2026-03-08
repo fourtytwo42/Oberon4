@@ -65,6 +65,21 @@ chmod +x "${MOCK_BIN}/cargo"
 cat > "${MOCK_BIN}/gitleaks" <<'SH'
 #!/usr/bin/bash
 set -euo pipefail
+report_path=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --report-path)
+      report_path="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+if [[ -n "${report_path}" ]]; then
+  printf '[]\n' > "${report_path}"
+fi
 if [[ "${MOCK_SECURITY_GATE_FAIL:-0}" == "1" ]]; then
   echo "gitleaks synthetic failure" >&2
   exit 1
@@ -76,6 +91,21 @@ chmod +x "${MOCK_BIN}/gitleaks"
 cat > "${MOCK_BIN}/semgrep" <<'SH'
 #!/usr/bin/bash
 set -euo pipefail
+output_path=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --output)
+      output_path="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+if [[ -n "${output_path}" ]]; then
+  printf '{"results":[]}\n' > "${output_path}"
+fi
 echo "semgrep ok"
 SH
 chmod +x "${MOCK_BIN}/semgrep"
@@ -83,7 +113,7 @@ chmod +x "${MOCK_BIN}/semgrep"
 cat > "${MOCK_BIN}/cargo-audit" <<'SH'
 #!/usr/bin/bash
 set -euo pipefail
-echo "cargo-audit ok"
+printf '{"vulnerabilities":{"found":false}}\n'
 SH
 chmod +x "${MOCK_BIN}/cargo-audit"
 
@@ -164,6 +194,11 @@ if [[ ! -f "${LOG_DIR}/cargo_test_e2e.log" ]]; then
   echo "assertion failed: strict mode should run end-to-end tests" >&2
   exit 1
 fi
+if [[ ! -f "${LOG_DIR}/security_gate.log" ]]; then
+  echo "assertion failed: strict mode should run security gate by default" >&2
+  exit 1
+fi
+assert_contains "${LOG_DIR}/security_gate.log" "[security-gate] PASS: Oberon4 security verification satisfied."
 
 FAIL_OUTPUT="${TMP_DIR}/fail-tail.out"
 if run_gate "${FAIL_OUTPUT}" \
@@ -267,7 +302,7 @@ fi
 SECURITY_FAIL_BUNDLE_DIR="$(latest_bundle_dir)"
 assert_contains "${SECURITY_FAIL_OUTPUT}" "[gate] failure_bundle stage=security_gate bundle=${SECURITY_FAIL_BUNDLE_DIR} log=${LOG_DIR}/security_gate.log"
 [[ -f "${SECURITY_FAIL_BUNDLE_DIR}/logs/security_gate.log" ]] || { echo "missing copied security gate log" >&2; exit 1; }
-assert_contains "${SECURITY_FAIL_BUNDLE_DIR}/logs/security_gate.log" "[security-gate] step=secret_scan status=fail"
+assert_contains "${SECURITY_FAIL_BUNDLE_DIR}/logs/security_gate.log" "[security-gate] stage=secret_scan status=fail"
 
 WRAPPER_OUTPUT="${TMP_DIR}/wrapper.out"
 env PATH="${MOCK_BIN}:$PATH" \

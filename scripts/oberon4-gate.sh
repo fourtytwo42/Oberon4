@@ -169,6 +169,7 @@ case "${GATE_MODE}" in
       echo "[gate] use GATE_MODE=smoke to run a reduced gate profile" >&2
       exit 1
     fi
+    if [[ "${run_security_gate_set}" -eq 0 ]]; then RUN_SECURITY_GATE=1; fi
     ;;
   smoke)
     if [[ "${run_format_check_set}" -eq 0 ]]; then RUN_FORMAT_CHECK=0; fi
