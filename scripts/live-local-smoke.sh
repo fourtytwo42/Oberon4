@@ -180,6 +180,36 @@ run_doctor_config_show_command() {
   "${cli_env[@]}" cargo run -p oberon4-cli -- config show
 }
 
+run_doctor_logs_tail_command() {
+  local cli_env=(
+    env
+    "OBERON4_DATA_DIR=${DOCTOR_DATA_DIR}"
+    "OBERON4_SOCKET_PATH=${DOCTOR_SOCKET_PATH}"
+  )
+  local daemon_bin="${ROOT_DIR}/target/debug/oberon4-daemon"
+  if [[ -x "${daemon_bin}" ]]; then
+    cli_env+=("OBERON4_DAEMON_BIN=${daemon_bin}")
+  fi
+
+  local started=0
+  cleanup() {
+    if [[ "${started:-0}" == "1" ]]; then
+      "${cli_env[@]}" cargo run -p oberon4-cli -- daemon stop >/dev/null 2>&1 || true
+    fi
+  }
+  trap cleanup RETURN
+
+  "${cli_env[@]}" cargo run -p oberon4-cli -- daemon start >/dev/null
+  started=1
+  "${cli_env[@]}" cargo run -p oberon4-cli -- config set endpoint.base_url "${DOCTOR_BASE_URL}" >/dev/null
+  "${cli_env[@]}" cargo run -p oberon4-cli -- config set endpoint.model "${OBERON4_LIVE_OPENAI_MODEL}" >/dev/null
+  if [[ -n "${OBERON4_LIVE_API_KEY_ENV}" ]]; then
+    "${cli_env[@]}" cargo run -p oberon4-cli -- config set endpoint.api_key_env "${OBERON4_LIVE_API_KEY_ENV}" >/dev/null
+  fi
+
+  "${cli_env[@]}" cargo run -p oberon4-cli -- logs tail
+}
+
 capture_live_failure_bundle() {
   local failed_stage="$1"
   local primary_log_path="$2"
@@ -206,7 +236,14 @@ capture_live_failure_bundle() {
     failure_bundle_capture_doctor "${bundle_dir}" run_doctor_json_command
   fi
   failure_bundle_capture_effective_config "${bundle_dir}" run_doctor_config_show_command
+  failure_bundle_capture_logs_tail "${bundle_dir}" run_doctor_logs_tail_command
   failure_bundle_capture_daemon_runtime "${bundle_dir}" "${DOCTOR_DATA_DIR}" "${DOCTOR_SOCKET_PATH}"
+  failure_bundle_capture_request_summary "${bundle_dir}" "${primary_log_path}"
+  failure_bundle_write_evidence_summary \
+    "${bundle_dir}" \
+    "live-local-smoke" \
+    "${failed_stage}" \
+    "${primary_log_path}"
   printf '%s\n' "${bundle_dir}"
 }
 

@@ -49,6 +49,10 @@ if [[ "${1:-}" == "run" && "${2:-}" == "-p" && "${3:-}" == "oberon4-cli" && "${4
   echo '{"endpoint":{"base_url":"http://example.test","model":"gpt-test","api_key_env":"<redacted>"}}'
   exit 0
 fi
+if [[ "${1:-}" == "run" && "${2:-}" == "-p" && "${3:-}" == "oberon4-cli" && "${4:-}" == "--" && "${5:-}" == "logs" && "${6:-}" == "tail" ]]; then
+  echo '{"level":"info","message":"mocked logs tail"}'
+  exit 0
+fi
 echo "unexpected cargo invocation: $*" >&2
 exit 1
 SH
@@ -160,6 +164,10 @@ fi
 [[ -f "${BUNDLE_DIR}/doctor-status.txt" ]] || { echo "missing bundle doctor-status.txt" >&2; exit 1; }
 [[ -f "${BUNDLE_DIR}/effective-config.json" ]] || { echo "missing bundle effective-config.json" >&2; exit 1; }
 [[ -f "${BUNDLE_DIR}/effective-config-status.txt" ]] || { echo "missing bundle effective-config-status.txt" >&2; exit 1; }
+[[ -f "${BUNDLE_DIR}/logs-tail.txt" ]] || { echo "missing bundle logs-tail.txt" >&2; exit 1; }
+[[ -f "${BUNDLE_DIR}/logs-tail-status.txt" ]] || { echo "missing bundle logs-tail-status.txt" >&2; exit 1; }
+[[ -f "${BUNDLE_DIR}/request-summary.txt" ]] || { echo "missing bundle request-summary.txt" >&2; exit 1; }
+[[ -f "${BUNDLE_DIR}/evidence-summary.json" ]] || { echo "missing bundle evidence-summary.json" >&2; exit 1; }
 [[ -f "${BUNDLE_DIR}/daemon-runtime.txt" ]] || { echo "missing bundle daemon-runtime.txt" >&2; exit 1; }
 [[ -f "${BUNDLE_DIR}/daemon-out.log" ]] || { echo "missing bundle daemon-out.log" >&2; exit 1; }
 [[ -f "${BUNDLE_DIR}/daemon-err.log" ]] || { echo "missing bundle daemon-err.log" >&2; exit 1; }
@@ -182,6 +190,15 @@ assert_contains "${BUNDLE_DIR}/daemon-runtime.txt" "daemon_out_status=present"
 assert_contains "${BUNDLE_DIR}/daemon-runtime.txt" "daemon_err_status=present"
 assert_contains "${BUNDLE_DIR}/daemon-out.log" "daemon stdout line"
 assert_contains "${BUNDLE_DIR}/daemon-err.log" "daemon stderr line"
+assert_contains "${BUNDLE_DIR}/logs-tail.txt" "mocked logs tail"
+assert_contains "${BUNDLE_DIR}/request-summary.txt" "source=${LOG_DIR}/cargo_test_workspace.log"
+assert_contains "${BUNDLE_DIR}/request-summary.txt" "mocked regression"
+assert_contains "${BUNDLE_DIR}/evidence-summary.json" '"entrypoint": "oberon4-gate"'
+assert_contains "${BUNDLE_DIR}/evidence-summary.json" '"failed_stage": "cargo_test_workspace"'
+assert_contains "${BUNDLE_DIR}/evidence-summary.json" '"doctor_exit_code": "1"'
+assert_contains "${BUNDLE_DIR}/evidence-summary.json" '"effective_config_exit_code": "0"'
+assert_contains "${BUNDLE_DIR}/evidence-summary.json" '"daemon_log_available": true'
+assert_contains "${BUNDLE_DIR}/evidence-summary.json" '"request_excerpt_available": true'
 if rg -n --fixed-strings "super-secret-token" "${BUNDLE_DIR}/env.txt" >/dev/null; then
   echo "assertion failed: secret value leaked into gate bundle env.txt" >&2
   exit 1

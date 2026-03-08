@@ -108,3 +108,96 @@ failure_bundle_capture_effective_config() {
     return 0
   fi
 }
+
+failure_bundle_capture_logs_tail() {
+  local bundle_dir="$1"
+  shift
+
+  local logs_output_file="${bundle_dir}/logs-tail.txt"
+  local logs_status_file="${bundle_dir}/logs-tail-status.txt"
+
+  if "$@" >"${logs_output_file}" 2>&1; then
+    printf 'exit_code=0\n' >"${logs_status_file}"
+  else
+    local exit_code=$?
+    printf 'exit_code=%s\n' "${exit_code}" >"${logs_status_file}"
+    return 0
+  fi
+}
+
+failure_bundle_capture_request_summary() {
+  local bundle_dir="$1"
+  local source_path="$2"
+  local tail_lines="${FAILURE_BUNDLE_REQUEST_SUMMARY_LINES:-20}"
+  local request_summary_path="${bundle_dir}/request-summary.txt"
+
+  if [[ -f "${source_path}" ]]; then
+    {
+      printf 'source=%s\n' "${source_path}"
+      printf 'mode=tail\n'
+      tail -n "${tail_lines}" "${source_path}"
+    } >"${request_summary_path}"
+  else
+    {
+      printf 'source=%s\n' "${source_path}"
+      printf 'mode=missing\n'
+      printf 'request summary unavailable: source log missing\n'
+    } >"${request_summary_path}"
+  fi
+}
+
+failure_bundle_read_exit_code() {
+  local status_path="$1"
+  if [[ -f "${status_path}" ]]; then
+    sed -n 's/^exit_code=//p' "${status_path}" | head -n 1
+  else
+    printf 'missing'
+  fi
+}
+
+failure_bundle_has_daemon_logs() {
+  local bundle_dir="$1"
+  if [[ -f "${bundle_dir}/daemon-out.log" || -f "${bundle_dir}/daemon-err.log" ]]; then
+    printf 'true'
+  else
+    printf 'false'
+  fi
+}
+
+failure_bundle_has_request_summary() {
+  local bundle_dir="$1"
+  if [[ -s "${bundle_dir}/request-summary.txt" ]]; then
+    printf 'true'
+  else
+    printf 'false'
+  fi
+}
+
+failure_bundle_write_evidence_summary() {
+  local bundle_dir="$1"
+  local entrypoint="$2"
+  local failed_stage="$3"
+  local request_summary_source="${4-}"
+  local doctor_exit_code
+  local effective_config_exit_code
+  local daemon_logs_available
+  local request_excerpt_available
+
+  doctor_exit_code="$(failure_bundle_read_exit_code "${bundle_dir}/doctor-status.txt")"
+  effective_config_exit_code="$(failure_bundle_read_exit_code "${bundle_dir}/effective-config-status.txt")"
+  daemon_logs_available="$(failure_bundle_has_daemon_logs "${bundle_dir}")"
+  request_excerpt_available="$(failure_bundle_has_request_summary "${bundle_dir}")"
+
+  cat >"${bundle_dir}/evidence-summary.json" <<EOF
+{
+  "timestamp_utc": "$(failure_bundle_json_escape "$(date -u +%Y-%m-%dT%H:%M:%SZ)")",
+  "entrypoint": "$(failure_bundle_json_escape "${entrypoint}")",
+  "failed_stage": "$(failure_bundle_json_escape "${failed_stage}")",
+  "doctor_exit_code": "$(failure_bundle_json_escape "${doctor_exit_code}")",
+  "effective_config_exit_code": "$(failure_bundle_json_escape "${effective_config_exit_code}")",
+  "daemon_log_available": ${daemon_logs_available},
+  "request_excerpt_available": ${request_excerpt_available},
+  "request_summary_source": "$(failure_bundle_json_escape "${request_summary_source}")"
+}
+EOF
+}

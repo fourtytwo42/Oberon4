@@ -100,6 +100,11 @@ if [[ "${1:-}" == "run" && "${2:-}" == "-p" && "${3:-}" == "oberon4-cli" && "${4
         "${OBERON4_LIVE_OPENAI_MODEL:-}"
       exit 0
       ;;
+    logs)
+      printf 'doctor_logs_tail\n' >>"${ORDER_FILE}"
+      echo '{"level":"info","message":"mocked live logs tail"}'
+      exit 0
+      ;;
   esac
 fi
 echo "unexpected cargo invocation: $*" >&2
@@ -217,6 +222,9 @@ FAIL_BUNDLE_DIR="$(latest_bundle_dir)"
 [[ -f "${FAIL_BUNDLE_DIR}/env.txt" ]] || { echo "missing failure env.txt" >&2; exit 1; }
 [[ -f "${FAIL_BUNDLE_DIR}/doctor.json" ]] || { echo "missing fallback doctor.json" >&2; exit 1; }
 [[ -f "${FAIL_BUNDLE_DIR}/effective-config.json" ]] || { echo "missing effective-config.json" >&2; exit 1; }
+[[ -f "${FAIL_BUNDLE_DIR}/logs-tail.txt" ]] || { echo "missing logs-tail.txt" >&2; exit 1; }
+[[ -f "${FAIL_BUNDLE_DIR}/request-summary.txt" ]] || { echo "missing request-summary.txt" >&2; exit 1; }
+[[ -f "${FAIL_BUNDLE_DIR}/evidence-summary.json" ]] || { echo "missing evidence-summary.json" >&2; exit 1; }
 [[ -f "${FAIL_BUNDLE_DIR}/daemon-runtime.txt" ]] || { echo "missing daemon-runtime.txt" >&2; exit 1; }
 [[ -f "${FAIL_BUNDLE_DIR}/logs/live_daemon_smoke.log" ]] || { echo "missing daemon log in bundle" >&2; exit 1; }
 assert_contains "${FAIL_OUTPUT}" "stage=live_daemon_smoke status=fail bundle=${FAIL_BUNDLE_DIR} log=${FAIL_RUN_DIR}/live_daemon_smoke.log"
@@ -225,6 +233,12 @@ assert_contains "${FAIL_BUNDLE_DIR}/commands.txt" "live_daemon_smoke: bash scrip
 assert_contains "${FAIL_BUNDLE_DIR}/env.txt" "OBERON4_LIVE_API_KEY_ENV=TEST_LIVE_KEY"
 assert_contains "${FAIL_BUNDLE_DIR}/env.txt" "OBERON4_LIVE_API_KEY_STATUS=set"
 assert_contains "${FAIL_BUNDLE_DIR}/daemon-runtime.txt" "data_dir=${FAIL_RUN_DIR}/doctor-data"
+assert_contains "${FAIL_BUNDLE_DIR}/logs-tail.txt" "mocked live logs tail"
+assert_contains "${FAIL_BUNDLE_DIR}/request-summary.txt" "source=${FAIL_RUN_DIR}/live_daemon_smoke.log"
+assert_contains "${FAIL_BUNDLE_DIR}/request-summary.txt" "live daemon failed"
+assert_contains "${FAIL_BUNDLE_DIR}/evidence-summary.json" '"entrypoint": "live-local-smoke"'
+assert_contains "${FAIL_BUNDLE_DIR}/evidence-summary.json" '"failed_stage": "live_daemon_smoke"'
+assert_contains "${FAIL_BUNDLE_DIR}/evidence-summary.json" '"request_excerpt_available": true'
 if rg -n --fixed-strings "super-secret-token" "${FAIL_BUNDLE_DIR}/env.txt" >/dev/null; then
   echo "assertion failed: secret value leaked into live bundle env.txt" >&2
   exit 1

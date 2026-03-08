@@ -100,7 +100,14 @@ capture_gate_failure_bundle() {
   done
   failure_bundle_capture_doctor "${bundle_dir}" cargo run -p oberon4-cli -- doctor --json
   failure_bundle_capture_effective_config "${bundle_dir}" cargo run -p oberon4-cli -- config show
+  failure_bundle_capture_logs_tail "${bundle_dir}" cargo run -p oberon4-cli -- logs tail
   failure_bundle_capture_daemon_runtime "${bundle_dir}" "${data_dir}" "${socket_path}"
+  failure_bundle_capture_request_summary "${bundle_dir}" "${primary_log_path}"
+  failure_bundle_write_evidence_summary \
+    "${bundle_dir}" \
+    "oberon4-gate" \
+    "${failed_stage}" \
+    "${primary_log_path}"
   printf '%s\n' "${bundle_dir}"
 }
 
