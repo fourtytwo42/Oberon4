@@ -4,7 +4,11 @@ use std::{
     net::TcpListener,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::mpsc::{self, Receiver, TryRecvError},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, TryRecvError},
+    },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -246,6 +250,11 @@ struct PendingSubmission {
     tool_state: BTreeMap<usize, (String, String)>,
 }
 
+struct PendingOAuthConnect {
+    receiver: Receiver<OAuthUiEvent>,
+    cancel_flag: Arc<AtomicBool>,
+}
+
 #[derive(Debug)]
 enum AsyncUiEvent {
     TextDelta(String),
@@ -255,6 +264,17 @@ enum AsyncUiEvent {
         message: ChatMessage,
     },
     Failed(OberonError),
+}
+
+#[derive(Debug)]
+enum OAuthUiEvent {
+    Complete(String),
+    Failed(OberonError),
+}
+
+enum MenuAction {
+    None,
+    StartOAuth(PendingOAuthConnect),
 }
 
 pub struct TuiApp {
@@ -1616,7 +1636,7 @@ impl TuiShellState {
     fn activate_current_menu_item(
         &mut self,
         app: &mut DaemonBackedTuiApp,
-    ) -> Result<bool, OberonError> {
+    ) -> Result<MenuAction, OberonError> {
         match self.current_route() {
             ScreenRoute::SettingsRoot => match self.menu_index {
                 0 => self.push_route(ScreenRoute::SettingsProvider, FocusTarget::Menu),
@@ -1656,20 +1676,10 @@ impl TuiShellState {
                 match self.menu_index {
                     0 => {
                         self.set_activity(ActivityState::Loading, "starting oauth flow");
-                        let start = match app.connect_account(provider) {
-                            Ok(start) => start,
-                            Err(err) if oauth_connect_requires_daemon_refresh(&err) => {
-                                restart_daemon_process(app.client.socket_path().to_path_buf())?;
-                                app.connect_account(provider)?
-                            }
-                            Err(err) => return Err(err),
-                        };
-                        open_browser(&start.url)?;
-                        let callback =
-                            wait_for_oauth_callback(&start.redirect_uri, Duration::from_secs(300))?;
-                        let message = app.complete_oauth_connect(&start.flow_id, callback)?;
-                        self.refresh_runtime_data(app);
-                        self.set_activity(ActivityState::Idle, message);
+                        return Ok(MenuAction::StartOAuth(start_async_oauth_connect(
+                            app.client.socket_path().to_path_buf(),
+                            provider,
+                        )?));
                     }
                     1 => self.push_route(
                         ScreenRoute::AccountList {
@@ -1770,7 +1780,7 @@ impl TuiShellState {
                         ),
                         _ => {
                             self.screen_stack.pop();
-                            return Ok(true);
+                            return Ok(MenuAction::None);
                         }
                     }
                     self.refresh_runtime_data(app);
@@ -1778,9 +1788,9 @@ impl TuiShellState {
                     self.set_activity(ActivityState::Error, "no account selected");
                 }
             }
-            _ => return Ok(false),
+            _ => return Ok(MenuAction::None),
         }
-        Ok(true)
+        Ok(MenuAction::None)
     }
 
     fn activate_current_list_item(
@@ -2079,6 +2089,7 @@ fn run_inline_terminal_loop(
     app: &mut DaemonBackedTuiApp,
     shell: &mut TuiShellState,
 ) -> Result<(), OberonError> {
+    let mut pending_oauth: Option<PendingOAuthConnect> = None;
     sync_shell_transcript_from_app(shell, app);
     print_inline_home_screen(stdout, shell)?;
     redraw_inline_prompt(stdout, shell)?;
@@ -2092,6 +2103,26 @@ fn run_inline_terminal_loop(
                 .flush()
                 .map_err(|err| OberonError::Storage(format!("stdout flush failed: {err}")))?;
             return Ok(());
+        }
+
+        if let Some(pending) = pending_oauth.as_ref() {
+            match pending.receiver.try_recv() {
+                Ok(OAuthUiEvent::Complete(message)) => {
+                    pending_oauth = None;
+                    shell.refresh_runtime_data(app);
+                    shell.set_activity(ActivityState::Idle, message);
+                }
+                Ok(OAuthUiEvent::Failed(err)) => {
+                    pending_oauth = None;
+                    shell.set_activity(ActivityState::Error, err.to_string());
+                    shell.refresh_runtime_data(app);
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => {
+                    pending_oauth = None;
+                    shell.set_activity(ActivityState::Error, "oauth flow worker disconnected");
+                }
+            }
         }
 
         let event = event::read()
@@ -2172,7 +2203,9 @@ fn run_inline_terminal_loop(
             },
             KeyCode::Enter => {
                 if matches!(shell.focus, FocusTarget::Menu) {
-                    shell.activate_current_menu_item(app)?;
+                    if let MenuAction::StartOAuth(pending) = shell.activate_current_menu_item(app)? {
+                        pending_oauth = Some(pending);
+                    }
                     rerender_workspace = !matches!(shell.workspace, Workspace::Chat);
                 } else if matches!(shell.focus, FocusTarget::List) {
                     shell.activate_current_list_item(app)?;
@@ -2195,6 +2228,10 @@ fn run_inline_terminal_loop(
                 }
             }
             KeyCode::Esc => {
+                if let Some(pending) = pending_oauth.take() {
+                    pending.cancel_flag.store(true, Ordering::Relaxed);
+                    shell.set_activity(ActivityState::Idle, "oauth flow canceled");
+                }
                 if matches!(shell.focus, FocusTarget::List) && matches!(shell.workspace, Workspace::Chat)
                 {
                     shell.restore_active_chat_preview(app);
@@ -2230,6 +2267,7 @@ fn run_terminal_loop(
     shell: &mut TuiShellState,
 ) -> Result<(), OberonError> {
     let mut pending_submission: Option<PendingSubmission> = None;
+    let mut pending_oauth: Option<PendingOAuthConnect> = None;
 
     loop {
         handle_pending_timeout(&mut pending_submission, shell);
@@ -2241,6 +2279,26 @@ fn run_terminal_loop(
                 Err(TryRecvError::Disconnected) => {
                     pending_submission = None;
                     shell.status = "request worker disconnected".to_string();
+                }
+            }
+        }
+
+        if let Some(pending) = pending_oauth.as_ref() {
+            match pending.receiver.try_recv() {
+                Ok(OAuthUiEvent::Complete(message)) => {
+                    pending_oauth = None;
+                    shell.refresh_runtime_data(app);
+                    shell.set_activity(ActivityState::Idle, message);
+                }
+                Ok(OAuthUiEvent::Failed(err)) => {
+                    pending_oauth = None;
+                    shell.set_activity(ActivityState::Error, err.to_string());
+                    shell.refresh_runtime_data(app);
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => {
+                    pending_oauth = None;
+                    shell.set_activity(ActivityState::Error, "oauth flow worker disconnected");
                 }
             }
         }
@@ -2355,7 +2413,11 @@ fn run_terminal_loop(
                     }
                     KeyCode::Enter => {
                         if matches!(shell.focus, FocusTarget::Menu) {
-                            shell.activate_current_menu_item(app)?;
+                            if let MenuAction::StartOAuth(pending) =
+                                shell.activate_current_menu_item(app)?
+                            {
+                                pending_oauth = Some(pending);
+                            }
                         } else if matches!(shell.focus, FocusTarget::List) {
                             shell.activate_current_list_item(app)?;
                         } else if matches!(shell.focus, FocusTarget::Form) {
@@ -2382,6 +2444,10 @@ fn run_terminal_loop(
                         let _ = shell.delete_selected_session(app)?;
                     }
                     KeyCode::Esc => {
+                        if let Some(pending) = pending_oauth.take() {
+                            pending.cancel_flag.store(true, Ordering::Relaxed);
+                            shell.set_activity(ActivityState::Idle, "oauth flow canceled");
+                        }
                         if matches!(shell.focus, FocusTarget::List)
                             && matches!(shell.workspace, Workspace::Chat)
                         {
@@ -3842,9 +3908,87 @@ fn parse_callback_request(
     })
 }
 
+fn start_async_oauth_connect(
+    socket_path: PathBuf,
+    provider: OAuthProviderKind,
+) -> Result<PendingOAuthConnect, OberonError> {
+    let (sender, receiver) = mpsc::channel();
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    let cancel_for_worker = Arc::clone(&cancel_flag);
+
+    thread::spawn(move || {
+        let client = DaemonIpcClient::new(&socket_path);
+        let result = (|| -> Result<String, OberonError> {
+            let start = match client.send(&oberon4_core::DaemonCommand::ConnectAccount { provider }) {
+                Ok(oberon4_core::DaemonEvent::OAuthStarted {
+                    provider: _,
+                    flow_id,
+                    url,
+                    redirect_uri,
+                }) => OAuthConnectStart {
+                    provider,
+                    flow_id,
+                    url,
+                    redirect_uri,
+                },
+                Ok(event) => return Err(protocol_error_inner(event)),
+                Err(err) if oauth_connect_requires_daemon_refresh(&err) => {
+                    restart_daemon_process(socket_path.clone())?;
+                    match client.send(&oberon4_core::DaemonCommand::ConnectAccount { provider })? {
+                        oberon4_core::DaemonEvent::OAuthStarted {
+                            provider: _,
+                            flow_id,
+                            url,
+                            redirect_uri,
+                        } => OAuthConnectStart {
+                            provider,
+                            flow_id,
+                            url,
+                            redirect_uri,
+                        },
+                        event => return Err(protocol_error_inner(event)),
+                    }
+                }
+                Err(err) => return Err(err),
+            };
+
+            open_browser(&start.url)?;
+            let callback = wait_for_oauth_callback(
+                &start.redirect_uri,
+                Duration::from_secs(300),
+                &cancel_for_worker,
+            )?;
+            match client.send(&oberon4_core::DaemonCommand::CompleteOAuthConnect {
+                flow_id: start.flow_id,
+                callback,
+            })? {
+                oberon4_core::DaemonEvent::Ack { message } => Ok(message),
+                event => Err(protocol_error_inner(event)),
+            }
+        })();
+
+        match result {
+            Ok(message) => {
+                let _ = sender.send(OAuthUiEvent::Complete(message));
+            }
+            Err(_err) if cancel_for_worker.load(Ordering::Relaxed) => {}
+            Err(err) if err.to_string().contains("oauth callback canceled") => {}
+            Err(err) => {
+                let _ = sender.send(OAuthUiEvent::Failed(err));
+            }
+        }
+    });
+
+    Ok(PendingOAuthConnect {
+        receiver,
+        cancel_flag,
+    })
+}
+
 fn wait_for_oauth_callback(
     redirect_uri: &str,
-    _timeout: Duration,
+    timeout: Duration,
+    cancel_flag: &AtomicBool,
 ) -> Result<oberon4_core::OAuthCallbackPayload, OberonError> {
     let (host, port, expected_path) = parse_redirect_uri(redirect_uri)?;
     let bind_host = if host == "localhost" {
@@ -3854,9 +3998,31 @@ fn wait_for_oauth_callback(
     };
     let listener = TcpListener::bind((bind_host.as_str(), port))
         .map_err(|err| OberonError::Storage(format!("oauth callback listener failed: {err}")))?;
-    let (mut stream, _) = listener
-        .accept()
-        .map_err(|err| OberonError::Storage(format!("oauth callback accept failed: {err}")))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|err| OberonError::Storage(format!("oauth callback nonblocking setup failed: {err}")))?;
+    let started_at = Instant::now();
+    let (mut stream, _) = loop {
+        if cancel_flag.load(Ordering::Relaxed) {
+            return Err(OberonError::Validation("oauth callback canceled".to_string()));
+        }
+        if started_at.elapsed() >= timeout {
+            return Err(OberonError::Storage(
+                "oauth callback timed out waiting for browser redirect".to_string(),
+            ));
+        }
+        match listener.accept() {
+            Ok(connection) => break connection,
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(err) => {
+                return Err(OberonError::Storage(format!(
+                    "oauth callback accept failed: {err}"
+                )));
+            }
+        }
+    };
     let mut reader = BufReader::new(
         stream
             .try_clone()
@@ -4044,6 +4210,7 @@ fn ok_response(content: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicBool;
     use std::sync::mpsc;
     use std::{
         collections::BTreeMap,
@@ -4057,6 +4224,7 @@ mod tests {
         finalize_streamed_assistant, handle_async_ui_event, handle_pending_local_command,
         handle_pending_timeout, parse_callback_request, parse_tui_command,
         resolve_binary_launch_target, start_async_submit, status_line,
+        wait_for_oauth_callback,
     };
     use oberon4_auth::{AccountRegistry, InMemoryAccountMetadataStore};
     use oberon4_core::{
@@ -4524,6 +4692,19 @@ mod tests {
         assert_eq!(callback.code, "demo-code");
         assert_eq!(callback.state, "demo-state");
         assert_eq!(callback.return_to, None);
+    }
+
+    #[test]
+    fn oauth_callback_wait_can_be_canceled() {
+        let cancel = AtomicBool::new(true);
+        let err = wait_for_oauth_callback(
+            "http://localhost:0/auth/callback",
+            Duration::from_millis(100),
+            &cancel,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("oauth callback canceled"));
     }
 
     #[test]
