@@ -1885,7 +1885,13 @@ impl TuiShellState {
         }
 
         let command = if trimmed.starts_with('/') {
-            Some(parse_tui_command(trimmed)?)
+            match parse_tui_command(trimmed) {
+                Ok(command) => Some(command),
+                Err(err) => {
+                    self.set_activity(ActivityState::Error, err.to_string());
+                    return Ok(());
+                }
+            }
         } else {
             None
         };
@@ -2356,7 +2362,13 @@ fn handle_pending_local_command(shell: &mut TuiShellState) -> Result<bool, Obero
         return Ok(false);
     }
 
-    let command = parse_tui_command(&trimmed)?;
+    let command = match parse_tui_command(&trimmed) {
+        Ok(command) => command,
+        Err(err) => {
+            shell.set_activity(ActivityState::Error, err.to_string());
+            return Ok(true);
+        }
+    };
     let response = match command {
         TuiCommand::Help => TuiResponse {
             output: EXTENDED_HELP.to_string(),
@@ -3539,7 +3551,7 @@ pub fn parse_tui_command(input: &str) -> Result<TuiCommand, OberonError> {
         "/quit" => Ok(TuiCommand::Quit),
         "/status" => Ok(TuiCommand::Status),
         "/sessions" => Ok(TuiCommand::Sessions),
-        "/settings" => Ok(TuiCommand::Settings),
+        "/settings" | "/setteings" => Ok(TuiCommand::Settings),
         "/accounts" => Ok(TuiCommand::Accounts),
         "/diagnostics" => Ok(TuiCommand::Diagnostics),
         "/more" => Ok(TuiCommand::More),
@@ -3855,6 +3867,10 @@ mod tests {
         );
         assert_eq!(
             parse_tui_command("/settings").unwrap(),
+            TuiCommand::Settings
+        );
+        assert_eq!(
+            parse_tui_command("/setteings").unwrap(),
             TuiCommand::Settings
         );
         assert_eq!(
@@ -4228,6 +4244,55 @@ mod tests {
 
         assert_eq!(shell.status(), "help overlay opened");
         assert!(matches!(shell.workspace, Workspace::Help));
+
+        let client = DaemonIpcClient::new(&socket_path);
+        let _ = client.send(&oberon4_core::DaemonCommand::Shutdown).unwrap();
+        handle.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn shell_submit_invalid_command_stays_in_tui() {
+        let socket_path = std::env::temp_dir().join(format!(
+            "oberon4-tui-shell-invalid-command-test-{}.sock",
+            std::process::id()
+        ));
+        let thread_socket = socket_path.clone();
+        let handle = thread::spawn(move || {
+            let app = DaemonApp::new(
+                DaemonRuntime::default(),
+                FakeChatProvider {
+                    reply: "daemon reply".to_string(),
+                },
+                FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
+                FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+                AccountRegistry::default(),
+                InMemorySecretStore::default(),
+                InMemoryAccountMetadataStore::default(),
+            );
+            serve_unix_socket(&thread_socket, app)
+        });
+
+        for _ in 0..20 {
+            if socket_path.exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+
+        let mut app = DaemonBackedTuiApp::new(DaemonIpcClient::new(&socket_path));
+        let mut shell = TuiShellState {
+            input: "/bogus".to_string(),
+            ..TuiShellState::default()
+        };
+
+        shell.submit(&mut app).unwrap();
+
+        assert_eq!(
+            shell.status(),
+            "validation failed: unsupported TUI command. Use /help"
+        );
+        assert!(!shell.should_quit());
+        assert!(shell.transcript().is_empty());
 
         let client = DaemonIpcClient::new(&socket_path);
         let _ = client.send(&oberon4_core::DaemonCommand::Shutdown).unwrap();
