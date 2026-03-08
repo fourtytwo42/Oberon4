@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oberon4.local/schemas/wasm-plugin-runtime/tool-search-response.schema.json",
+  "title": "SearchResponse",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["matches"],
+  "properties": {
+    "matches": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "tool",
+          "command",
+          "summary",
+          "toolTier",
+          "sideEffects",
+          "approvalRequired",
+          "capabilitiesRequired",
+          "confidence"
+        ],
+        "properties": {
+          "tool": { "type": "string" },
+          "command": { "type": "string" },
+          "summary": { "type": "string" },
+          "toolTier": {
+            "type": "string",
+            "enum": ["core_host", "brokered_privileged", "ordinary_plugin"]
+          },
+          "sideEffects": {
+            "type": "string",
+            "enum": [
+              "none",
+              "ephemeral",
+              "plugin-private-write",
+              "external-read",
+              "external-write",
+              "destructive"
+            ]
+          },
+          "approvalRequired": { "type": "boolean" },
+          "capabilitiesRequired": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "confidence": { "type": "string" }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "status": "ok",
+  "tool": "workspace",
+  "command": "write_file_atomic",
+  "summary": "Wrote docs/notes.md",
+  "data": {
+    "bytesWritten": 5
+  },
+  "artifacts": [],
+  "truncated": false,
+  "nextSuggestedAction": "git.diff"
+}

@@ -1,0 +1,8 @@
+{
+  "remote": "origin",
+  "branch": "feature/docs",
+  "commit": "abc123",
+  "pushed": true,
+  "provider": "github",
+  "remoteRef": "refs/heads/feature/docs"
+}

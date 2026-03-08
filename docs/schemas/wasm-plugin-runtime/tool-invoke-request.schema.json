@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oberon4.local/schemas/wasm-plugin-runtime/tool-invoke-request.schema.json",
+  "title": "InvokeRequest",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["command", "input", "context"],
+  "properties": {
+    "command": { "type": "string" },
+    "input": { "type": ["object", "array", "string", "number", "boolean", "null"] },
+    "context": {
+      "type": "object",
+      "required": [
+        "requestId",
+        "sessionId",
+        "pluginId",
+        "pluginVersion",
+        "command",
+        "deadline",
+        "runtimeApiVersion",
+        "capabilityGrants",
+        "memoryLimit",
+        "timeLimitMs",
+        "outputLimitBytes",
+        "storageLimitBytes",
+        "networkPolicy"
+      ],
+      "properties": {
+        "requestId": { "type": "string" },
+        "sessionId": { "type": "string" },
+        "pluginId": { "type": "string" },
+        "pluginVersion": { "type": "string" },
+        "command": { "type": "string" },
+        "deadline": { "type": "string" },
+        "runtimeApiVersion": { "type": "string" },
+        "capabilityGrants": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["kind", "id", "operations"],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "storage_handle",
+                  "artifact_handle",
+                  "workspace_handle",
+                  "service_handle",
+                  "secret_use_handle",
+                  "secret_handle"
+                ]
+              },
+              "id": { "type": "string" },
+              "operations": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": ["read", "write", "list", "stat", "create", "delete", "invoke", "sign"]
+                }
+              }
+            }
+          }
+        },
+        "workspaceRevision": { "type": "string" },
+        "memoryLimit": { "type": "integer", "minimum": 0 },
+        "timeLimitMs": { "type": "integer", "minimum": 0 },
+        "outputLimitBytes": { "type": "integer", "minimum": 0 },
+        "storageLimitBytes": { "type": "integer", "minimum": 0 },
+        "networkPolicy": {
+          "type": "string",
+          "enum": ["denied", "brokered-only", "allowlisted"]
+        }
+      }
+    }
+  }
+}

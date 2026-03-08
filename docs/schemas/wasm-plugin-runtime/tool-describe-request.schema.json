@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oberon4.local/schemas/wasm-plugin-runtime/tool-describe-request.schema.json",
+  "title": "ToolDescribeRequest",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["tool", "command"],
+  "properties": {
+    "tool": { "type": "string", "minLength": 1 },
+    "command": { "type": "string", "minLength": 1 }
+  }
+}

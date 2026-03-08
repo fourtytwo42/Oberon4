@@ -1,0 +1,146 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oberon4.local/schemas/wasm-plugin-runtime/workspace-commands.schema.json",
+  "title": "WorkspaceCommands",
+  "oneOf": [
+    { "$ref": "#/$defs/readFileInput" },
+    { "$ref": "#/$defs/readFileOutput" },
+    { "$ref": "#/$defs/listDirInput" },
+    { "$ref": "#/$defs/listDirOutput" },
+    { "$ref": "#/$defs/statPathInput" },
+    { "$ref": "#/$defs/statPathOutput" },
+    { "$ref": "#/$defs/writeFileAtomicInput" },
+    { "$ref": "#/$defs/writeFileAtomicOutput" },
+    { "$ref": "#/$defs/applyPatchInput" },
+    { "$ref": "#/$defs/applyPatchOutput" }
+  ],
+  "$defs": {
+    "readFileInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspaceHandle", "path"],
+      "properties": {
+        "workspaceHandle": { "type": "string" },
+        "path": { "type": "string" }
+      }
+    },
+    "readFileOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspaceHandle", "workspaceRevision", "path", "content", "truncated"],
+      "properties": {
+        "workspaceHandle": { "type": "string" },
+        "workspaceRevision": { "type": "string" },
+        "path": { "type": "string" },
+        "content": { "type": "string" },
+        "truncated": { "type": "boolean" }
+      }
+    },
+    "listDirInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspaceHandle", "path"],
+      "properties": {
+        "workspaceHandle": { "type": "string" },
+        "path": { "type": "string" }
+      }
+    },
+    "listDirOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspaceHandle", "workspaceRevision", "path", "entries"],
+      "properties": {
+        "workspaceHandle": { "type": "string" },
+        "workspaceRevision": { "type": "string" },
+        "path": { "type": "string" },
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "kind"],
+            "properties": {
+              "name": { "type": "string" },
+              "kind": { "type": "string", "enum": ["file", "directory"] }
+            }
+          }
+        }
+      }
+    },
+    "statPathInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspaceHandle", "path"],
+      "properties": {
+        "workspaceHandle": { "type": "string" },
+        "path": { "type": "string" }
+      }
+    },
+    "statPathOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspaceHandle", "workspaceRevision", "path", "kind", "size"],
+      "properties": {
+        "workspaceHandle": { "type": "string" },
+        "workspaceRevision": { "type": "string" },
+        "path": { "type": "string" },
+        "kind": { "type": "string", "enum": ["file", "directory"] },
+        "size": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "writeFileAtomicInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspaceHandle", "path", "content", "expectedRevision"],
+      "properties": {
+        "workspaceHandle": { "type": "string" },
+        "path": { "type": "string" },
+        "content": { "type": "string" },
+        "expectedRevision": { "type": "string" }
+      }
+    },
+    "writeFileAtomicOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workspaceHandle",
+        "workspaceRevision",
+        "logicalPath",
+        "operation",
+        "bytesWritten",
+        "preconditionStatus",
+        "touched"
+      ],
+      "properties": {
+        "workspaceHandle": { "type": "string" },
+        "workspaceRevision": { "type": "string" },
+        "logicalPath": { "type": "string" },
+        "operation": { "type": "string", "const": "write_file_atomic" },
+        "bytesWritten": { "type": "integer", "minimum": 0 },
+        "preconditionStatus": { "type": "string", "enum": ["matched", "conflict"] },
+        "touched": { "type": "boolean" }
+      }
+    },
+    "applyPatchInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspaceHandle", "patch", "expectedRevision"],
+      "properties": {
+        "workspaceHandle": { "type": "string" },
+        "patch": { "type": "string" },
+        "expectedRevision": { "type": "string" }
+      }
+    },
+    "applyPatchOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspaceHandle", "workspaceRevision", "operation", "preconditionStatus", "touchedPaths"],
+      "properties": {
+        "workspaceHandle": { "type": "string" },
+        "workspaceRevision": { "type": "string" },
+        "operation": { "type": "string", "const": "apply_patch" },
+        "preconditionStatus": { "type": "string", "enum": ["matched", "conflict"] },
+        "touchedPaths": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}

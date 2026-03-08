@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oberon4.local/schemas/wasm-plugin-runtime/tool-invoke-response.schema.json",
+  "title": "InvokeResponse",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["result"],
+  "properties": {
+    "result": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["status", "tool", "command", "summary", "data", "artifacts", "truncated"],
+      "properties": {
+        "status": { "type": "string", "enum": ["ok", "pending"] },
+        "tool": { "type": "string" },
+        "command": { "type": "string" },
+        "summary": { "type": "string" },
+        "data": { "type": ["object", "array", "string", "number", "boolean", "null"] },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["artifactId", "mediaType", "size", "truncated"],
+            "properties": {
+              "artifactId": { "type": "string" },
+              "mediaType": { "type": "string" },
+              "size": { "type": "integer", "minimum": 0 },
+              "retention": {
+                "type": "string",
+                "enum": ["session", "short_term", "durable"]
+              },
+              "truncated": { "type": "boolean" }
+            }
+          }
+        },
+        "truncated": { "type": "boolean" },
+        "nextSuggestedAction": { "type": "string" }
+      }
+    }
+  }
+}

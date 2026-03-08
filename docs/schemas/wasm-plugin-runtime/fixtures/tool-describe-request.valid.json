@@ -1,0 +1,4 @@
+{
+  "tool": "workspace",
+  "command": "write_file_atomic"
+}

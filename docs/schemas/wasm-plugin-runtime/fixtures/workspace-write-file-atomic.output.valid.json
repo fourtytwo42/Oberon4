@@ -1,0 +1,9 @@
+{
+  "workspaceHandle": "wrk_123",
+  "workspaceRevision": "wsr_124",
+  "logicalPath": "docs/notes.md",
+  "operation": "write_file_atomic",
+  "bytesWritten": 5,
+  "preconditionStatus": "matched",
+  "touched": true
+}

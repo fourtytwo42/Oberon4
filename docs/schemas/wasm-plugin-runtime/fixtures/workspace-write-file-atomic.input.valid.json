@@ -1,0 +1,6 @@
+{
+  "workspaceHandle": "wrk_123",
+  "path": "docs/notes.md",
+  "content": "hello",
+  "expectedRevision": "wsr_123"
+}

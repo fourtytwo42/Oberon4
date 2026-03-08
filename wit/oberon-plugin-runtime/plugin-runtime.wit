@@ -1,0 +1,131 @@
+package oberon:plugin-runtime@0.1.0;
+
+interface plugin-runtime {
+  enum side-effect-class {
+    none,
+    ephemeral,
+    plugin-private-write,
+    external-read,
+    external-write,
+    destructive,
+  }
+
+  enum network-policy {
+    denied,
+    brokered-only,
+    allowlisted,
+  }
+
+  enum invoke-status {
+    ok,
+    pending,
+  }
+
+  enum health-state {
+    ok,
+    degraded,
+  }
+
+  variant capability-grant-kind {
+    storage-handle,
+    artifact-handle,
+    workspace-handle,
+    service-handle,
+    secret-use-handle,
+    secret-handle,
+  }
+
+  record plugin-description {
+    id: string,
+    version: string,
+    display-name: string,
+    description: string,
+  }
+
+  record command-description {
+    name: string,
+    version: string,
+    description: string,
+    side-effects: side-effect-class,
+    required-capabilities: list<string>,
+    supports-planning: bool,
+  }
+
+  record capability-grant {
+    kind: capability-grant-kind,
+    id: string,
+    operations: list<string>,
+  }
+
+  record invocation-context {
+    request-id: string,
+    session-id: string,
+    plugin-id: string,
+    plugin-version: string,
+    command: string,
+    deadline: string,
+    runtime-api-version: string,
+    capability-grants: list<capability-grant>,
+    workspace-revision: option<string>,
+    memory-limit: u64,
+    time-limit-ms: u64,
+    output-limit-bytes: u64,
+    storage-limit-bytes: u64,
+    network-policy: network-policy,
+  }
+
+  record artifact-reference {
+    artifact-id: string,
+    media-type: string,
+    size: u64,
+    truncated: bool,
+  }
+
+  record plan-result {
+    status: string,
+    side-effects: side-effect-class,
+    approval-required: bool,
+    capabilities-required: list<string>,
+    estimated-cost: string,
+    estimated-steps: u32,
+    preconditions: list<string>,
+    blocking-issues: list<string>,
+  }
+
+  record invoke-result {
+    status: invoke-status,
+    summary: string,
+    data-json: string,
+    artifacts: list<artifact-reference>,
+    duration-ms: u64,
+    next-suggested-action: option<string>,
+  }
+
+  record invoke-error {
+    status: string,
+    code: string,
+    message: string,
+    retryable: bool,
+    request-id: string,
+    plugin-id: string,
+    plugin-version: string,
+    command: string,
+    next-suggested-action: option<string>,
+  }
+
+  record health-status {
+    status: health-state,
+    plugin-id: string,
+    plugin-version: string,
+  }
+
+  describe-plugin: func() -> plugin-description;
+  list-commands: func() -> list<command-description>;
+  plan: func(command: string, input-json: string, context: invocation-context) -> result<plan-result, invoke-error>;
+  invoke: func(command: string, input-json: string, context: invocation-context) -> result<invoke-result, invoke-error>;
+  health-check: func() -> health-status;
+}
+
+world oberon-plugin {
+  export plugin-runtime;
+}

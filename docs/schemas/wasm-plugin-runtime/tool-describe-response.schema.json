@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oberon4.local/schemas/wasm-plugin-runtime/tool-describe-response.schema.json",
+  "title": "ToolDescribeResponse",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "tool",
+    "command",
+    "summary",
+    "inputSchema",
+    "outputSchema",
+    "sideEffects",
+    "approvalExpectation",
+    "capabilitiesRequired",
+    "guidance"
+  ],
+  "properties": {
+    "tool": { "type": "string" },
+    "command": { "type": "string" },
+    "summary": { "type": "string" },
+    "inputSchema": { "$ref": "#/$defs/schemaRef" },
+    "outputSchema": { "$ref": "#/$defs/schemaRef" },
+    "sideEffects": {
+      "type": "string",
+      "enum": [
+        "none",
+        "ephemeral",
+        "plugin-private-write",
+        "external-read",
+        "external-write",
+        "destructive"
+      ]
+    },
+    "approvalExpectation": {
+      "type": "string",
+      "enum": ["none", "recommended", "required"]
+    },
+    "capabilitiesRequired": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "paginationBehavior": { "type": "string" },
+    "artifactRules": { "type": "string" },
+    "guidance": {
+      "type": "object",
+      "required": ["whenToUse", "whenNotToUse"],
+      "properties": {
+        "whenToUse": { "type": "string" },
+        "whenNotToUse": { "type": "string" },
+        "examples": { "type": "array", "items": { "type": "string" } },
+        "commonMistakes": { "type": "array", "items": { "type": "string" } },
+        "failureRecovery": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  },
+  "$defs": {
+    "schemaRef": {
+      "type": "object",
+      "required": ["id", "schema"],
+      "properties": {
+        "id": { "type": "string" },
+        "schema": { "type": "object" }
+      }
+    }
+  }
+}

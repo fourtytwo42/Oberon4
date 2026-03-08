@@ -1,0 +1,68 @@
+{
+  "id": "workspace-git",
+  "version": "0.1.0",
+  "displayName": "Versioned Workspace",
+  "description": "Workspace editing and versioned git operations.",
+  "runtimeApiVersion": "1.0",
+  "commands": [
+    {
+      "name": "write_file_atomic",
+      "version": "1",
+      "description": "Write file contents atomically.",
+      "inputSchema": { "type": "object" },
+      "outputSchema": { "type": "object" },
+      "tags": ["workspace", "write"],
+      "sideEffects": "external-write",
+      "requiredCapabilities": ["workspace.write"],
+      "approvalExpectation": "required",
+      "supportsPlanning": true,
+      "supportsPagination": false,
+      "supportsArtifacts": false,
+      "preconditionModel": "workspace-revision"
+    }
+  ],
+  "capabilities": {
+    "storage": {
+      "private": true,
+      "session": true,
+      "cache": false
+    },
+    "workspace": {
+      "read": true,
+      "write": false
+    },
+    "artifacts": {
+      "read": true,
+      "create": false
+    },
+    "services": ["github.request"]
+  },
+  "prompting": {
+    "promptVersion": "1",
+    "summary": "Use for safe versioned workspace operations.",
+    "whenToUse": "Use when reading or editing the granted workspace.",
+    "whenNotToUse": "Do not use for remote-only metadata operations.",
+    "examples": [
+      {
+        "intent": "Update a file and commit the change",
+        "command": "write_file_atomic"
+      }
+    ],
+    "failureRecovery": [
+      "If a revision conflict occurs, re-read the target and re-plan."
+    ],
+    "safetyNotes": [
+      "Writes require a valid workspace handle and may require approval."
+    ]
+  },
+  "provenance": {
+    "publisher": "oberon4",
+    "source": "local-bundle",
+    "checksum": "sha256:abc",
+    "signature": null,
+    "build": {
+      "target": "wasm32-wasip2",
+      "createdAt": "2026-03-08T00:00:00Z"
+    }
+  }
+}

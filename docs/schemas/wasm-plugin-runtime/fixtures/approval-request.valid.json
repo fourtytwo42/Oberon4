@@ -1,0 +1,28 @@
+{
+  "approvalId": "appr_123",
+  "tool": "git",
+  "command": "push",
+  "summary": "Push branch feature/docs to origin",
+  "sideEffects": "external-write",
+  "workspaceImpact": {
+    "workspaceHandle": "wrk_123",
+    "workspaceRevision": "wsr_123",
+    "touchedPaths": ["docs/notes.md"]
+  },
+  "remoteImpact": {
+    "provider": "github",
+    "remote": "origin",
+    "branch": "feature/docs"
+  },
+  "artifacts": [],
+  "serviceHandlesUsed": ["svc_github_main"],
+  "secretClassesInvolved": ["oauth_credential"],
+  "resourceLimits": {
+    "timeMs": 5000
+  },
+  "diffSummary": {
+    "filesChanged": 1,
+    "insertions": 10,
+    "deletions": 2
+  }
+}

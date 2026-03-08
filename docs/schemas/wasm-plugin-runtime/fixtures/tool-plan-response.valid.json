@@ -1,0 +1,15 @@
+{
+  "status": "ok",
+  "sideEffects": "external-write",
+  "approvalRequired": true,
+  "capabilitiesRequired": ["workspace.write"],
+  "estimatedCost": "low",
+  "estimatedSteps": 1,
+  "preconditions": ["workspaceRevision"],
+  "blockingIssues": [],
+  "resourceLimits": {
+    "memoryBytes": 134217728,
+    "timeMs": 5000,
+    "networkPolicy": "denied"
+  }
+}

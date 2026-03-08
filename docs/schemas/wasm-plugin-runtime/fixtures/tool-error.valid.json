@@ -1,0 +1,11 @@
+{
+  "status": "error",
+  "code": "RESOURCE_LIMIT_STORAGE",
+  "message": "Workspace quota exceeded.",
+  "retryable": false,
+  "requestId": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "pluginId": "workspace-git",
+  "pluginVersion": "0.1.0",
+  "command": "write_file_atomic",
+  "nextSuggestedAction": "reduce output or request a higher quota"
+}

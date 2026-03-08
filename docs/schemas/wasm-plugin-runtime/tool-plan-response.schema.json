@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oberon4.local/schemas/wasm-plugin-runtime/tool-plan-response.schema.json",
+  "title": "PlanResult",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "status",
+    "sideEffects",
+    "approvalRequired",
+    "capabilitiesRequired",
+    "estimatedCost",
+    "estimatedSteps",
+    "preconditions",
+    "blockingIssues"
+  ],
+  "properties": {
+    "status": { "type": "string", "enum": ["ok"] },
+    "sideEffects": {
+      "type": "string",
+      "enum": [
+        "none",
+        "ephemeral",
+        "plugin-private-write",
+        "external-read",
+        "external-write",
+        "destructive"
+      ]
+    },
+    "approvalRequired": { "type": "boolean" },
+    "capabilitiesRequired": { "type": "array", "items": { "type": "string" } },
+    "estimatedCost": { "type": "string", "enum": ["low", "medium", "high"] },
+    "estimatedSteps": { "type": "integer", "minimum": 0 },
+    "preconditions": { "type": "array", "items": { "type": "string" } },
+    "blockingIssues": { "type": "array", "items": { "type": "string" } },
+    "resourceLimits": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "memoryBytes": { "type": "integer", "minimum": 0 },
+        "timeMs": { "type": "integer", "minimum": 0 },
+        "storageBytes": { "type": "integer", "minimum": 0 },
+        "outputBytes": { "type": "integer", "minimum": 0 },
+        "networkPolicy": {
+          "type": "string",
+          "enum": ["denied", "brokered-only", "allowlisted"]
+        }
+      }
+    }
+  }
+}

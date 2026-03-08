@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oberon4.local/schemas/wasm-plugin-runtime/policy-inspect-result.schema.json",
+  "title": "PolicyInspectResponse",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "status",
+    "tool",
+    "command",
+    "capabilities",
+    "approvalRequired",
+    "resourceLimits",
+    "operatingMode",
+    "reasonCodes"
+  ],
+  "properties": {
+    "status": { "type": "string", "enum": ["ok"] },
+    "tool": { "type": "string" },
+    "command": { "type": "string" },
+    "capabilities": {
+      "type": "object",
+      "required": ["allowed", "blocked"],
+      "properties": {
+        "allowed": { "type": "array", "items": { "type": "string" } },
+        "blocked": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "approvalRequired": { "type": "boolean" },
+    "resourceLimits": {
+      "type": "object",
+      "required": ["memoryBytes", "timeMs", "storageBytes", "outputBytes", "networkPolicy"],
+      "properties": {
+        "memoryBytes": { "type": "integer", "minimum": 0 },
+        "timeMs": { "type": "integer", "minimum": 0 },
+        "storageBytes": { "type": "integer", "minimum": 0 },
+        "outputBytes": { "type": "integer", "minimum": 0 },
+        "networkPolicy": {
+          "type": "string",
+          "enum": ["denied", "brokered-only", "allowlisted"]
+        }
+      }
+    },
+    "operatingMode": {
+      "type": "string",
+      "enum": ["dev", "production"]
+    },
+    "reasonCodes": { "type": "array", "items": { "type": "string" } }
+  }
+}

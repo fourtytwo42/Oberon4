@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oberon4.local/schemas/wasm-plugin-runtime/approval-decision.schema.json",
+  "title": "ApprovalDecisionPayload",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["approvalId", "decision"],
+  "properties": {
+    "approvalId": { "type": "string", "minLength": 1 },
+    "decision": {
+      "type": "string",
+      "enum": ["approved", "denied"]
+    },
+    "reason": { "type": "string" }
+  }
+}

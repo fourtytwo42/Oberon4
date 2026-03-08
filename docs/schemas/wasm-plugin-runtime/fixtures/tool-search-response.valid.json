@@ -1,0 +1,14 @@
+{
+  "matches": [
+    {
+      "tool": "workspace",
+      "command": "write_file_atomic",
+      "summary": "Write file contents atomically.",
+      "toolTier": "ordinary_plugin",
+      "sideEffects": "external-write",
+      "approvalRequired": true,
+      "capabilitiesRequired": ["workspace.write"],
+      "confidence": "0.92"
+    }
+  ]
+}

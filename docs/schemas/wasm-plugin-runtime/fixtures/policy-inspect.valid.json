@@ -1,0 +1,19 @@
+{
+  "status": "ok",
+  "tool": "git",
+  "command": "push",
+  "capabilities": {
+    "allowed": ["workspace.read", "workspace.write", "github.request"],
+    "blocked": []
+  },
+  "approvalRequired": true,
+  "resourceLimits": {
+    "memoryBytes": 134217728,
+    "timeMs": 5000,
+    "storageBytes": 268435456,
+    "outputBytes": 131072,
+    "networkPolicy": "brokered-only"
+  },
+  "operatingMode": "production",
+  "reasonCodes": []
+}

@@ -1,0 +1,5 @@
+{
+  "provider": "github",
+  "authenticated": true,
+  "securityLevel": "os-protected"
+}

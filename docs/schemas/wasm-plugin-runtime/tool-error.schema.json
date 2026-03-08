@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oberon4.local/schemas/wasm-plugin-runtime/tool-error.schema.json",
+  "title": "ToolError",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "status",
+    "code",
+    "message",
+    "retryable",
+    "requestId",
+    "pluginId",
+    "pluginVersion",
+    "command"
+  ],
+  "properties": {
+    "status": { "type": "string", "enum": ["error"] },
+    "code": { "type": "string" },
+    "message": { "type": "string" },
+    "retryable": { "type": "boolean" },
+    "requestId": { "type": "string" },
+    "pluginId": { "type": "string" },
+    "pluginVersion": { "type": "string" },
+    "command": { "type": "string" },
+    "nextSuggestedAction": { "type": "string" }
+  }
+}

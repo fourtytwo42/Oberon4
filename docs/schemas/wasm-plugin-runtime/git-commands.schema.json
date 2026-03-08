@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oberon4.local/schemas/wasm-plugin-runtime/git-commands.schema.json",
+  "title": "GitCommands",
+  "oneOf": [
+    { "$ref": "#/$defs/statusInput" },
+    { "$ref": "#/$defs/statusOutput" },
+    { "$ref": "#/$defs/diffInput" },
+    { "$ref": "#/$defs/diffOutput" },
+    { "$ref": "#/$defs/branchCreateInput" },
+    { "$ref": "#/$defs/branchCreateOutput" },
+    { "$ref": "#/$defs/commitInput" },
+    { "$ref": "#/$defs/commitOutput" },
+    { "$ref": "#/$defs/pushInput" },
+    { "$ref": "#/$defs/pushOutput" }
+  ],
+  "$defs": {
+    "statusInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspaceHandle"],
+      "properties": { "workspaceHandle": { "type": "string" } }
+    },
+    "statusOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspaceHandle", "workspaceRevision", "branch", "dirty", "filesChanged"],
+      "properties": {
+        "workspaceHandle": { "type": "string" },
+        "workspaceRevision": { "type": "string" },
+        "branch": { "type": "string" },
+        "dirty": { "type": "boolean" },
+        "filesChanged": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "diffInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspaceHandle"],
+      "properties": { "workspaceHandle": { "type": "string" } }
+    },
+    "diffOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspaceHandle", "workspaceRevision", "branch", "filesChanged", "diffArtifact"],
+      "properties": {
+        "workspaceHandle": { "type": "string" },
+        "workspaceRevision": { "type": "string" },
+        "branch": { "type": "string" },
+        "filesChanged": { "type": "integer", "minimum": 0 },
+        "diffArtifact": { "type": "string" }
+      }
+    },
+    "branchCreateInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspaceHandle", "name"],
+      "properties": {
+        "workspaceHandle": { "type": "string" },
+        "name": { "type": "string" }
+      }
+    },
+    "branchCreateOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspaceHandle", "branch", "created"],
+      "properties": {
+        "workspaceHandle": { "type": "string" },
+        "branch": { "type": "string" },
+        "created": { "type": "boolean" }
+      }
+    },
+    "commitInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspaceHandle", "message"],
+      "properties": {
+        "workspaceHandle": { "type": "string" },
+        "message": { "type": "string" }
+      }
+    },
+    "commitOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspaceHandle", "branch", "headCommit", "dirty", "filesChanged"],
+      "properties": {
+        "workspaceHandle": { "type": "string" },
+        "branch": { "type": "string" },
+        "headCommit": { "type": "string" },
+        "dirty": { "type": "boolean" },
+        "filesChanged": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "pushInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspaceHandle", "remote", "branch"],
+      "properties": {
+        "workspaceHandle": { "type": "string" },
+        "remote": { "type": "string" },
+        "branch": { "type": "string" }
+      }
+    },
+    "pushOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["remote", "branch", "commit", "pushed", "provider", "remoteRef"],
+      "properties": {
+        "remote": { "type": "string" },
+        "branch": { "type": "string" },
+        "commit": { "type": "string" },
+        "pushed": { "type": "boolean" },
+        "provider": { "type": "string" },
+        "remoteRef": { "type": "string" }
+      }
+    }
+  }
+}

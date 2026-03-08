@@ -1,0 +1,23 @@
+{
+  "tool": "workspace",
+  "command": "write_file_atomic",
+  "summary": "Write file contents atomically.",
+  "inputSchema": {
+    "id": "workspace.write_file_atomic.input",
+    "schema": { "type": "object" }
+  },
+  "outputSchema": {
+    "id": "workspace.write_file_atomic.output",
+    "schema": { "type": "object" }
+  },
+  "sideEffects": "external-write",
+  "approvalExpectation": "required",
+  "capabilitiesRequired": ["workspace.write"],
+  "guidance": {
+    "whenToUse": "Use when editing a workspace file.",
+    "whenNotToUse": "Do not use for remote-only metadata operations.",
+    "examples": ["Update docs/notes.md"],
+    "commonMistakes": ["Passing an absolute path"],
+    "failureRecovery": ["Re-read the workspace revision and re-plan."]
+  }
+}

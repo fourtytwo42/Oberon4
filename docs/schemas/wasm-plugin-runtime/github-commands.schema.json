@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oberon4.local/schemas/wasm-plugin-runtime/github-commands.schema.json",
+  "title": "GitHubCommands",
+  "oneOf": [
+    { "$ref": "#/$defs/authStatusInput" },
+    { "$ref": "#/$defs/authStatusOutput" },
+    { "$ref": "#/$defs/cloneToWorkspaceInput" },
+    { "$ref": "#/$defs/cloneToWorkspaceOutput" },
+    { "$ref": "#/$defs/repoInfoInput" },
+    { "$ref": "#/$defs/repoInfoOutput" }
+  ],
+  "$defs": {
+    "authStatusInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 0
+    },
+    "authStatusOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "authenticated", "securityLevel"],
+      "properties": {
+        "provider": { "type": "string", "const": "github" },
+        "authenticated": { "type": "boolean" },
+        "securityLevel": {
+          "type": "string",
+          "enum": ["hardware-backed", "os-protected", "encrypted-local"]
+        }
+      }
+    },
+    "cloneToWorkspaceInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repo"],
+      "properties": { "repo": { "type": "string" } }
+    },
+    "cloneToWorkspaceOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "workspaceHandle", "defaultBranch"],
+      "properties": {
+        "provider": { "type": "string", "const": "github" },
+        "workspaceHandle": { "type": "string" },
+        "defaultBranch": { "type": "string" }
+      }
+    },
+    "repoInfoInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repo"],
+      "properties": { "repo": { "type": "string" } }
+    },
+    "repoInfoOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "repo", "defaultBranch", "private"],
+      "properties": {
+        "provider": { "type": "string", "const": "github" },
+        "repo": { "type": "string" },
+        "defaultBranch": { "type": "string" },
+        "private": { "type": "boolean" }
+      }
+    }
+  }
+}

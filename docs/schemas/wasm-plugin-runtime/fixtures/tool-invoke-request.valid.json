@@ -1,0 +1,30 @@
+{
+  "command": "write_file_atomic",
+  "input": {
+    "workspaceHandle": "wrk_123",
+    "path": "docs/notes.md",
+    "content": "hello"
+  },
+  "context": {
+    "requestId": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    "sessionId": "sess_123",
+    "pluginId": "workspace-git",
+    "pluginVersion": "0.1.0",
+    "command": "write_file_atomic",
+    "deadline": "2026-03-08T12:00:05Z",
+    "runtimeApiVersion": "1.0",
+    "capabilityGrants": [
+      {
+        "kind": "workspace_handle",
+        "id": "wrk_123",
+        "operations": ["read", "write"]
+      }
+    ],
+    "workspaceRevision": "wsr_123",
+    "memoryLimit": 134217728,
+    "timeLimitMs": 5000,
+    "outputLimitBytes": 131072,
+    "storageLimitBytes": 268435456,
+    "networkPolicy": "denied"
+  }
+}

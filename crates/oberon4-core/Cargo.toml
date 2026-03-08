@@ -11,3 +11,6 @@ serde_json.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 ulid.workspace = true
+
+[dev-dependencies]
+jsonschema = "0.45.0"

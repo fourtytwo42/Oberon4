@@ -1,0 +1,5 @@
+{
+  "provider": "github",
+  "workspaceHandle": "wrk_123",
+  "defaultBranch": "main"
+}

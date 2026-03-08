@@ -1,0 +1,19 @@
+{
+  "id": "workspace-git",
+  "version": "0.1.0",
+  "displayName": "Versioned Workspace",
+  "description": "Workspace editing and versioned git operations.",
+  "commands": [],
+  "capabilities": {},
+  "prompting": {
+    "promptVersion": "1",
+    "summary": "Use for safe versioned workspace operations.",
+    "whenToUse": "Use when reading or editing the granted workspace.",
+    "whenNotToUse": "Do not use for remote-only metadata operations."
+  },
+  "provenance": {
+    "publisher": "oberon4",
+    "source": "local-bundle",
+    "checksum": "sha256:abc"
+  }
+}
