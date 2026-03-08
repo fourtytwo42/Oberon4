@@ -83,6 +83,8 @@ capture_gate_failure_bundle() {
   local failed_stage="$1"
   local primary_log_path="$2"
   local bundle_dir
+  local data_dir="${OBERON4_DATA_DIR:-${HOME:-.}/.oberon4}"
+  local socket_path="${OBERON4_SOCKET_PATH:-${TMPDIR:-/tmp}/oberon4-daemon.sock}"
   bundle_dir="$(failure_bundle_create_dir "${ROOT_DIR}" "oberon4-gate")"
   mkdir -p "${bundle_dir}/logs"
   failure_bundle_write_metadata \
@@ -98,6 +100,7 @@ capture_gate_failure_bundle() {
   done
   failure_bundle_capture_doctor "${bundle_dir}" cargo run -p oberon4-cli -- doctor --json
   failure_bundle_capture_effective_config "${bundle_dir}" cargo run -p oberon4-cli -- config show
+  failure_bundle_capture_daemon_runtime "${bundle_dir}" "${data_dir}" "${socket_path}"
   printf '%s\n' "${bundle_dir}"
 }
 

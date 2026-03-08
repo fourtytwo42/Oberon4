@@ -12,7 +12,13 @@ MOCK_BIN="${TMP_DIR}/bin"
 ORDER_FILE="${TMP_DIR}/order.log"
 LOG_ROOT="${TMP_DIR}/runs"
 BUNDLE_ROOT="${TMP_DIR}/failure-bundles"
-mkdir -p "${MOCK_BIN}" "${LOG_ROOT}" "${BUNDLE_ROOT}"
+DATA_DIR="${TMP_DIR}/data"
+mkdir -p "${MOCK_BIN}" "${LOG_ROOT}" "${BUNDLE_ROOT}" "${DATA_DIR}"
+cat > "${DATA_DIR}/secrets.json" <<'JSON'
+{
+  "env.OPENAI_API_KEY": "from-secret-store"
+}
+JSON
 
 cat > "${MOCK_BIN}/bash" <<'SH'
 #!/usr/bin/bash
@@ -85,6 +91,10 @@ if [[ "${1:-}" == "run" && "${2:-}" == "-p" && "${3:-}" == "oberon4-cli" && "${4
         echo 'not-json'
         exit 0
       fi
+      if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+        echo '{"running":false,"ready":true,"endpoint_check":"pass","error":"missing auth","version_check":"fail","models_check":"fail","auth_check":"fail","diagnostics_check":"fail"}'
+        exit 0
+      fi
       printf '{"running":true,"ready":true,"endpoint_base_url":"%s","model":"%s","endpoint_check":"pass","error":null,"version_check":"pass","models_check":"pass","auth_check":"pass","diagnostics_check":"pass"}\n' \
         "${OBERON4_LIVE_BASE_URL:-}" \
         "${OBERON4_LIVE_OPENAI_MODEL:-}"
@@ -155,6 +165,7 @@ run_wrapper() {
   env PATH="${MOCK_BIN}:$PATH" \
     ORDER_FILE="${ORDER_FILE}" \
     LIVE_LOCAL_LOG_DIR="${LOG_ROOT}" \
+    OBERON4_DATA_DIR="${DATA_DIR}" \
     FAILURE_BUNDLE_ROOT="${BUNDLE_ROOT}" \
     "$@" bash "${WRAPPER_SCRIPT}" >"${output_file}" 2>&1
 }
@@ -206,12 +217,14 @@ FAIL_BUNDLE_DIR="$(latest_bundle_dir)"
 [[ -f "${FAIL_BUNDLE_DIR}/env.txt" ]] || { echo "missing failure env.txt" >&2; exit 1; }
 [[ -f "${FAIL_BUNDLE_DIR}/doctor.json" ]] || { echo "missing fallback doctor.json" >&2; exit 1; }
 [[ -f "${FAIL_BUNDLE_DIR}/effective-config.json" ]] || { echo "missing effective-config.json" >&2; exit 1; }
+[[ -f "${FAIL_BUNDLE_DIR}/daemon-runtime.txt" ]] || { echo "missing daemon-runtime.txt" >&2; exit 1; }
 [[ -f "${FAIL_BUNDLE_DIR}/logs/live_daemon_smoke.log" ]] || { echo "missing daemon log in bundle" >&2; exit 1; }
 assert_contains "${FAIL_OUTPUT}" "stage=live_daemon_smoke status=fail bundle=${FAIL_BUNDLE_DIR} log=${FAIL_RUN_DIR}/live_daemon_smoke.log"
 assert_contains "${FAIL_BUNDLE_DIR}/bundle-meta.json" '"entrypoint": "live-local-smoke"'
 assert_contains "${FAIL_BUNDLE_DIR}/commands.txt" "live_daemon_smoke: bash scripts/live-daemon-smoke.sh"
 assert_contains "${FAIL_BUNDLE_DIR}/env.txt" "OBERON4_LIVE_API_KEY_ENV=TEST_LIVE_KEY"
 assert_contains "${FAIL_BUNDLE_DIR}/env.txt" "OBERON4_LIVE_API_KEY_STATUS=set"
+assert_contains "${FAIL_BUNDLE_DIR}/daemon-runtime.txt" "data_dir=${FAIL_RUN_DIR}/doctor-data"
 if rg -n --fixed-strings "super-secret-token" "${FAIL_BUNDLE_DIR}/env.txt" >/dev/null; then
   echo "assertion failed: secret value leaked into live bundle env.txt" >&2
   exit 1

@@ -9,9 +9,9 @@ use std::{
 
 use oberon4_auth::{AccountRegistry, AnthropicOAuthAdapter, OpenAiOAuthAdapter, TokenBundle};
 use oberon4_core::{
-    AppConfig, ChatMessage, ChatProvider, ChatRole, ChatToolCallDelta, InMemoryConfigStore,
-    InMemorySecretStore, InMemorySessionStore, OAuthProvider, OAuthProviderKind, OberonError,
-    default_data_dir,
+    AppConfig, ChatMessage, ChatProvider, ChatRole, ChatToolCallDelta, FileSecretStore,
+    InMemoryConfigStore, InMemorySecretStore, InMemorySessionStore, OAuthProvider,
+    OAuthProviderKind, OberonError, SecretStore, default_data_dir,
 };
 use oberon4_daemon::{DaemonIpcClient, DaemonRuntime, LogLevel, default_socket_path, log_entry};
 use oberon4_provider_openai::{
@@ -212,6 +212,7 @@ impl CliApp {
             }
             CliCommand::EndpointTest => {
                 let config = self.runtime.load_config()?;
+                materialize_api_key_env_from_store(&config, &self.secrets)?;
                 self.provider_client
                     .endpoint_health(Some(&config.endpoint.base_url), &config.endpoint.model)?;
                 Ok(CliOutput::success("endpoint test passed"))
@@ -240,6 +241,8 @@ impl CliApp {
                 let data_dir = default_data_dir();
                 let config_path = data_dir.join("config.toml");
                 let config = self.runtime.load_config()?;
+                let secret_materialized =
+                    materialize_api_key_env_from_store(&config, &self.secrets)?;
                 let snapshot = DoctorSnapshot {
                     running: health.running,
                     ready: health.ready,
@@ -290,12 +293,17 @@ impl CliApp {
                 match endpoint_result {
                     Ok(()) if json => {
                         let healthy = control_plane.all_pass();
+                        let last_error = if healthy {
+                            None
+                        } else {
+                            prefer_secret_resolution_error(
+                                control_plane.last_error.clone(),
+                                &config,
+                                secret_materialized,
+                            )
+                        };
                         doctor_json_output(&DoctorSnapshot {
-                            error: if healthy {
-                                None
-                            } else {
-                                control_plane.last_error.clone()
-                            },
+                            error: last_error.clone(),
                             exit_code: if healthy { 0 } else { 3 },
                             version_check: control_plane.version_check,
                             models_check: control_plane.models_check,
@@ -305,7 +313,7 @@ impl CliApp {
                             endpoint_version: control_plane.endpoint_version,
                             auth_summary: control_plane.auth_summary,
                             diagnostics_summary: control_plane.diagnostics_summary,
-                            last_error: control_plane.last_error,
+                            last_error,
                             ..snapshot
                         })
                     }
@@ -315,6 +323,11 @@ impl CliApp {
                         if control_plane.last_error.is_none() {
                             control_plane.last_error = Some(err.to_string());
                         }
+                        let last_error = prefer_secret_resolution_error(
+                            control_plane.last_error.clone(),
+                            &config,
+                            secret_materialized,
+                        );
                         doctor_json_output(&DoctorSnapshot {
                             endpoint_check: "fail".to_string(),
                             error: Some(err.to_string()),
@@ -327,7 +340,7 @@ impl CliApp {
                             endpoint_version: control_plane.endpoint_version,
                             auth_summary: control_plane.auth_summary,
                             diagnostics_summary: control_plane.diagnostics_summary,
-                            last_error: control_plane.last_error,
+                            last_error,
                             ..snapshot
                         })
                     }
@@ -549,6 +562,8 @@ fn execute_via_daemon(command: CliCommand) -> Result<CliOutput, OberonError> {
                 }
             };
             let config = loaded_config.unwrap_or_else(|| default.clone());
+            let file_secrets = FileSecretStore::default();
+            let secret_materialized = materialize_api_key_env_from_store(&config, &file_secrets)?;
             let base_snapshot = DoctorSnapshot {
                 running: status.running,
                 ready: status.running,
@@ -604,12 +619,17 @@ fn execute_via_daemon(command: CliCommand) -> Result<CliOutput, OberonError> {
             match endpoint_result {
                 Ok(oberon4_core::DaemonEvent::Ack { message: _ }) if json => {
                     let healthy = control_plane.all_pass();
+                    let last_error = if healthy {
+                        None
+                    } else {
+                        prefer_secret_resolution_error(
+                            control_plane.last_error.clone(),
+                            &config,
+                            secret_materialized,
+                        )
+                    };
                     doctor_json_output(&DoctorSnapshot {
-                        error: if healthy {
-                            None
-                        } else {
-                            control_plane.last_error.clone()
-                        },
+                        error: last_error.clone(),
                         exit_code: if healthy { 0 } else { 3 },
                         version_check: control_plane.version_check,
                         models_check: control_plane.models_check,
@@ -619,7 +639,7 @@ fn execute_via_daemon(command: CliCommand) -> Result<CliOutput, OberonError> {
                         endpoint_version: control_plane.endpoint_version,
                         auth_summary: control_plane.auth_summary,
                         diagnostics_summary: control_plane.diagnostics_summary,
-                        last_error: control_plane.last_error,
+                        last_error,
                         ..base_snapshot
                     })
                 }
@@ -663,6 +683,11 @@ fn execute_via_daemon(command: CliCommand) -> Result<CliOutput, OberonError> {
                         if control_plane.last_error.is_none() {
                             control_plane.last_error = Some(err.to_string());
                         }
+                        let last_error = prefer_secret_resolution_error(
+                            control_plane.last_error.clone(),
+                            &config,
+                            secret_materialized,
+                        );
                         doctor_json_output(&DoctorSnapshot {
                             endpoint_check: "fail".to_string(),
                             error: Some(err.to_string()),
@@ -675,7 +700,7 @@ fn execute_via_daemon(command: CliCommand) -> Result<CliOutput, OberonError> {
                             endpoint_version: control_plane.endpoint_version,
                             auth_summary: control_plane.auth_summary,
                             diagnostics_summary: control_plane.diagnostics_summary,
-                            last_error: control_plane.last_error,
+                            last_error,
                             ..base_snapshot
                         })
                     } else {
@@ -734,6 +759,60 @@ fn execute_via_daemon(command: CliCommand) -> Result<CliOutput, OberonError> {
                 event => daemon_protocol_error(event),
             }
         }
+    }
+}
+
+fn materialize_api_key_env_from_store<S>(
+    config: &AppConfig,
+    secrets: &S,
+) -> Result<bool, OberonError>
+where
+    S: SecretStore,
+{
+    let Some(env_name) = config
+        .endpoint
+        .api_key_env
+        .as_deref()
+        .filter(|name| !name.trim().is_empty())
+    else {
+        return Ok(false);
+    };
+
+    if std::env::var(env_name).is_ok() {
+        return Ok(false);
+    }
+
+    let key = format!("env.{env_name}");
+    match secrets.get_secret(&key) {
+        Ok(value) => {
+            unsafe {
+                std::env::set_var(env_name, value);
+            }
+            Ok(true)
+        }
+        Err(OberonError::NotFound(_)) => Ok(false),
+        Err(err) => Err(err),
+    }
+}
+
+fn prefer_secret_resolution_error(
+    current: Option<String>,
+    config: &AppConfig,
+    secret_materialized: bool,
+) -> Option<String> {
+    let Some(env_name) = config.endpoint.api_key_env.as_deref() else {
+        return current;
+    };
+    if secret_materialized || std::env::var(env_name).is_ok() {
+        return current;
+    }
+    match current {
+        Some(message) if message.contains("api key environment variable is not set") => {
+            Some(format!(
+                "api key environment variable is not set and no local secret found: {env_name}"
+            ))
+        }
+        other => other,
     }
 }
 
@@ -1470,7 +1549,7 @@ mod tests {
     use oberon4_auth::{AccountRegistry, InMemoryAccountMetadataStore};
     use oberon4_core::{
         AppConfig, DaemonCommand, DaemonEvent, FakeChatProvider, FakeOAuthProvider,
-        InMemorySecretStore, OAuthProviderKind,
+        InMemorySecretStore, OAuthProviderKind, SecretStore,
     };
     use oberon4_daemon::{DaemonApp, DaemonIpcClient, DaemonRuntime, serve_unix_socket};
     use oberon4_provider_openai::{FakeTransport, OpenAiCompatibleClient, RetryPolicy};
@@ -1493,6 +1572,24 @@ mod tests {
         OpenAiCompatibleClient::new(
             "https://api.openai.com",
             None,
+            RetryPolicy {
+                timeout_ms: 30_000,
+                max_retries: 0,
+            },
+            FakeTransport::new(vec![
+                Ok(r#"{"version":"test-1.0.0"}"#.to_string()),
+                Ok(r#"{"version":"test-1.0.0"}"#.to_string()),
+                Ok(r#"{"data":[{"id":"gpt-4.1-mini"},{"id":"o4-mini"}]}"#.to_string()),
+                Ok(r#"{"entitled":true,"mode":"oauth"}"#.to_string()),
+                Ok(r#"{"requests":7,"failovers":1}"#.to_string()),
+            ]),
+        )
+    }
+
+    fn secret_backed_local_doctor_provider() -> OpenAiCompatibleClient<FakeTransport> {
+        OpenAiCompatibleClient::new(
+            "https://api.openai.com",
+            Some("OPENAI_API_KEY".to_string()),
             RetryPolicy {
                 timeout_ms: 30_000,
                 max_retries: 0,
@@ -1716,6 +1813,72 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("requests=7")
+        );
+        unsafe {
+            std::env::remove_var("OPENAI_API_KEY");
+        }
+    }
+
+    #[test]
+    fn doctor_json_materializes_local_secret_when_env_missing() {
+        let _guard = env_guard();
+        unsafe {
+            std::env::remove_var("OPENAI_API_KEY");
+            std::env::remove_var("OBERON4_SOCKET_PATH");
+            std::env::remove_var("OBERON4_DAEMON_BIN");
+        }
+        let mut app = CliApp {
+            provider_client: secret_backed_local_doctor_provider(),
+            ..CliApp::default()
+        };
+        app.secrets
+            .set_secret("env.OPENAI_API_KEY", "from-local-secret")
+            .unwrap();
+
+        let _ = app.run(CliCommand::DaemonStart);
+        let output = app.run(CliCommand::Doctor { json: true });
+        let value: serde_json::Value = serde_json::from_str(&output.stdout).unwrap();
+
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(value["endpoint_check"], "pass");
+        assert_eq!(value["version_check"], "pass");
+        assert_eq!(
+            std::env::var("OPENAI_API_KEY").ok().as_deref(),
+            Some("from-local-secret")
+        );
+        assert!(
+            !output.stdout.contains("from-local-secret"),
+            "doctor JSON must not leak recovered secrets"
+        );
+        unsafe {
+            std::env::remove_var("OPENAI_API_KEY");
+        }
+    }
+
+    #[test]
+    fn doctor_json_reports_missing_local_secret_clearly() {
+        let _guard = env_guard();
+        unsafe {
+            std::env::remove_var("OPENAI_API_KEY");
+            std::env::remove_var("OBERON4_SOCKET_PATH");
+            std::env::remove_var("OBERON4_DAEMON_BIN");
+        }
+        let mut app = CliApp {
+            provider_client: secret_backed_local_doctor_provider(),
+            ..CliApp::default()
+        };
+
+        let _ = app.run(CliCommand::DaemonStart);
+        let output = app.run(CliCommand::Doctor { json: true });
+        let value: serde_json::Value = serde_json::from_str(&output.stdout).unwrap();
+
+        assert_eq!(output.exit_code, 3);
+        assert_eq!(value["endpoint_check"], "fail");
+        assert!(
+            value["last_error"]
+                .as_str()
+                .unwrap()
+                .contains("no local secret found: OPENAI_API_KEY")
         );
     }
 

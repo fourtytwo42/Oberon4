@@ -12,6 +12,7 @@ Required scopes:
 - canonical gate: `GATE_MODE=strict bash scripts/oberon4-gate.sh`
 - smoke gate: `GATE_MODE=smoke bash scripts/oberon4-gate.sh`
 - canonical repair loop: `bash scripts/repair-loop.sh`
+- artifact pruning: `bash scripts/prune-artifacts.sh --dry-run`
 - local baseline: `cargo test`
 - focused crate: `cargo test -p <crate-name>`
 - lint gate (when enabled): `cargo clippy --all-targets -- -D warnings`
@@ -24,6 +25,7 @@ Gate behavior:
 - optional PTY TUI verification remains opt-in through `RUN_TUI_PTY_SMOKE=1`
 - optional live repair-loop verification remains opt-in through `RUN_LIVE_LOCAL_SMOKE=1 bash scripts/repair-loop.sh`
 - machine-readable diagnostics are available through `oberon4 doctor --json` and should be used by automation when diagnosis output needs stable parsing; the JSON now includes runtime metadata (`config_path`, `data_dir`, `socket_path`, `api_key_env`, `config_exists`, `daemon_reachable`) plus control-plane checks (`version_check`, `models_check`, `auth_check`, `diagnostics_check`, `available_models`, `endpoint_version`, `auth_summary`, `diagnostics_summary`, `last_error`)
+- when `endpoint.api_key_env` is configured and the shell env is unset, `doctor` and `doctor --json` should best-effort materialize `env.<api_key_env>` from the local Oberon4 secret store for the current process only
 - failed gate or local-live runs write a troubleshooting bundle under `artifacts/failures/<timestamp>-<entrypoint>-<pid>/`
 - repair-loop runs write machine-readable stage logs and `summary.json` under `artifacts/repair-loop/<timestamp>-<pid>/`
 
@@ -52,9 +54,10 @@ Rules:
 - keep live tests non-destructive
 - do not use account/key revoke/delete operations in automated live smoke
 - confirm success by control-plane route validation (`/v1/version`, `/v1/models`, `/v1/auth/status`, `/v1/diagnostics`), provider-level chat responses, and daemon-backed CLI live integration test
-- prefer `scripts/live-local-smoke.sh` when validating the known local LLM Hotspot environment because it also checks `doctor --json`, requires control-plane checks to pass, and writes a machine-readable run summary
+- prefer `scripts/live-local-smoke.sh` when validating the known local LLM Hotspot environment because it also checks `doctor --json`, requires control-plane checks to pass, writes a machine-readable run summary, and can source the configured bearer env from the local Oberon4 secret store
 - if the gate or local live wrapper fails, inspect the emitted bundle in `artifacts/failures/` before re-running so diagnosis uses the original failure context
 - prefer `scripts/repair-loop.sh` as the first local recovery command because it runs `doctor --json`, the strict gate, PTY smoke, and optionally the live-local wrapper in one fixed order
+- use `scripts/prune-artifacts.sh --dry-run` to review stale runtime evidence before removing old bundles
 
 ## 3. Coverage Expectations by Requirement
 - `FR-001`: lifecycle tests (start, health, graceful stop)

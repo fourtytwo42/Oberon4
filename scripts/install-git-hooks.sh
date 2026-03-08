@@ -18,6 +18,8 @@ chmod +x \
   scripts/live-local-smoke.sh \
   scripts/test-live-hotspot-smoke.sh \
   scripts/test-live-local-smoke.sh \
+  scripts/prune-artifacts.sh \
+  scripts/test-prune-artifacts.sh \
   scripts/repair-loop.sh \
   scripts/test-repair-loop.sh \
   scripts/tui-pty-smoke.sh \

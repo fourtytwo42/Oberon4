@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/runtime-env.sh"
+
 failure_bundle_json_escape() {
   local value="${1-}"
   value="${value//\\/\\\\}"
@@ -43,6 +45,34 @@ failure_bundle_write_metadata() {
   "primary_log_path": "$(failure_bundle_json_escape "${primary_log_path}")"
 }
 EOF
+}
+
+failure_bundle_capture_daemon_runtime() {
+  local bundle_dir="$1"
+  local data_dir="${2:-$(runtime_default_data_dir)}"
+  local socket_path="${3:-$(runtime_default_socket_path)}"
+  local tail_lines="${FAILURE_BUNDLE_DAEMON_TAIL_LINES:-80}"
+  local out_path="${data_dir}/daemon.out"
+  local err_path="${data_dir}/daemon.err"
+
+  {
+    printf 'data_dir=%s\n' "${data_dir}"
+    printf 'socket_path=%s\n' "${socket_path}"
+    printf 'daemon_out_path=%s\n' "${out_path}"
+    if [[ -f "${out_path}" ]]; then
+      printf 'daemon_out_status=present\n'
+      tail -n "${tail_lines}" "${out_path}" >"${bundle_dir}/daemon-out.log"
+    else
+      printf 'daemon_out_status=missing\n'
+    fi
+    printf 'daemon_err_path=%s\n' "${err_path}"
+    if [[ -f "${err_path}" ]]; then
+      printf 'daemon_err_status=present\n'
+      tail -n "${tail_lines}" "${err_path}" >"${bundle_dir}/daemon-err.log"
+    else
+      printf 'daemon_err_status=missing\n'
+    fi
+  } >"${bundle_dir}/daemon-runtime.txt"
 }
 
 failure_bundle_capture_doctor() {

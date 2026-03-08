@@ -34,9 +34,12 @@ Status: active
 ## Diagnostic Readiness
 - [ ] `oberon4 doctor` returns success text on healthy configuration
 - [ ] `oberon4 doctor --json` returns valid JSON with no secret/token values and includes local runtime metadata (`config_path`, `data_dir`, `socket_path`, `api_key_env`, `config_exists`, `daemon_reachable`) plus control-plane fields (`version_check`, `models_check`, `auth_check`, `diagnostics_check`, `available_models`, `endpoint_version`, `auth_summary`, `diagnostics_summary`, `last_error`)
+- [ ] diagnostics and live verification succeed when the configured API-key env is available either from the exported shell env or the local Oberon4 secret store
 - [ ] responders know to inspect `artifacts/failures/<timestamp>-<entrypoint>-<pid>/` for `summary.json`, `commands.txt`, `env.txt`, logs, `effective-config.json`, and doctor output before retrying
+- [ ] responders know failure bundles now include `daemon-runtime.txt` plus best-effort `daemon-out.log` and `daemon-err.log`
 - [ ] responders know to inspect `artifacts/repair-loop/<timestamp>-<pid>/summary.json` for stage order, pass/fail status, and any downstream failure-bundle pointer
 - [ ] live-local smoke confirms the configured model is advertised by `/v1/models` and that `/v1/auth/status` plus `/v1/diagnostics` return valid JSON
+- [ ] optional maintenance command `bash scripts/prune-artifacts.sh --dry-run` has been reviewed before pruning old runtime evidence
 
 ## Human Test Entry
 - [ ] `docs/runbooks/oberon4-human-test-checklist.md` exists

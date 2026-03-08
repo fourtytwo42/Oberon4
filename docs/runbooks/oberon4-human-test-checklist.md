@@ -21,6 +21,7 @@ Use this checklist only after automated gates through `EG-P8` are green.
   - if this fails, inspect `artifacts/failures/<timestamp>-oberon4-gate-<pid>/`
 - [ ] `cargo run -p oberon4-cli -- doctor --json`
   - expect `version_check=pass`, `models_check=pass`, `auth_check=pass`, and `diagnostics_check=pass` in the JSON output before manual troubleshooting continues
+  - if `api_key_env` is configured, this should work from either the exported shell env or the local Oberon4 secret store
 
 ## Optional Live Endpoint Preconditions
 - [ ] `bash scripts/live-local-smoke.sh`
@@ -74,4 +75,5 @@ Use this checklist only after automated gates through `EG-P8` are green.
 - [ ] no secret/token values printed
 - [ ] any defects discovered are recorded before release
 - [ ] any failed automated precondition has an associated bundle in `artifacts/failures/` for follow-up diagnosis
+- [ ] failed bundles include `daemon-runtime.txt` and any available `daemon-out.log` / `daemon-err.log` before manual daemon investigation starts
 - [ ] runtime evidence directories (`.live-manual/`, `artifacts/failures/`, `artifacts/repair-loop/`, `artifacts/live-local-smoke/`) are treated as ephemeral and not staged for release commits

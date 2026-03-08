@@ -12,7 +12,10 @@ trap 'rm -rf "${TMP_DIR}"' EXIT
 MOCK_BIN="${TMP_DIR}/bin"
 LOG_DIR="${TMP_DIR}/logs"
 BUNDLE_ROOT="${TMP_DIR}/failure-bundles"
-mkdir -p "${MOCK_BIN}" "${LOG_DIR}" "${BUNDLE_ROOT}"
+DATA_DIR="${TMP_DIR}/data"
+mkdir -p "${MOCK_BIN}" "${LOG_DIR}" "${BUNDLE_ROOT}" "${DATA_DIR}"
+printf 'daemon stdout line\n' > "${DATA_DIR}/daemon.out"
+printf 'daemon stderr line\n' > "${DATA_DIR}/daemon.err"
 
 cat > "${MOCK_BIN}/cargo" <<'SH'
 #!/usr/bin/bash
@@ -138,6 +141,7 @@ if run_gate "${FAIL_OUTPUT}" \
   OBERON4_LIVE_BASE_URL=http://example.test/v1 \
   OBERON4_LIVE_OPENAI_MODEL=gpt-test \
   OBERON4_LIVE_API_KEY_ENV=TEST_GATE_KEY \
+  OBERON4_DATA_DIR="${DATA_DIR}" \
   TEST_GATE_KEY=super-secret-token; then
   echo "assertion failed: failing workspace test step should exit non-zero" >&2
   exit 1
@@ -156,6 +160,9 @@ fi
 [[ -f "${BUNDLE_DIR}/doctor-status.txt" ]] || { echo "missing bundle doctor-status.txt" >&2; exit 1; }
 [[ -f "${BUNDLE_DIR}/effective-config.json" ]] || { echo "missing bundle effective-config.json" >&2; exit 1; }
 [[ -f "${BUNDLE_DIR}/effective-config-status.txt" ]] || { echo "missing bundle effective-config-status.txt" >&2; exit 1; }
+[[ -f "${BUNDLE_DIR}/daemon-runtime.txt" ]] || { echo "missing bundle daemon-runtime.txt" >&2; exit 1; }
+[[ -f "${BUNDLE_DIR}/daemon-out.log" ]] || { echo "missing bundle daemon-out.log" >&2; exit 1; }
+[[ -f "${BUNDLE_DIR}/daemon-err.log" ]] || { echo "missing bundle daemon-err.log" >&2; exit 1; }
 [[ -f "${BUNDLE_DIR}/logs/cargo_test_workspace.log" ]] || { echo "missing copied workspace log" >&2; exit 1; }
 assert_contains "${FAIL_OUTPUT}" "[gate] failure summary (${LOG_DIR}/cargo_test_workspace.log):"
 assert_contains "${FAIL_OUTPUT}" "[gate] failure summary"
@@ -171,6 +178,10 @@ assert_contains "${BUNDLE_DIR}/env.txt" "OBERON4_LIVE_BASE_URL=http://example.te
 assert_contains "${BUNDLE_DIR}/env.txt" "OBERON4_LIVE_OPENAI_MODEL=gpt-test"
 assert_contains "${BUNDLE_DIR}/env.txt" "OBERON4_LIVE_API_KEY_ENV=TEST_GATE_KEY"
 assert_contains "${BUNDLE_DIR}/env.txt" "OBERON4_LIVE_API_KEY_STATUS=set"
+assert_contains "${BUNDLE_DIR}/daemon-runtime.txt" "daemon_out_status=present"
+assert_contains "${BUNDLE_DIR}/daemon-runtime.txt" "daemon_err_status=present"
+assert_contains "${BUNDLE_DIR}/daemon-out.log" "daemon stdout line"
+assert_contains "${BUNDLE_DIR}/daemon-err.log" "daemon stderr line"
 if rg -n --fixed-strings "super-secret-token" "${BUNDLE_DIR}/env.txt" >/dev/null; then
   echo "assertion failed: secret value leaked into gate bundle env.txt" >&2
   exit 1

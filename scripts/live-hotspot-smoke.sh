@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+source "${ROOT_DIR}/scripts/lib/runtime-env.sh"
+
 : "${OBERON4_LIVE_BASE_URL:?set OBERON4_LIVE_BASE_URL to the LLM Hotspot API base}"
 
 BASE_URL="${OBERON4_LIVE_BASE_URL%/}"
@@ -9,6 +13,9 @@ OPENAI_MODEL="${OBERON4_LIVE_OPENAI_MODEL:-gpt-5.1-codex-mini}"
 ANTHROPIC_MODEL="${OBERON4_LIVE_ANTHROPIC_MODEL:-claude-sonnet-4-6}"
 TIMEOUT_SECS="${OBERON4_LIVE_TIMEOUT_SECS:-90}"
 API_KEY_ENV="${OBERON4_LIVE_API_KEY_ENV:-}"
+if [[ -n "${API_KEY_ENV}" ]]; then
+  runtime_materialize_secret_env "${API_KEY_ENV}"
+fi
 
 AUTH_ARGS=()
 if [ -n "$API_KEY_ENV" ]; then

@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+source "${ROOT_DIR}/scripts/lib/runtime-env.sh"
+
 : "${OBERON4_LIVE_BASE_URL:?set OBERON4_LIVE_BASE_URL to the live API base}"
 
 CURRENT_STAGE="bootstrap"
@@ -18,6 +22,9 @@ BASE_URL="${OBERON4_LIVE_BASE_URL%/}"
 BASE_URL="${BASE_URL%/v1}"
 OPENAI_MODEL="${OBERON4_LIVE_OPENAI_MODEL:-gpt-5.1-codex-mini}"
 API_KEY_ENV="${OBERON4_LIVE_API_KEY_ENV:-}"
+if [[ -n "${API_KEY_ENV}" ]]; then
+  runtime_materialize_secret_env "${API_KEY_ENV}"
+fi
 
 printf 'Using base URL: %s\n' "$BASE_URL"
 printf 'OpenAI model: %s\n' "$OPENAI_MODEL"

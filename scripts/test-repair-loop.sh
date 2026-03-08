@@ -136,7 +136,9 @@ SUCCESS_SUMMARY="${SUCCESS_RUN_DIR}/summary.json"
 [[ -f "${SUCCESS_RUN_DIR}/doctor_json.log" ]] || { echo "missing doctor log" >&2; exit 1; }
 [[ -f "${SUCCESS_RUN_DIR}/oberon4_gate.log" ]] || { echo "missing gate log" >&2; exit 1; }
 [[ -f "${SUCCESS_RUN_DIR}/tui_pty_smoke.log" ]] || { echo "missing tui log" >&2; exit 1; }
+[[ -f "${SUCCESS_RUN_DIR}/prune_artifacts.log" ]] || { echo "missing prune_artifacts.log" >&2; exit 1; }
 assert_contains "${SUCCESS_OUTPUT}" "[repair-loop] PASS run_dir=${SUCCESS_RUN_DIR}"
+assert_contains "${SUCCESS_OUTPUT}" "[repair-loop] prune_artifacts_dry_run log=${SUCCESS_RUN_DIR}/prune_artifacts.log"
 assert_contains "${ORDER_FILE}" "doctor_json"
 assert_contains "${ORDER_FILE}" "oberon4_gate"
 assert_contains "${ORDER_FILE}" "tui_pty_smoke"

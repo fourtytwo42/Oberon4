@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+source "${ROOT_DIR}/scripts/lib/runtime-env.sh"
 
 : "${REPAIR_LOOP_LOG_DIR:=${ROOT_DIR}/artifacts/repair-loop}"
 : "${RUN_LIVE_LOCAL_SMOKE:=0}"
@@ -136,6 +137,12 @@ run_stage() {
 }
 
 write_summary
+
+if bash scripts/prune-artifacts.sh --dry-run >"${RUN_DIR}/prune_artifacts.log" 2>&1; then
+  echo "[repair-loop] prune_artifacts_dry_run log=${RUN_DIR}/prune_artifacts.log"
+else
+  echo "[repair-loop] prune_artifacts_dry_run_failed log=${RUN_DIR}/prune_artifacts.log" >&2
+fi
 
 run_stage \
   "doctor_json" \

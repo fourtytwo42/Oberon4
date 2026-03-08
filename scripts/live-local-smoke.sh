@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${ROOT_DIR}/scripts/lib/failure-bundle.sh"
+source "${ROOT_DIR}/scripts/lib/runtime-env.sh"
 
 : "${OBERON4_LIVE_BASE_URL:=http://192.168.50.239:51824/v1}"
 : "${OBERON4_LIVE_OPENAI_MODEL:=gpt-5.1-codex-mini}"
@@ -13,6 +14,9 @@ source "${ROOT_DIR}/scripts/lib/failure-bundle.sh"
 export OBERON4_LIVE_BASE_URL
 export OBERON4_LIVE_OPENAI_MODEL
 export OBERON4_LIVE_API_KEY_ENV
+if [[ -n "${OBERON4_LIVE_API_KEY_ENV}" ]]; then
+  runtime_materialize_secret_env "${OBERON4_LIVE_API_KEY_ENV}"
+fi
 
 RUN_ID="$(date -u +%Y%m%dT%H%M%S)-$$"
 RUN_DIR="${LIVE_LOCAL_LOG_DIR}/${RUN_ID}"
@@ -202,6 +206,7 @@ capture_live_failure_bundle() {
     failure_bundle_capture_doctor "${bundle_dir}" run_doctor_json_command
   fi
   failure_bundle_capture_effective_config "${bundle_dir}" run_doctor_config_show_command
+  failure_bundle_capture_daemon_runtime "${bundle_dir}" "${DOCTOR_DATA_DIR}" "${DOCTOR_SOCKET_PATH}"
   printf '%s\n' "${bundle_dir}"
 }
 
