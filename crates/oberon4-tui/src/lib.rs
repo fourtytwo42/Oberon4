@@ -3158,32 +3158,59 @@ fn parse_list_item(line: &str) -> Option<&str> {
 fn parse_inline_markdown(line: &str, base_style: Style) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut in_code = false;
+    let mut in_bold = false;
+    let mut in_italic = false;
     let mut buffer = String::new();
-    for ch in line.chars() {
+    let chars: Vec<char> = line.chars().collect();
+    let mut idx = 0usize;
+    while idx < chars.len() {
+        let ch = chars[idx];
+        let next = chars.get(idx + 1).copied();
         if ch == '`' {
             if !buffer.is_empty() {
                 spans.push(Span::styled(
                     std::mem::take(&mut buffer),
-                    if in_code {
-                        base_style.fg(Color::Yellow).bg(Color::DarkGray)
-                    } else {
-                        base_style
-                    },
+                    inline_markdown_style(base_style, in_code, in_bold, in_italic),
                 ));
             }
             in_code = !in_code;
+            idx += 1;
             continue;
         }
+
+        if !in_code {
+            if (ch == '*' || ch == '_') && next == Some(ch) {
+                if !buffer.is_empty() {
+                    spans.push(Span::styled(
+                        std::mem::take(&mut buffer),
+                        inline_markdown_style(base_style, in_code, in_bold, in_italic),
+                    ));
+                }
+                in_bold = !in_bold;
+                idx += 2;
+                continue;
+            }
+
+            if ch == '*' || ch == '_' {
+                if !buffer.is_empty() {
+                    spans.push(Span::styled(
+                        std::mem::take(&mut buffer),
+                        inline_markdown_style(base_style, in_code, in_bold, in_italic),
+                    ));
+                }
+                in_italic = !in_italic;
+                idx += 1;
+                continue;
+            }
+        }
+
         buffer.push(ch);
+        idx += 1;
     }
     if !buffer.is_empty() {
         spans.push(Span::styled(
             buffer,
-            if in_code {
-                base_style.fg(Color::Yellow).bg(Color::DarkGray)
-            } else {
-                base_style
-            },
+            inline_markdown_style(base_style, in_code, in_bold, in_italic),
         ));
     }
     if spans.is_empty() {
@@ -3191,6 +3218,26 @@ fn parse_inline_markdown(line: &str, base_style: Style) -> Vec<Span<'static>> {
     } else {
         spans
     }
+}
+
+fn inline_markdown_style(
+    base_style: Style,
+    in_code: bool,
+    in_bold: bool,
+    in_italic: bool,
+) -> Style {
+    if in_code {
+        return base_style.fg(Color::Yellow).bg(Color::DarkGray);
+    }
+
+    let mut style = base_style;
+    if in_bold {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    if in_italic {
+        style = style.add_modifier(Modifier::ITALIC);
+    }
+    style
 }
 
 fn wrap_styled_lines(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
@@ -4986,6 +5033,23 @@ mod tests {
             .iter()
             .flat_map(|line| line.spans.iter())
             .any(|span| span.content.contains("print('hi')") && span.style.bg == Some(CODE_BLOCK_BG)));
+    }
+
+    #[test]
+    fn assistant_markdown_strips_bold_markers_and_styles_text() {
+        let lines = format_assistant_markdown("- **Word Association** test");
+        let flattened: String = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect();
+
+        assert!(!flattened.contains("**"));
+        assert!(lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .any(|span| span.content.contains("Word Association")
+                && span.style.add_modifier.contains(Modifier::BOLD)));
     }
 
     #[test]
