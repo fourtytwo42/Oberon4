@@ -2066,31 +2066,13 @@ fn run_inline_terminal_loop(
                 }
             }
             KeyCode::Char(ch) => {
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && matches!(shell.focus, FocusTarget::List)
-                    && matches!(shell.workspace, Workspace::Chat)
-                    && ch == 'd'
-                {
-                    let _ = shell.delete_selected_session(app)?;
-                    rerender_workspace = true;
-                } else if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
+                if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
                     shell.push_input_char(ch);
-                } else if matches!(shell.focus, FocusTarget::List)
-                    && matches!(shell.workspace, Workspace::Chat)
-                    && ch == 'd'
-                {
-                    let _ = shell.delete_selected_session(app)?;
-                    rerender_workspace = true;
                 }
             }
             KeyCode::Backspace => {
                 if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
                     shell.backspace();
-                } else if matches!(shell.focus, FocusTarget::List)
-                    && matches!(shell.workspace, Workspace::Chat)
-                {
-                    let _ = shell.delete_selected_session(app)?;
-                    rerender_workspace = true;
                 }
             }
             KeyCode::Tab if matches!(shell.focus, FocusTarget::Composer) => {
@@ -2249,28 +2231,13 @@ fn run_terminal_loop(
                         }
                     }
                     KeyCode::Char(ch) => {
-                        if key.modifiers.contains(KeyModifiers::CONTROL)
-                            && matches!(shell.focus, FocusTarget::List)
-                            && matches!(shell.workspace, Workspace::Chat)
-                            && ch == 'd'
-                        {
-                            let _ = shell.delete_selected_session(app)?;
-                        } else if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
+                        if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
                             shell.push_input_char(ch)
-                        } else if matches!(shell.focus, FocusTarget::List)
-                            && matches!(shell.workspace, Workspace::Chat)
-                            && ch == 'd'
-                        {
-                            let _ = shell.delete_selected_session(app)?;
                         }
                     }
                     KeyCode::Backspace => {
                         if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
                             shell.backspace();
-                        } else if matches!(shell.focus, FocusTarget::List)
-                            && matches!(shell.workspace, Workspace::Chat)
-                        {
-                            let _ = shell.delete_selected_session(app)?;
                         }
                     }
                     KeyCode::Tab if matches!(shell.focus, FocusTarget::Composer) => {
