@@ -1,12 +1,12 @@
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::{
     io::{Read, Write},
     net::TcpListener,
     path::{Path, PathBuf},
     process::Command,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
     },
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -126,11 +126,11 @@ impl PtyHarness {
         let child = pair.slave.spawn_command(command).expect("tui should spawn");
         drop(pair.slave);
 
-        let writer = pair.master.take_writer().expect("writer should be available");
-        let mut reader = pair
+        let writer = pair
             .master
-            .try_clone_reader()
-            .expect("reader should clone");
+            .take_writer()
+            .expect("writer should be available");
+        let mut reader = pair.master.try_clone_reader().expect("reader should clone");
         let transcript = Arc::new(Mutex::new(Vec::new()));
         let reader_transcript = Arc::clone(&transcript);
         let reader_thread = thread::spawn(move || {
@@ -232,7 +232,13 @@ struct CliRun {
     stderr: String,
 }
 
-fn run_cli(cli: &Path, daemon: &Path, data_dir: &Path, socket_path: &Path, args: &[&str]) -> CliRun {
+fn run_cli(
+    cli: &Path,
+    daemon: &Path,
+    data_dir: &Path,
+    socket_path: &Path,
+    args: &[&str],
+) -> CliRun {
     let output = Command::new(cli)
         .args(args)
         .env("OBERON4_DAEMON_BIN", daemon)
@@ -256,7 +262,13 @@ fn run_cli(cli: &Path, daemon: &Path, data_dir: &Path, socket_path: &Path, args:
     }
 }
 
-fn configure_daemon(cli: &Path, daemon: &Path, data_dir: &Path, socket_path: &Path, base_url: &str) {
+fn configure_daemon(
+    cli: &Path,
+    daemon: &Path,
+    data_dir: &Path,
+    socket_path: &Path,
+    base_url: &str,
+) {
     let start = run_cli(cli, daemon, data_dir, socket_path, &["daemon", "start"]);
     assert!(start.stdout.contains("running=true"));
 
@@ -285,7 +297,11 @@ fn configure_daemon(cli: &Path, daemon: &Path, data_dir: &Path, socket_path: &Pa
         socket_path,
         &["config", "set", "runtime.request_timeout_ms", "3000"],
     );
-    assert!(set_timeout.stdout.contains("set runtime.request_timeout_ms=3000"));
+    assert!(
+        set_timeout
+            .stdout
+            .contains("set runtime.request_timeout_ms=3000")
+    );
 
     let set_retries = run_cli(
         cli,
@@ -342,7 +358,13 @@ fn tui_pty_command_and_prompt_flow() {
     std::fs::create_dir_all(&data_dir).expect("data dir should exist");
     let socket_path = data_dir.join("daemon.sock");
 
-    configure_daemon(&cli, &daemon, &data_dir, &socket_path, &mock_server.base_url);
+    configure_daemon(
+        &cli,
+        &daemon,
+        &data_dir,
+        &socket_path,
+        &mock_server.base_url,
+    );
 
     let mut harness = PtyHarness::spawn(&cli, &data_dir, &socket_path);
     harness.wait_for_text("Oberon4 TUI", Duration::from_secs(5));
@@ -377,7 +399,11 @@ fn tui_pty_command_and_prompt_flow() {
     harness.wait_for_exit();
 
     let stop = run_cli(&cli, &daemon, &data_dir, &socket_path, &["daemon", "stop"]);
-    assert!(stop.stdout.contains("running=false"), "stderr={}", stop.stderr);
+    assert!(
+        stop.stdout.contains("running=false"),
+        "stderr={}",
+        stop.stderr
+    );
 
     let _ = std::fs::remove_dir_all(&data_dir);
 }

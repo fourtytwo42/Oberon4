@@ -14,11 +14,13 @@ Required scopes:
 - local baseline: `cargo test`
 - focused crate: `cargo test -p <crate-name>`
 - lint gate (when enabled): `cargo clippy --all-targets -- -D warnings`
+- PTY TUI smoke: `bash scripts/tui-pty-smoke.sh`
 
 Gate behavior:
 - `strict` runs `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, and `cargo test -p oberon4-cli --test end_to_end`
 - `smoke` defaults to no heavyweight checks unless individual `RUN_*` flags are enabled
 - optional live verification remains opt-in through `RUN_LIVE_ENDPOINT_SMOKE=1` and `RUN_LIVE_DAEMON_SMOKE=1`
+- optional PTY TUI verification remains opt-in through `RUN_TUI_PTY_SMOKE=1`
 - machine-readable diagnostics are available through `oberon4 doctor --json` and should be used by automation when diagnosis output needs stable parsing
 - failed gate or local-live runs write a troubleshooting bundle under `artifacts/failures/<timestamp>-<entrypoint>-<pid>/`
 
@@ -52,7 +54,7 @@ Rules:
 
 ## 3. Coverage Expectations by Requirement
 - `FR-001`: lifecycle tests (start, health, graceful stop)
-- `FR-002`: command parsing + render output tests
+- `FR-002`: command parsing + render output tests plus PTY smoke for the real `/help`, `/status`, prompt, `/save`, `/load`, `/quit` path
 - `FR-003`: endpoint config validation + mapping tests + timeout tests
 - `FR-004`: crate API contract tests
 - `FR-005`: tray adapter tests for action mapping and unsupported platform fallback

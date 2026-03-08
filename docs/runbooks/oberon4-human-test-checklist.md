@@ -50,18 +50,13 @@ Use this checklist only after automated gates through `EG-P8` are green.
   - expect connected account entries
 
 ### TUI
-- [ ] start a REPL harness or call TUI library smoke path
-  - verify `/help`
-  - verify `/status`
+- [ ] automated PTY smoke: `bash scripts/tui-pty-smoke.sh`
+  - covers `/help`, `/status`, prompt send, `/save`, `/clear`, `/load`, and `/quit`
+- [ ] manual TUI spot-check only for anything not covered by PTY smoke
   - verify `/config`
   - verify `/model o4-mini`
   - verify `/endpoint https://gateway.example.test`
   - verify `/system be concise`
-  - verify plain prompt sends and transcript updates
-  - verify `/save smoke`
-  - verify `/clear`
-  - verify `/load smoke`
-  - verify `/quit`
 
 ### Tray
 - [ ] verify supported-platform adapter or unsupported fallback message

@@ -12,18 +12,21 @@ run_workspace_tests_set=0
 run_e2e_tests_set=0
 run_live_endpoint_smoke_set=0
 run_live_daemon_smoke_set=0
+run_tui_pty_smoke_set=0
 [[ -v RUN_FORMAT_CHECK ]] && run_format_check_set=1
 [[ -v RUN_CLIPPY_CHECK ]] && run_clippy_check_set=1
 [[ -v RUN_WORKSPACE_TESTS ]] && run_workspace_tests_set=1
 [[ -v RUN_E2E_TESTS ]] && run_e2e_tests_set=1
 [[ -v RUN_LIVE_ENDPOINT_SMOKE ]] && run_live_endpoint_smoke_set=1
 [[ -v RUN_LIVE_DAEMON_SMOKE ]] && run_live_daemon_smoke_set=1
+[[ -v RUN_TUI_PTY_SMOKE ]] && run_tui_pty_smoke_set=1
 : "${RUN_FORMAT_CHECK:=1}"
 : "${RUN_CLIPPY_CHECK:=1}"
 : "${RUN_WORKSPACE_TESTS:=1}"
 : "${RUN_E2E_TESTS:=1}"
 : "${RUN_LIVE_ENDPOINT_SMOKE:=0}"
 : "${RUN_LIVE_DAEMON_SMOKE:=0}"
+: "${RUN_TUI_PTY_SMOKE:=0}"
 : "${CLIPPY_FLAGS:=-D warnings}"
 : "${GATE_LOG_DIR:=${ROOT_DIR}/artifacts/gate-logs}"
 : "${GATE_FAILURE_TAIL_LINES:=40}"
@@ -54,6 +57,7 @@ write_gate_env_file() {
     printf 'RUN_E2E_TESTS=%s\n' "${RUN_E2E_TESTS}"
     printf 'RUN_LIVE_ENDPOINT_SMOKE=%s\n' "${RUN_LIVE_ENDPOINT_SMOKE}"
     printf 'RUN_LIVE_DAEMON_SMOKE=%s\n' "${RUN_LIVE_DAEMON_SMOKE}"
+    printf 'RUN_TUI_PTY_SMOKE=%s\n' "${RUN_TUI_PTY_SMOKE}"
     printf 'CLIPPY_FLAGS=%s\n' "${CLIPPY_FLAGS}"
     printf 'GATE_LOG_DIR=%s\n' "${GATE_LOG_DIR}"
     printf 'GATE_FAILURE_TAIL_LINES=%s\n' "${GATE_FAILURE_TAIL_LINES}"
@@ -168,6 +172,7 @@ case "${GATE_MODE}" in
     if [[ "${run_e2e_tests_set}" -eq 0 ]]; then RUN_E2E_TESTS=0; fi
     if [[ "${run_live_endpoint_smoke_set}" -eq 0 ]]; then RUN_LIVE_ENDPOINT_SMOKE=0; fi
     if [[ "${run_live_daemon_smoke_set}" -eq 0 ]]; then RUN_LIVE_DAEMON_SMOKE=0; fi
+    if [[ "${run_tui_pty_smoke_set}" -eq 0 ]]; then RUN_TUI_PTY_SMOKE=0; fi
     ;;
   *)
     echo "[gate] invalid GATE_MODE='${GATE_MODE}' (expected: strict|smoke)" >&2
@@ -200,6 +205,10 @@ fi
 
 if [[ "${RUN_LIVE_DAEMON_SMOKE}" == "1" ]]; then
   run_step live_daemon_smoke bash scripts/live-daemon-smoke.sh
+fi
+
+if [[ "${RUN_TUI_PTY_SMOKE}" == "1" ]]; then
+  run_step tui_pty_smoke bash scripts/tui-pty-smoke.sh
 fi
 
 echo "[gate] PASS: Oberon4 verification gate satisfied."

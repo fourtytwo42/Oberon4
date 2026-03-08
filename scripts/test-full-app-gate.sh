@@ -58,6 +58,10 @@ if [[ "${1:-}" == "scripts/live-daemon-smoke.sh" ]]; then
   echo "live daemon smoke"
   exit 0
 fi
+if [[ "${1:-}" == "scripts/tui-pty-smoke.sh" ]]; then
+  echo "tui pty smoke"
+  exit 0
+fi
 exec /usr/bin/bash "$@"
 SH
 chmod +x "${MOCK_BIN}/bash"
@@ -172,6 +176,13 @@ if [[ ! -f "${LOG_DIR}/live_endpoint_smoke.log" ]]; then
 fi
 if [[ ! -f "${LOG_DIR}/live_daemon_smoke.log" ]]; then
   echo "assertion failed: live daemon smoke should be logged when enabled" >&2
+  exit 1
+fi
+
+TUI_PTY_OUTPUT="${TMP_DIR}/tui-pty.out"
+run_gate "${TUI_PTY_OUTPUT}" GATE_MODE=smoke RUN_TUI_PTY_SMOKE=1
+if [[ ! -f "${LOG_DIR}/tui_pty_smoke.log" ]]; then
+  echo "assertion failed: tui PTY smoke should be logged when enabled" >&2
   exit 1
 fi
 

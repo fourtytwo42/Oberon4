@@ -10,9 +10,11 @@ Status: active
 
 ## Verification Evidence
 - [ ] `GATE_MODE=strict bash scripts/oberon4-gate.sh`
+- [ ] PTY TUI smoke: `bash scripts/tui-pty-smoke.sh`
 - [ ] local real-endpoint wrapper: `bash scripts/live-local-smoke.sh`
 - [ ] optional live endpoint coverage: `OBERON4_LIVE_BASE_URL=<base> RUN_LIVE_ENDPOINT_SMOKE=1 GATE_MODE=smoke bash scripts/oberon4-gate.sh`
 - [ ] optional live daemon coverage: `OBERON4_LIVE_BASE_URL=<base> RUN_LIVE_DAEMON_SMOKE=1 GATE_MODE=smoke bash scripts/oberon4-gate.sh`
+- [ ] optional PTY TUI coverage through gate: `RUN_TUI_PTY_SMOKE=1 GATE_MODE=smoke bash scripts/oberon4-gate.sh`
 - [ ] any failed gate/live verification preserved its troubleshooting bundle under `artifacts/failures/`
 
 ## Requirement Readiness
