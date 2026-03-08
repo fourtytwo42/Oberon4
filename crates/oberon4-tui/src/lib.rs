@@ -38,8 +38,11 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Text},
-    widgets::{Block, Borders, Clear as WidgetClear, List, ListItem, Paragraph, Wrap},
+    text::{Line, Span, Text},
+    widgets::{
+        Block, Borders, Clear as WidgetClear, List, ListItem, Paragraph, Scrollbar,
+        ScrollbarOrientation, ScrollbarState, Wrap,
+    },
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -219,6 +222,8 @@ impl Default for TuiLaunchOptions {
 }
 
 const FOOTER_HEIGHT: u16 = 5;
+const CODE_BLOCK_BG: Color = Color::Rgb(28, 32, 40);
+const CODE_BLOCK_FG: Color = Color::Rgb(185, 220, 255);
 const COMMAND_CATALOG: [(&str, bool); 16] = [
     ("/help", false),
     ("/quit", false),
@@ -2885,81 +2890,357 @@ fn render_chat_workspace(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
 }
 
 fn render_transcript(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
-    let wrapped_lines = transcript_visible_lines(area, shell);
-    let transcript = Paragraph::new(Text::from(wrapped_lines))
-        .block(Block::default().borders(Borders::ALL).title("Transcript"))
-        .wrap(Wrap { trim: false });
-    frame.render_widget(transcript, area);
-}
-
-fn transcript_scroll_offset(area: Rect, lines: &[String]) -> u16 {
-    let inner_height = area.height.saturating_sub(2) as usize;
-    if inner_height == 0 {
-        return 0;
+    let block = Block::default().borders(Borders::ALL).title("Transcript");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
     }
 
-    let inner_width = area.width.saturating_sub(2).max(1) as usize;
-    let total_rows = lines
-        .iter()
-        .map(|text| {
-            text.split('\n')
-                .map(|segment| {
-                    let width = segment.chars().count().max(1);
-                    width.div_ceil(inner_width)
-                })
-                .sum::<usize>()
-        })
-        .sum::<usize>();
+    let viewport = build_transcript_viewport(inner, shell);
+    let (text_area, scrollbar_area) = if viewport.scrollbar_visible && inner.width > 1 {
+        let [text, bar] =
+            Layout::horizontal([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+        (text, Some(bar))
+    } else {
+        (inner, None)
+    };
 
-    total_rows
-        .saturating_sub(inner_height)
-        .min(u16::MAX as usize) as u16
+    frame.render_widget(Paragraph::new(Text::from(viewport.visible_rows)), text_area);
+
+    if let Some(scrollbar_area) = scrollbar_area {
+        let mut state = ScrollbarState::new(viewport.total_rows)
+            .position(viewport.scroll)
+            .viewport_content_length(viewport.visible_height);
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .thumb_style(Style::default().fg(Color::Cyan))
+                .track_style(Style::default().fg(Color::DarkGray))
+                .begin_symbol(None)
+                .end_symbol(None),
+            scrollbar_area,
+            &mut state,
+        );
+    }
 }
 
-fn transcript_visible_lines(area: Rect, shell: &TuiShellState) -> Vec<Line<'static>> {
-    let raw_lines: Vec<String> = if shell.transcript().is_empty() {
-        vec!["No messages yet. Type text to chat or /help for commands.".to_string()]
+#[derive(Debug)]
+struct TranscriptViewport {
+    visible_rows: Vec<Line<'static>>,
+    total_rows: usize,
+    scroll: usize,
+    visible_height: usize,
+    scrollbar_visible: bool,
+}
+
+fn build_transcript_viewport(area: Rect, shell: &TuiShellState) -> TranscriptViewport {
+    let visible_height = area.height as usize;
+    if visible_height == 0 {
+        return TranscriptViewport {
+            visible_rows: Vec::new(),
+            total_rows: 0,
+            scroll: 0,
+            visible_height: 0,
+            scrollbar_visible: false,
+        };
+    }
+
+    let max_width = area.width.max(1) as usize;
+    let rows_without_scrollbar = build_transcript_rows(shell, max_width);
+    let mut scrollbar_visible = rows_without_scrollbar.len() > visible_height;
+    let mut rows = if scrollbar_visible && max_width > 1 {
+        build_transcript_rows(shell, max_width.saturating_sub(1).max(1))
+    } else {
+        rows_without_scrollbar
+    };
+    scrollbar_visible = rows.len() > visible_height;
+
+    let total_rows = rows.len();
+    let max_scroll = total_rows.saturating_sub(visible_height);
+    let scroll = if shell.transcript_follow {
+        max_scroll
+    } else {
+        usize::from(shell.transcript_scroll).min(max_scroll)
+    };
+
+    let visible_rows = if total_rows == 0 {
+        Vec::new()
+    } else {
+        rows.drain(scroll..(scroll + visible_height).min(total_rows))
+            .collect()
+    };
+
+    TranscriptViewport {
+        visible_rows,
+        total_rows,
+        scroll,
+        visible_height,
+        scrollbar_visible,
+    }
+}
+
+fn build_transcript_rows(shell: &TuiShellState, width: usize) -> Vec<Line<'static>> {
+    let logical_lines = if shell.transcript().is_empty() {
+        vec![Line::raw(
+            "No messages yet. Type text to chat or /help for commands.".to_string(),
+        )]
     } else {
         shell
             .transcript()
             .iter()
-            .map(|line| format!("[{}] {}", line.role, line.content))
+            .flat_map(transcript_message_lines)
             .collect()
     };
 
-    let inner_width = area.width.saturating_sub(2).max(1) as usize;
-    let mut wrapped = Vec::new();
-    for line in raw_lines {
-        for segment in line.split('\n') {
-            let chars = segment.chars().collect::<Vec<_>>();
-            if chars.is_empty() {
-                wrapped.push(String::new());
-                continue;
+    wrap_styled_lines(logical_lines, width.max(1))
+}
+
+fn transcript_message_lines(line: &UiLine) -> Vec<Line<'static>> {
+    let role_style = role_style(&line.role);
+    let prefix = format!("[{}] ", line.role);
+    let continuation = " ".repeat(prefix.chars().count());
+    let content_lines = if line.role == "assistant" {
+        format_assistant_markdown(&line.content)
+    } else {
+        plain_content_lines(&line.content)
+    };
+
+    if content_lines.is_empty() {
+        return vec![Line::from(vec![Span::styled(prefix, role_style)])];
+    }
+
+    content_lines
+        .into_iter()
+        .enumerate()
+        .map(|(index, content)| {
+            let mut spans = Vec::with_capacity(content.spans.len() + 1);
+            if index == 0 {
+                spans.push(Span::styled(prefix.clone(), role_style));
+            } else {
+                spans.push(Span::styled(
+                    continuation.clone(),
+                    Style::default().fg(Color::DarkGray),
+                ));
             }
-            for chunk in chars.chunks(inner_width) {
-                wrapped.push(chunk.iter().collect::<String>());
+            spans.extend(content.spans);
+            Line::from(spans)
+        })
+        .collect()
+}
+
+fn plain_content_lines(content: &str) -> Vec<Line<'static>> {
+    let lines: Vec<Line<'static>> = content
+        .split('\n')
+        .map(|segment| Line::from(vec![Span::raw(segment.to_string())]))
+        .collect();
+    if lines.is_empty() {
+        vec![Line::default()]
+    } else {
+        lines
+    }
+}
+
+fn format_assistant_markdown(content: &str) -> Vec<Line<'static>> {
+    let mut rendered = Vec::new();
+    let mut in_code_block = false;
+    for raw_line in content.split('\n') {
+        let trimmed = raw_line.trim_start();
+        if trimmed.starts_with("```") {
+            if in_code_block {
+                in_code_block = false;
+            } else {
+                in_code_block = true;
+                let code_language = trimmed
+                    .trim_start_matches("```")
+                    .split_whitespace()
+                    .next()
+                    .filter(|lang| !lang.is_empty())
+                    .map(str::to_string);
+                if let Some(lang) = code_language {
+                    rendered.push(Line::from(vec![Span::styled(
+                        format!("```{lang}"),
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::ITALIC),
+                    )]));
+                }
             }
+            continue;
+        }
+
+        if in_code_block {
+            rendered.push(Line::from(vec![Span::styled(
+                raw_line.to_string(),
+                Style::default().fg(CODE_BLOCK_FG).bg(CODE_BLOCK_BG),
+            )]));
+            continue;
+        }
+
+        if raw_line.trim().is_empty() {
+            rendered.push(Line::default());
+            continue;
+        }
+
+        if let Some(rest) = parse_heading(trimmed) {
+            rendered.push(Line::from(parse_inline_markdown(
+                rest,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            continue;
+        }
+
+        if let Some(rest) = trimmed.strip_prefix("> ") {
+            let mut spans = vec![Span::styled(
+                "▎ ".to_string(),
+                Style::default().fg(Color::LightBlue),
+            )];
+            spans.extend(parse_inline_markdown(
+                rest,
+                Style::default().fg(Color::LightBlue),
+            ));
+            rendered.push(Line::from(spans));
+            continue;
+        }
+
+        if let Some(rest) = parse_list_item(trimmed) {
+            let mut spans = vec![Span::styled(
+                "• ".to_string(),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            )];
+            spans.extend(parse_inline_markdown(rest, Style::default()));
+            rendered.push(Line::from(spans));
+            continue;
+        }
+
+        rendered.push(Line::from(parse_inline_markdown(
+            raw_line,
+            Style::default(),
+        )));
+    }
+
+    if rendered.is_empty() {
+        plain_content_lines(content)
+    } else {
+        rendered
+    }
+}
+
+fn parse_heading(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    let hashes = trimmed.chars().take_while(|c| *c == '#').count();
+    if hashes == 0 || hashes > 6 {
+        return None;
+    }
+    trimmed[hashes..].strip_prefix(' ').map(str::trim_end)
+}
+
+fn parse_list_item(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    for prefix in ["- ", "* ", "+ "] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            return Some(rest);
         }
     }
-
-    let inner_height = area.height.saturating_sub(2) as usize;
-    if inner_height == 0 {
-        return Vec::new();
+    let digit_count = trimmed.chars().take_while(|c| c.is_ascii_digit()).count();
+    if digit_count > 0 {
+        let remainder = &trimmed[digit_count..];
+        if let Some(rest) = remainder.strip_prefix(". ") {
+            return Some(rest);
+        }
     }
+    None
+}
 
-    let max_scroll = transcript_scroll_offset(area, &wrapped);
-    let scroll = if shell.transcript_follow {
-        max_scroll
+fn parse_inline_markdown(line: &str, base_style: Style) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut in_code = false;
+    let mut buffer = String::new();
+    for ch in line.chars() {
+        if ch == '`' {
+            if !buffer.is_empty() {
+                spans.push(Span::styled(
+                    std::mem::take(&mut buffer),
+                    if in_code {
+                        base_style.fg(Color::Yellow).bg(Color::DarkGray)
+                    } else {
+                        base_style
+                    },
+                ));
+            }
+            in_code = !in_code;
+            continue;
+        }
+        buffer.push(ch);
+    }
+    if !buffer.is_empty() {
+        spans.push(Span::styled(
+            buffer,
+            if in_code {
+                base_style.fg(Color::Yellow).bg(Color::DarkGray)
+            } else {
+                base_style
+            },
+        ));
+    }
+    if spans.is_empty() {
+        vec![Span::styled(String::new(), base_style)]
     } else {
-        shell.transcript_scroll.min(max_scroll)
-    } as usize;
+        spans
+    }
+}
 
+fn wrap_styled_lines(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    let mut wrapped = Vec::new();
+    for line in lines {
+        if line.spans.is_empty() {
+            wrapped.push(Line::default());
+            continue;
+        }
+        let mut current = Vec::new();
+        let mut current_width = 0usize;
+        for span in line.spans {
+            let style = span.style;
+            let mut segment = String::new();
+            for ch in span.content.chars() {
+                segment.push(ch);
+                current_width += 1;
+                if current_width == width {
+                    current.push(Span::styled(std::mem::take(&mut segment), style));
+                    wrapped.push(Line::from(std::mem::take(&mut current)));
+                    current_width = 0;
+                }
+            }
+            if !segment.is_empty() {
+                current.push(Span::styled(segment, style));
+            }
+        }
+        if current.is_empty() {
+            wrapped.push(Line::default());
+        } else {
+            wrapped.push(Line::from(current));
+        }
+    }
     wrapped
-        .into_iter()
-        .skip(scroll)
-        .take(inner_height)
-        .map(Line::raw)
-        .collect()
+}
+
+fn role_style(role: &str) -> Style {
+    match role {
+        "assistant" => Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+        "user" => Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD),
+        "system" => Style::default().fg(Color::Yellow),
+        "error" => Style::default().fg(Color::Red),
+        "status" => Style::default().fg(Color::Magenta),
+        _ => Style::default().fg(Color::White),
+    }
 }
 
 fn render_sessions_sidebar(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
@@ -4289,9 +4570,11 @@ mod tests {
     };
 
     use super::{
-        AsyncUiEvent, BinaryLaunchTarget, DaemonBackedTuiApp, FocusTarget, PendingSubmission,
-        ScreenRoute, TuiApp, TuiCommand, TuiShellState, UiLine, Workspace,
-        finalize_streamed_assistant, handle_async_ui_event, handle_pending_local_command,
+        AsyncUiEvent, BinaryLaunchTarget, CODE_BLOCK_BG, DaemonBackedTuiApp, FocusTarget,
+        PendingSubmission, ScreenRoute, TuiApp, TuiCommand, TuiShellState, UiLine, Workspace,
+        build_transcript_rows, build_transcript_viewport, finalize_streamed_assistant,
+        format_assistant_markdown,
+        handle_async_ui_event, handle_pending_local_command,
         handle_pending_timeout, parse_callback_request, parse_tui_command,
         resolve_binary_launch_target, start_async_submit, status_line,
         wait_for_oauth_callback,
@@ -4302,6 +4585,7 @@ mod tests {
         OAuthProviderKind, SessionId, SessionSummary,
     };
     use oberon4_daemon::{DaemonApp, DaemonIpcClient, DaemonRuntime, serve_unix_socket};
+    use ratatui::{layout::Rect, style::{Color, Modifier}};
 
     #[test]
     fn status_line_includes_endpoint_and_model() {
@@ -4658,6 +4942,70 @@ mod tests {
 
         shell.scroll_transcript_to_bottom();
         assert!(shell.transcript_follow);
+    }
+
+    #[test]
+    fn transcript_viewport_shows_scrollbar_for_overflow() {
+        let mut shell = TuiShellState::default();
+        for idx in 0..20 {
+            shell.transcript.push(UiLine {
+                role: "assistant".to_string(),
+                content: format!("line {idx}"),
+            });
+        }
+
+        let viewport = build_transcript_viewport(
+            Rect {
+                x: 0,
+                y: 0,
+                width: 40,
+                height: 6,
+            },
+            &shell,
+        );
+
+        assert!(viewport.scrollbar_visible);
+        assert!(viewport.total_rows > viewport.visible_height);
+    }
+
+    #[test]
+    fn assistant_markdown_formats_code_blocks_and_inline_code() {
+        let lines = format_assistant_markdown(
+            "## Example\nUse `sqrt` here.\n```python\n    print('hi')\n```",
+        );
+
+        assert!(lines[0]
+            .spans
+            .iter()
+            .any(|span| span.style.add_modifier.contains(Modifier::BOLD)));
+        assert!(lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .any(|span| span.content.contains("sqrt") && span.style.bg == Some(Color::DarkGray)));
+        assert!(lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .any(|span| span.content.contains("print('hi')") && span.style.bg == Some(CODE_BLOCK_BG)));
+    }
+
+    #[test]
+    fn transcript_rows_render_assistant_markdown_with_role_prefix() {
+        let mut shell = TuiShellState::default();
+        shell.transcript.push(UiLine {
+            role: "assistant".to_string(),
+            content: "- one\n- two".to_string(),
+        });
+
+        let rows = build_transcript_rows(&shell, 40);
+
+        assert!(rows[0]
+            .spans
+            .iter()
+            .any(|span| span.content.contains("[assistant]")));
+        assert!(rows
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .any(|span| span.content.contains("• ")));
     }
 
     #[test]
