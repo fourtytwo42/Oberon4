@@ -1,0 +1,29 @@
+Policy validator medium-risk missing self-evaluation metadata
+
+Issue: #1
+Type: chore
+Risk: medium
+Assumptions: test assumptions
+Rollback: revert commit
+ResearchInputs: AGENTS.md#14.2, scripts/validate-commit-message.sh
+EvidenceScope: in=policy metadata checks; out=runtime behavior
+WorkflowType: maintenance
+WorkflowMode: plan-build
+TaskState: verify
+FR-101: met, AC-101: met
+QualitySignals: churn: stable test scenario
+ReviewPasses: pass1-logic-security,pass2-maintainability
+ReviewFocus: security
+AgentRole: implementer
+StackProfile: polyglot
+AgentDepth: 1
+Delegation: none
+SpawnedAgents: 0
+Invocation: run-agent.sh
+Observability: logs=unchanged,metrics=unchanged,alerts=unchanged
+NoNewFacts: yes
+Traceability: FR-101, AC-101
+
+Verification:
+$ bash scripts/check-policy-stack.sh
+Output: policy stack healthy

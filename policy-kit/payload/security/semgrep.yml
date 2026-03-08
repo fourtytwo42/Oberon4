@@ -1,0 +1,43 @@
+rules:
+  - id: bash-no-eval
+    message: Avoid eval in shell scripts.
+    severity: ERROR
+    languages: [bash]
+    paths:
+      include:
+        - /scripts/*.sh
+        - /scripts/**/*.sh
+      exclude:
+        - /policy-kit/payload/**
+    pattern-regex: '(^|[^A-Za-z0-9_])eval[[:space:]]'
+
+  - id: javascript-no-execsync
+    message: Avoid execSync in control-plane scripts; prefer spawn/spawnSync with explicit arguments.
+    severity: ERROR
+    languages: [javascript]
+    paths:
+      include:
+        - /scripts/*.js
+      exclude:
+        - /policy-kit/payload/**
+    pattern-either:
+      - pattern: execSync(...)
+      - pattern: child_process.execSync(...)
+
+  - id: rust-no-unsafe
+    message: Avoid introducing unsafe blocks in Rust crates without a dedicated review path.
+    severity: ERROR
+    languages: [rust]
+    paths:
+      include:
+        - /crates/*.rs
+        - /crates/**/*.rs
+      exclude:
+        - /target/**
+        # Reviewed env-mutation call sites that are already covered by existing tests.
+        - /crates/oberon4-cli/src/lib.rs
+        - /crates/oberon4-cli/tests/end_to_end.rs
+        - /crates/oberon4-daemon/src/lib.rs
+        - /crates/oberon4-provider-openai/src/lib.rs
+        - /crates/oberon4-tui/src/lib.rs
+    pattern: unsafe { ... }

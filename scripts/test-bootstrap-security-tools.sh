@@ -62,11 +62,16 @@ cat > "${MOCK_BIN}/cargo" <<'SH'
 set -euo pipefail
 if [[ "${1:-}" == "install" ]]; then
   root=""
+  package=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --root)
         root="$2"
         shift 2
+        ;;
+      cargo-audit|cargo-deny)
+        package="$1"
+        shift
         ;;
       *)
         shift
@@ -74,12 +79,24 @@ if [[ "${1:-}" == "install" ]]; then
     esac
   done
   mkdir -p "${root}/bin"
-  cat > "${root}/bin/cargo-audit" <<'INNER'
+  if [[ "${package}" == "cargo-audit" ]]; then
+    cat > "${root}/bin/cargo-audit" <<'INNER'
 #!/usr/bin/bash
 echo "cargo-audit 1.0"
 INNER
-  chmod +x "${root}/bin/cargo-audit"
-  echo "mock cargo-audit install ok"
+    chmod +x "${root}/bin/cargo-audit"
+    echo "mock cargo-audit install ok"
+    exit 0
+  fi
+  if [[ "${package}" == "cargo-deny" ]]; then
+    cat > "${root}/bin/cargo-deny" <<'INNER'
+#!/usr/bin/bash
+echo "cargo-deny 1.0"
+INNER
+    chmod +x "${root}/bin/cargo-deny"
+    echo "mock cargo-deny install ok"
+    exit 0
+  fi
   exit 0
 fi
 echo "unexpected cargo args: $*" >&2
@@ -105,21 +122,34 @@ echo "gitleaks 8.30.0"
 SH
 chmod +x "${GITLEAKS_STAGE_DIR}/gitleaks"
 tar -czf "${TMP_DIR}/gitleaks.tar.gz" -C "${GITLEAKS_STAGE_DIR}" gitleaks
+
+CARGO_DENY_STAGE_DIR="${TMP_DIR}/cargo-deny-0.19.0-x86_64-unknown-linux-musl"
+mkdir -p "${CARGO_DENY_STAGE_DIR}"
+cat > "${CARGO_DENY_STAGE_DIR}/cargo-deny" <<'SH'
+#!/usr/bin/bash
+echo "cargo-deny 0.19.0"
+SH
+chmod +x "${CARGO_DENY_STAGE_DIR}/cargo-deny"
+tar -czf "${TMP_DIR}/cargo-deny.tar.gz" -C "${TMP_DIR}" "$(basename "${CARGO_DENY_STAGE_DIR}")"
+
 printf 'print(\"get-pip\")\n' > "${TMP_DIR}/get-pip.py"
 
 SUCCESS_OUTPUT="${TMP_DIR}/success.out"
 env PATH="${MOCK_BIN}:/usr/bin:/bin" \
   HOME="${HOME_DIR}" \
   BOOTSTRAP_GITLEAKS_URL="file://${TMP_DIR}/gitleaks.tar.gz" \
+  BOOTSTRAP_CARGO_DENY_URL="file://${TMP_DIR}/cargo-deny.tar.gz" \
   BOOTSTRAP_GET_PIP_URL="file://${TMP_DIR}/get-pip.py" \
   bash "${BOOTSTRAP_SCRIPT}" >"${SUCCESS_OUTPUT}" 2>&1
 
 [[ -x "${HOME_DIR}/.local/bin/gitleaks" ]] || { echo "missing installed gitleaks" >&2; exit 1; }
 [[ -x "${HOME_DIR}/.local/bin/semgrep" ]] || { echo "missing installed semgrep" >&2; exit 1; }
 [[ -x "${HOME_DIR}/.cargo/bin/cargo-audit" ]] || { echo "missing installed cargo-audit" >&2; exit 1; }
+[[ -x "${HOME_DIR}/.cargo/bin/cargo-deny" ]] || { echo "missing installed cargo-deny" >&2; exit 1; }
 assert_contains "${SUCCESS_OUTPUT}" "[bootstrap-security-tools] installed gitleaks to ${HOME_DIR}/.local/bin/gitleaks"
 assert_contains "${SUCCESS_OUTPUT}" "[bootstrap-security-tools] installed semgrep to ${HOME_DIR}/.local/bin/semgrep"
 assert_contains "${SUCCESS_OUTPUT}" "[bootstrap-security-tools] installed cargo-audit to ${HOME_DIR}/.cargo/bin/cargo-audit"
+assert_contains "${SUCCESS_OUTPUT}" "[bootstrap-security-tools] installed cargo-deny to ${HOME_DIR}/.cargo/bin/cargo-deny"
 assert_contains "${SUCCESS_OUTPUT}" "[bootstrap-security-tools] add to PATH: export PATH=\"${HOME_DIR}/.local/bin:${HOME_DIR}/.cargo/bin:\$PATH\""
 assert_contains "${SUCCESS_OUTPUT}" "[bootstrap-security-tools] PASS"
 [[ ! -e "${HOME_DIR}/.bashrc" ]] || { echo "bootstrap should not mutate shell profiles" >&2; exit 1; }
@@ -129,6 +159,7 @@ if env PATH="${MOCK_BIN}:/usr/bin:/bin" \
   HOME="${HOME_DIR}" \
   MOCK_PIP_MISSING=1 \
   BOOTSTRAP_GITLEAKS_URL="file://${TMP_DIR}/gitleaks.tar.gz" \
+  BOOTSTRAP_CARGO_DENY_URL="file://${TMP_DIR}/cargo-deny.tar.gz" \
   BOOTSTRAP_GET_PIP_URL="file://${TMP_DIR}/missing-get-pip.py" \
   bash "${BOOTSTRAP_SCRIPT}" >"${FAIL_OUTPUT}" 2>&1; then
   echo "expected bootstrap failure for missing get-pip source" >&2

@@ -92,10 +92,15 @@ cat > "${MOCK_BIN}/semgrep" <<'SH'
 #!/usr/bin/bash
 set -euo pipefail
 output_path=""
+config_path=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --output)
       output_path="$2"
+      shift 2
+      ;;
+    --config)
+      config_path="$2"
       shift 2
       ;;
     *)
@@ -103,12 +108,23 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+if [[ "${config_path}" != "/home/hendo420/Oberon4/security/semgrep.yml" ]]; then
+  echo "unexpected semgrep config: ${config_path}" >&2
+  exit 1
+fi
 if [[ -n "${output_path}" ]]; then
   printf '{"results":[]}\n' > "${output_path}"
 fi
 echo "semgrep ok"
 SH
 chmod +x "${MOCK_BIN}/semgrep"
+
+cat > "${MOCK_BIN}/cargo-deny" <<'SH'
+#!/usr/bin/bash
+set -euo pipefail
+printf '{"cargo-deny":"ok"}\n'
+SH
+chmod +x "${MOCK_BIN}/cargo-deny"
 
 cat > "${MOCK_BIN}/cargo-audit" <<'SH'
 #!/usr/bin/bash

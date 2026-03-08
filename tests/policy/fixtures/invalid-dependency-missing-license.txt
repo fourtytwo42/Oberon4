@@ -1,0 +1,12 @@
+Dependency metadata missing license check (invalid)
+
+Issue: #1
+Type: chore
+Risk: low
+ReviewFocus: security
+DependencyCheck: registry-verified,pinned,maintained - npm registry and maintainer reviewed
+Traceability: FR-101, AC-101
+
+Verification:
+$ echo dependency check
+Output: done

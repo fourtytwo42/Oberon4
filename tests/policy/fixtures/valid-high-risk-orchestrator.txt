@@ -1,0 +1,45 @@
+High-risk orchestrator metadata valid case
+
+Issue: #1
+Type: chore
+Risk: high
+Plan: docs/plans/README.md
+Assumptions: policy-only validation scenario
+Rollback: revert commit
+ResearchInputs: AGENTS.md#3.4, docs/policy/local-enforcement.md, scripts/validate-commit-message.sh
+EvidenceScope: in=policy+validation updates; out=application runtime changes
+SelfEval: pass
+PolicyDelta: none
+WorkflowType: collaboration
+WorkflowMode: incremental-gates
+TaskState: done
+FR-101: met, AC-101: met
+QualitySignals: churn: controlled high-risk validation
+ReviewPasses: pass1-logic-security,pass2-maintainability
+ReviewFocus: security
+AgentRole: orchestrator
+StackProfile: polyglot
+AgentDepth: 0
+Delegation: none
+Observability: logs=unchanged,metrics=unchanged,alerts=unchanged
+DataHandling: pii=none,retention=not-applicable,logs=not-applicable
+NoNewFacts: yes
+PhaseCheckpoint: docs/handoffs/handoff-test.md
+ThreatModel: both
+RollbackRehearsal: simulated - validated revert path
+MitigationPlan: rollback - immediate rollback trigger documented
+ReleaseStrategy: staged - limited rollout
+Runbook: docs/runbooks/runbook-test.md
+SecondReview: yes
+SecuritySignoff: human+tooling
+SecurityScans: sast=not-applicable,dependency=not-applicable,sbom=not-applicable,secrets=pass,dast=not-applicable
+ReviewPacket: assumptions,threat-model,test-plan,rollback-plan
+PerfBaseline: not-applicable - no runtime change
+PerfBudget: not-applicable - no budget change
+PerfProfile: not-applicable - no profile target
+PerfBench: not-applicable - no benchmark target
+Traceability: FR-101, AC-101
+
+Verification:
+$ echo high risk validation
+Output: done

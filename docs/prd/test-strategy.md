@@ -12,6 +12,9 @@ Required scopes:
 - canonical gate: `GATE_MODE=strict bash scripts/oberon4-gate.sh`
 - smoke gate: `GATE_MODE=smoke bash scripts/oberon4-gate.sh`
 - canonical repair loop: `bash scripts/repair-loop.sh`
+- hooks install: `bash scripts/install-git-hooks.sh`
+- policy stack check: `bash scripts/check-policy-stack.sh`
+- policy drift audit: `bash scripts/policy-drift-audit.sh`
 - security tool bootstrap: `bash scripts/bootstrap-security-tools.sh`
 - canonical security gate: `bash scripts/oberon4-security-gate.sh`
 - artifact pruning: `bash scripts/prune-artifacts.sh --dry-run`
@@ -33,8 +36,10 @@ Gate behavior:
 - failed gate or local-live runs write a troubleshooting bundle under `artifacts/failures/<timestamp>-<entrypoint>-<pid>/`
 - repair-loop runs write machine-readable stage logs and `summary.json` under `artifacts/repair-loop/<timestamp>-<pid>/`
 - failure bundles now include `logs-tail.txt`, `request-summary.txt`, and `evidence-summary.json` in addition to the existing doctor/config/runtime artifacts
-- the security gate requires `gitleaks`, `semgrep`, and `cargo-audit`; `bash scripts/bootstrap-security-tools.sh` is the canonical bootstrap path and missing tools are hard failures for `scripts/oberon4-security-gate.sh`
+- the security gate requires `gitleaks`, `semgrep`, `cargo-audit`, and `cargo-deny`; `bash scripts/bootstrap-security-tools.sh` is the canonical bootstrap path and missing tools are hard failures for `scripts/oberon4-security-gate.sh`
+- SAST policy is pinned in `security/semgrep.yml`; avoid `semgrep --config auto` for repo enforcement
 - the security gate writes machine-readable run artifacts under `artifacts/security-gate/<timestamp>-<pid>/`, including `summary.json`, per-stage logs, and stage reports
+- dependency and license policy is enforced through `deny.toml` and the security gate's `cargo-deny` stage
 - existing approved secret findings are quarantined only through `security/gitleaks-baseline.json`; new findings outside the baseline remain blocking
 
 ## 2.1 Optional Live Hotspot Smoke
@@ -68,6 +73,7 @@ Rules:
 - if the initial `doctor --json` stage fails and local recovery is appropriate, use `RUN_REPAIR_REMEDIATE=1 bash scripts/repair-loop.sh` to attempt a local rebuild plus daemon restart before re-running diagnosis
 - use `scripts/prune-artifacts.sh --dry-run` to review stale runtime evidence before removing old bundles
 - bootstrap security tools before local enforcement if the security profile has not been provisioned on the machine yet
+- install hooks before `scripts/check-policy-stack.sh` so `core.hooksPath` is in the expected machine-ready state
 
 ## 3. Coverage Expectations by Requirement
 - `FR-001`: lifecycle tests (start, health, graceful stop)
@@ -89,3 +95,4 @@ Rules:
 - config, session, and secret-store changes require fixture-backed compatibility coverage for additive legacy shapes
 - account metadata persistence changes require fixture-backed compatibility coverage for additive legacy registry shapes
 - security hardening changes require reviewed updates to `security/gitleaks.toml`, `security/gitleaks-baseline.json`, and the secret triage runbook/checklist when the baseline changes
+- SAST and dependency-policy changes require reviewed updates to `security/semgrep.yml` and `deny.toml`

@@ -9,6 +9,9 @@ Status: active
 - [ ] `docs/plans/plan-oberon4-v0.1-build.md` has all tasks checked
 
 ## Verification Evidence
+- [ ] `bash scripts/install-git-hooks.sh`
+- [ ] `bash scripts/check-policy-stack.sh`
+- [ ] `bash scripts/policy-drift-audit.sh`
 - [ ] `bash scripts/repair-loop.sh`
 - [ ] `GATE_MODE=strict bash scripts/oberon4-gate.sh`
 - [ ] PTY TUI smoke: `bash scripts/tui-pty-smoke.sh`
@@ -41,6 +44,8 @@ Status: active
 - [ ] `oberon4 doctor --json` returns valid JSON with no secret/token values and includes local runtime metadata (`config_path`, `data_dir`, `socket_path`, `api_key_env`, `config_exists`, `daemon_reachable`) plus control-plane fields (`version_check`, `models_check`, `auth_check`, `diagnostics_check`, `available_models`, `endpoint_version`, `auth_summary`, `diagnostics_summary`, `last_error`)
 - [ ] diagnostics and live verification succeed when the configured API-key env is available either from the exported shell env or the local Oberon4 secret store
 - [ ] `security/gitleaks-baseline.json` is present, reviewed, and only suppresses approved existing findings
+- [ ] `security/semgrep.yml` is present, reviewed, and used by the security gate
+- [ ] `deny.toml` is present, reviewed, and used by the security gate
 - [ ] `docs/security/runbook-secret-triage.md` and `docs/security/security-checklist-secret-triage.md` are current
 - [ ] responders know to inspect `artifacts/failures/<timestamp>-<entrypoint>-<pid>/` for `summary.json`, `commands.txt`, `env.txt`, logs, `effective-config.json`, and doctor output before retrying
 - [ ] responders know failure bundles now include `daemon-runtime.txt` plus best-effort `daemon-out.log` and `daemon-err.log`
@@ -50,7 +55,7 @@ Status: active
 - [ ] live-local smoke confirms the configured model is advertised by `/v1/models` and that `/v1/auth/status` plus `/v1/diagnostics` return valid JSON
 - [ ] optional maintenance command `bash scripts/prune-artifacts.sh --dry-run` has been reviewed before pruning old runtime evidence
 - [ ] security run artifacts under `artifacts/security-gate/` are available for the latest security gate run
-- [ ] operators understand the security gate is opt-in-first in this slice and not yet a default pre-push requirement
+- [ ] operators understand strict local enforcement now includes the security gate by default once the security toolchain is bootstrapped
 
 ## Human Test Entry
 - [ ] `docs/runbooks/oberon4-human-test-checklist.md` exists

@@ -1,0 +1,30 @@
+Policy validator medium-risk subagent invalid direct codex usage
+
+Issue: #1
+Type: chore
+Risk: medium
+Assumptions: test assumptions
+Rollback: revert commit
+ResearchInputs: AGENTS.md#3.4, scripts/validate-commit-message.sh
+EvidenceScope: in=validator behavior; out=runtime changes
+SelfEval: pass
+PolicyDelta: none
+WorkflowType: maintenance
+WorkflowMode: plan-build
+TaskState: verify
+FR-101: met, AC-101: met
+QualitySignals: churn: stable test scenario
+ReviewPasses: pass1-logic-security,pass2-maintainability
+ReviewFocus: security
+AgentRole: verifier
+StackProfile: polyglot
+AgentDepth: 1
+Delegation: none
+SpawnedAgents: 0
+Observability: logs=unchanged,metrics=unchanged,alerts=unchanged
+NoNewFacts: yes
+Traceability: FR-101, AC-101
+
+Verification:
+$ codex exec "do thing"
+Output: done

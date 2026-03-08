@@ -173,14 +173,19 @@ Notes:
     - at least one commit marked `Risk: high`
     - at least 2 verification commands in commit messages
     - explicit rollback note in commit messages
-  - Runs local security gate: secret scan, SAST, dependency audit
+  - Runs local security gate: secret scan, pinned SAST, dependency audit, dependency/license policy
   - Oberon4 canonical security gate is `bash scripts/oberon4-security-gate.sh`
-    - required tools: `gitleaks`, `semgrep`, `cargo-audit`
+    - required tools: `gitleaks`, `semgrep`, `cargo-audit`, `cargo-deny`
     - canonical bootstrap: `bash scripts/bootstrap-security-tools.sh`
     - local enforcement now expects the security profile to be present by default
     - existing approved findings must live in `security/gitleaks-baseline.json`
+    - pinned Semgrep policy lives in `security/semgrep.yml`
+    - dependency/license policy lives in `deny.toml`
     - troubleshoot and refresh baseline only through `docs/security/runbook-secret-triage.md`
     - explicit operator invocation:
+      - `bash scripts/install-git-hooks.sh`
+      - `bash scripts/check-policy-stack.sh`
+      - `bash scripts/policy-drift-audit.sh`
       - `bash scripts/bootstrap-security-tools.sh`
       - `bash scripts/oberon4-security-gate.sh`
       - `RUN_SECURITY_GATE=1 GATE_MODE=smoke bash scripts/oberon4-gate.sh`
@@ -290,6 +295,14 @@ export CHURN_ESCALATION_LINES=300
 ```
 
 ### Local utility workflows
+
+- Hooks-ready machine bootstrap:
+
+```bash
+bash scripts/install-git-hooks.sh
+bash scripts/check-policy-stack.sh
+bash scripts/policy-drift-audit.sh
+```
 
 - Build focused context pack from git range:
 

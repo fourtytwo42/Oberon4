@@ -9,6 +9,8 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 : "${RUN_SECRET_SCAN:=1}"
 : "${RUN_SAST:=1}"
 : "${RUN_DEPENDENCY_AUDIT:=1}"
+: "${SEMGREP_CONFIG_PATH:=${ROOT_DIR}/security/semgrep.yml}"
+: "${CARGO_DENY_CONFIG_PATH:=${ROOT_DIR}/deny.toml}"
 : "${GITLEAKS_CONFIG_PATH:=${ROOT_DIR}/security/gitleaks.toml}"
 : "${GITLEAKS_BASELINE_PATH:=${ROOT_DIR}/security/gitleaks-baseline.json}"
 
@@ -20,9 +22,11 @@ mkdir -p "${RUN_DIR}"
 secret_scan_status="skipped"
 sast_status="skipped"
 dependency_audit_status="skipped"
+dependency_policy_status="skipped"
 [[ "${RUN_SECRET_SCAN}" == "1" ]] && secret_scan_status="pending"
 [[ "${RUN_SAST}" == "1" ]] && sast_status="pending"
 [[ "${RUN_DEPENDENCY_AUDIT}" == "1" ]] && dependency_audit_status="pending"
+[[ "${RUN_DEPENDENCY_AUDIT}" == "1" ]] && dependency_policy_status="pending"
 
 COMMAND_HISTORY=()
 
@@ -44,6 +48,7 @@ set_stage_status() {
     secret_scan) secret_scan_status="${status}" ;;
     sast) sast_status="${status}" ;;
     dependency_audit) dependency_audit_status="${status}" ;;
+    dependency_policy) dependency_policy_status="${status}" ;;
     *) echo "unknown stage ${step_name}" >&2; exit 1 ;;
   esac
 }
@@ -56,6 +61,7 @@ write_summary() {
   SECRET_SCAN_STATUS="${secret_scan_status}" \
   SAST_STATUS="${sast_status}" \
   DEPENDENCY_AUDIT_STATUS="${dependency_audit_status}" \
+  DEPENDENCY_POLICY_STATUS="${dependency_policy_status}" \
   node <<'NODE'
 const fs = require("fs");
 const path = require("path");
@@ -78,6 +84,12 @@ const stages = [
     status: process.env.DEPENDENCY_AUDIT_STATUS,
     log_path: path.join(process.env.RUN_DIR, "dependency_audit.log"),
     report_path: path.join(process.env.RUN_DIR, "cargo-audit-report.json"),
+  },
+  {
+    name: "dependency_policy",
+    status: process.env.DEPENDENCY_POLICY_STATUS,
+    log_path: path.join(process.env.RUN_DIR, "dependency_policy.log"),
+    report_path: path.join(process.env.RUN_DIR, "cargo-deny-report.json"),
   },
 ];
 
@@ -129,6 +141,7 @@ run_step() {
       secret_scan) report_path="${RUN_DIR}/gitleaks-report.json" ;;
       sast) report_path="${RUN_DIR}/semgrep-report.json" ;;
       dependency_audit) report_path="${RUN_DIR}/cargo-audit-report.json" ;;
+      dependency_policy) report_path="${RUN_DIR}/cargo-deny-report.json" ;;
     esac
     if [[ -n "${report_path}" ]]; then
       echo "[security-gate] stage=${step_name} status=fail run_dir=${RUN_DIR} log=${log_path} report=${report_path}" >&2
@@ -166,7 +179,7 @@ if [[ "${RUN_SAST}" == "1" ]]; then
     "${RUN_DIR}/sast.log" \
     semgrep scan \
       --error \
-      --config auto \
+      --config "${SEMGREP_CONFIG_PATH}" \
       --json \
       --output "${RUN_DIR}/semgrep-report.json" \
       "${SECURITY_GATE_ROOT}"
@@ -178,6 +191,12 @@ if [[ "${RUN_DEPENDENCY_AUDIT}" == "1" ]]; then
     "dependency_audit" \
     "${RUN_DIR}/dependency_audit.log" \
     bash -lc "cargo-audit audit --json > '${RUN_DIR}/cargo-audit-report.json'"
+
+  require_tool "cargo-deny" "dependency_policy"
+  run_step \
+    "dependency_policy" \
+    "${RUN_DIR}/dependency_policy.log" \
+    bash -lc "cargo-deny --manifest-path '${ROOT_DIR}/Cargo.toml' --format json check --config '${CARGO_DENY_CONFIG_PATH}' advisories licenses bans > '${RUN_DIR}/cargo-deny-report.json'"
 fi
 
 write_commands_file "${RUN_DIR}/commands.txt"

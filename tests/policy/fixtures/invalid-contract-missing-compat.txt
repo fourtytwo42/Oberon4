@@ -1,0 +1,11 @@
+Contract metadata missing compatibility fields (invalid)
+
+Issue: #1
+Type: chore
+Risk: low
+ReviewFocus: security
+Traceability: FR-101, AC-101
+
+Verification:
+$ echo contract update
+Output: done

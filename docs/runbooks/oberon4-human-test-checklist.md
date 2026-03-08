@@ -15,11 +15,16 @@ Use this checklist only after automated gates through `EG-P8` are green.
 - `RUSTFLAGS='-C debuginfo=0'`
 
 ## Automated Preconditions
+- [ ] `bash scripts/install-git-hooks.sh`
+- [ ] `bash scripts/check-policy-stack.sh`
+- [ ] `bash scripts/policy-drift-audit.sh`
 - [ ] `bash scripts/repair-loop.sh`
   - if this fails, inspect `artifacts/repair-loop/<timestamp>-<pid>/summary.json`
   - inspect any referenced `failure_bundle_path` before reproducing manually
 - [ ] `GATE_MODE=strict bash scripts/oberon4-gate.sh`
   - if this fails, inspect `artifacts/failures/<timestamp>-oberon4-gate-<pid>/`
+- [ ] `bash scripts/oberon4-security-gate.sh`
+  - expect `gitleaks`, pinned `semgrep`, `cargo-audit`, and `cargo-deny` stages to pass
 - [ ] `cargo run -p oberon4-cli -- doctor --json`
   - expect `version_check=pass`, `models_check=pass`, `auth_check=pass`, and `diagnostics_check=pass` in the JSON output before manual troubleshooting continues
   - if `api_key_env` is configured, this should work from either the exported shell env or the local Oberon4 secret store
