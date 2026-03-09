@@ -25,6 +25,15 @@ Required scopes:
 
 Gate behavior:
 - `strict` runs `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, and `cargo test -p oberon4-cli --test end_to_end`
+- by default, `strict` and `smoke` gates now execute Rust commands with a constrained local profile for reproducibility on lower-memory machines:
+  - `TMPDIR=/home/hendo420/Oberon4/.tmp`
+  - `CARGO_TARGET_DIR=/home/hendo420/Oberon4/target`
+  - `CARGO_INCREMENTAL=0`
+  - `CARGO_PROFILE_DEV_DEBUG=0`
+  - `CARGO_PROFILE_TEST_DEBUG=0`
+  - `CARGO_BUILD_JOBS=1`
+  - `RUSTFLAGS='-C debuginfo=0'`
+- safe override path: export any of those env vars before invoking `bash scripts/oberon4-gate.sh` when a machine needs a different local build profile
 - `smoke` defaults to no heavyweight checks unless individual `RUN_*` flags are enabled
 - optional live verification remains opt-in through `RUN_LIVE_ENDPOINT_SMOKE=1` and `RUN_LIVE_DAEMON_SMOKE=1`
 - optional PTY TUI verification remains opt-in through `RUN_TUI_PTY_SMOKE=1`

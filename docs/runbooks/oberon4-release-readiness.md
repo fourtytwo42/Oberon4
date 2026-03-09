@@ -14,6 +14,8 @@ Status: active
 - [ ] `bash scripts/policy-drift-audit.sh`
 - [ ] `bash scripts/repair-loop.sh`
 - [ ] `GATE_MODE=strict bash scripts/oberon4-gate.sh`
+  - default gate profile is memory-constrained for reproducible local Rust builds: `TMPDIR=/home/hendo420/Oberon4/.tmp`, `CARGO_TARGET_DIR=/home/hendo420/Oberon4/target`, `CARGO_INCREMENTAL=0`, `CARGO_PROFILE_DEV_DEBUG=0`, `CARGO_PROFILE_TEST_DEBUG=0`, `CARGO_BUILD_JOBS=1`, `RUSTFLAGS='-C debuginfo=0'`
+  - safe override path: export different values before invoking the gate if a machine needs a different local build profile
 - [ ] PTY TUI smoke: `bash scripts/tui-pty-smoke.sh`
 - [ ] security bootstrap: `bash scripts/bootstrap-security-tools.sh`
 - [ ] security gate: `bash scripts/oberon4-security-gate.sh`

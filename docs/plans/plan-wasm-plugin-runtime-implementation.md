@@ -143,6 +143,17 @@ Evidence:
 - `cargo test -p oberon4-daemon --test plugin_runtime_execution`
 - `cargo fmt --all`
 
+WP2 stabilization follow-up:
+- [x] `WP2-S1` Upgrade Wasmtime and Wasmtime-WASI to the patched `36.0.6` line and raise the workspace Rust baseline to `1.86`
+- [x] `WP2-S2` Pin the repo-local Rust toolchain to `1.86.0`
+- [x] `WP2-S3` Align the canonical gate with the constrained Rust test profile used by local human preflight
+- [x] `WP2-S4` Re-run workspace, security, and local CI gates on the remediated stack
+Evidence:
+- `cargo test --workspace`
+- `GATE_MODE=strict RUN_SECURITY_GATE=1 bash scripts/oberon4-gate.sh`
+- `bash scripts/local-ci-gate.sh`
+- `PATH="$HOME/.cargo/bin:$PATH" bash scripts/oberon4-security-gate.sh`
+
 ### Phase 3: Secret and Service Brokers
 - [ ] `WP3.1` Implement host secret broker contract with:
   - `secret_handle`

@@ -21,8 +21,8 @@ use wasmtime::{
     component::{Component, Linker, ResourceTable},
 };
 use wasmtime_wasi::{
-    DirPerms, FilePerms,
-    p2::{IoView, WasiCtx, WasiCtxBuilder, WasiView, add_to_linker_sync, pipe::MemoryOutputPipe},
+    DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView,
+    p2::{add_to_linker_sync, pipe::MemoryOutputPipe},
 };
 
 use crate::plugin_runtime::{RegisteredPlugin, RuntimeBrokerFoundations};
@@ -30,7 +30,6 @@ use crate::plugin_runtime::{RegisteredPlugin, RuntimeBrokerFoundations};
 wasmtime::component::bindgen!({
     path: "../../wit/oberon-plugin-runtime",
     world: "oberon-plugin",
-    async: false,
 });
 
 use self::exports::oberon::plugin_runtime::plugin_runtime as guest;
@@ -54,15 +53,12 @@ struct ExecutionStoreState {
     limits: StoreLimits,
 }
 
-impl IoView for ExecutionStoreState {
-    fn table(&mut self) -> &mut ResourceTable {
-        &mut self.table
-    }
-}
-
 impl WasiView for ExecutionStoreState {
-    fn ctx(&mut self) -> &mut WasiCtx {
-        &mut self.wasi
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView {
+            ctx: &mut self.wasi,
+            table: &mut self.table,
+        }
     }
 }
 

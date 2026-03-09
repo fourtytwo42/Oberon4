@@ -34,8 +34,16 @@ run_security_gate_set=0
 : "${GATE_LOG_DIR:=${ROOT_DIR}/artifacts/gate-logs}"
 : "${GATE_FAILURE_TAIL_LINES:=40}"
 : "${GATE_ERROR_SUMMARY_LINES:=12}"
+: "${TMPDIR:=${ROOT_DIR}/.tmp}"
+: "${CARGO_TARGET_DIR:=${ROOT_DIR}/target}"
+: "${CARGO_INCREMENTAL:=0}"
+: "${CARGO_PROFILE_DEV_DEBUG:=0}"
+: "${CARGO_PROFILE_TEST_DEBUG:=0}"
+: "${CARGO_BUILD_JOBS:=1}"
+: "${RUSTFLAGS:=-C debuginfo=0}"
 
 mkdir -p "${GATE_LOG_DIR}"
+mkdir -p "${TMPDIR}"
 
 COMMAND_HISTORY=()
 
@@ -66,6 +74,13 @@ write_gate_env_file() {
     printf 'GATE_LOG_DIR=%s\n' "${GATE_LOG_DIR}"
     printf 'GATE_FAILURE_TAIL_LINES=%s\n' "${GATE_FAILURE_TAIL_LINES}"
     printf 'GATE_ERROR_SUMMARY_LINES=%s\n' "${GATE_ERROR_SUMMARY_LINES}"
+    printf 'TMPDIR=%s\n' "${TMPDIR}"
+    printf 'CARGO_TARGET_DIR=%s\n' "${CARGO_TARGET_DIR}"
+    printf 'CARGO_INCREMENTAL=%s\n' "${CARGO_INCREMENTAL}"
+    printf 'CARGO_PROFILE_DEV_DEBUG=%s\n' "${CARGO_PROFILE_DEV_DEBUG}"
+    printf 'CARGO_PROFILE_TEST_DEBUG=%s\n' "${CARGO_PROFILE_TEST_DEBUG}"
+    printf 'CARGO_BUILD_JOBS=%s\n' "${CARGO_BUILD_JOBS}"
+    printf 'RUSTFLAGS=%s\n' "${RUSTFLAGS}"
     if [[ -n "${OBERON4_LIVE_BASE_URL:-}" ]]; then
       printf 'OBERON4_LIVE_BASE_URL=%s\n' "${OBERON4_LIVE_BASE_URL}"
     fi

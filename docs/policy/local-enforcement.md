@@ -166,6 +166,15 @@ Notes:
     - build command
     - push is blocked if any required step fails
     - hook execution prepends `$HOME/.local/bin:$HOME/.cargo/bin` so bootstrap-installed security tools stay visible under git-hook PATHs
+    - Oberon4 gate commands default to a constrained Rust build profile for lower-memory reproducibility:
+      - `TMPDIR=/home/hendo420/Oberon4/.tmp`
+      - `CARGO_TARGET_DIR=/home/hendo420/Oberon4/target`
+      - `CARGO_INCREMENTAL=0`
+      - `CARGO_PROFILE_DEV_DEBUG=0`
+      - `CARGO_PROFILE_TEST_DEBUG=0`
+      - `CARGO_BUILD_JOBS=1`
+      - `RUSTFLAGS='-C debuginfo=0'`
+    - safe override path: export alternate values before invoking the gate when a machine needs a different local build profile
     - Oberon4 defaults:
       - smoke: `GATE_MODE=smoke bash scripts/oberon4-gate.sh`
       - test: `GATE_MODE=strict bash scripts/oberon4-gate.sh`

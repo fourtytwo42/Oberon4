@@ -12,5 +12,5 @@ oberon4-core = { path = "../oberon4-core" }
 oberon4-provider-openai = { path = "../oberon4-provider-openai" }
 serde.workspace = true
 serde_json.workspace = true
-wasmtime = { version = "34.0.2", default-features = false, features = ["component-model", "cranelift", "runtime", "std"] }
-wasmtime-wasi = { version = "34.0.2", default-features = false }
+wasmtime = { version = "36.0.6", default-features = false, features = ["component-model", "cranelift", "runtime", "std"] }
+wasmtime-wasi = { version = "36.0.6", default-features = false }
