@@ -9,9 +9,10 @@ use std::{
 
 use oberon4_auth::{AccountRegistry, AnthropicOAuthAdapter, OpenAiOAuthAdapter};
 use oberon4_core::{
-    AppConfig, ChatMessage, ChatProvider, ChatRole, ChatToolCallDelta, FileSecretStore,
-    InMemoryConfigStore, InMemorySecretStore, InMemorySessionStore, OAuthProvider,
-    OAuthProviderKind, OberonError, SecretStore, TokenBundle, default_data_dir,
+    AppConfig, ChatMessage, ChatProvider, ChatProviderKind, ChatRole, ChatToolCallDelta,
+    DaemonCommand, DaemonEvent, FileSecretStore, InMemoryConfigStore, InMemorySecretStore,
+    InMemorySessionStore, OAuthProvider, OAuthProviderKind, OberonError, SecretStore, TokenBundle,
+    ToolError, ToolResult, default_data_dir,
 };
 use oberon4_daemon::{DaemonIpcClient, DaemonRuntime, LogLevel, default_socket_path, log_entry};
 use oberon4_provider_openai::{
@@ -220,19 +221,8 @@ impl CliApp {
                 Ok(CliOutput::success("endpoint test passed"))
             }
             CliCommand::Chat { message } => {
-                if self.runtime.lifecycle_state() == oberon4_daemon::LifecycleState::Stopped {
-                    let _ = self.runtime.start()?;
-                }
-                let reply = self.provider_client.send_message(
-                    &self.runtime.load_config()?.endpoint.base_url,
-                    &self.runtime.load_config()?.endpoint.model,
-                    &[ChatMessage {
-                        role: ChatRole::User,
-                        content: message,
-                        tool_calls: Vec::new(),
-                    }],
-                )?;
-                Ok(CliOutput::success(reply.content))
+                ensure_daemon_running()?;
+                stream_chat_to_console(message)
             }
             CliCommand::LogsTail => Ok(CliOutput::success(log_entry(
                 LogLevel::Info,
@@ -1034,86 +1024,187 @@ fn daemon_protocol_error(event: oberon4_core::DaemonEvent) -> Result<CliOutput, 
 }
 
 fn stream_chat_to_console(message: String) -> Result<CliOutput, OberonError> {
-    let mut stdout_buffer = String::new();
-    let mut stderr_buffer = String::new();
-    let mut stdout_emitted = false;
-    let mut stderr_emitted = false;
-    let mut final_message: Option<ChatMessage> = None;
-    let mut tool_state: BTreeMap<usize, (String, String)> = BTreeMap::new();
+    let mut stream_state = CliStreamState::default();
+    let client = daemon_client()?;
 
-    daemon_client()?.send_stream(
-        &oberon4_core::DaemonCommand::SendChat {
+    stream_daemon_chat(
+        &client,
+        &DaemonCommand::SendChat {
             session_id: None,
             messages: vec![ChatMessage {
                 role: ChatRole::User,
                 content: message,
+                tool_call_id: None,
                 tool_calls: Vec::new(),
             }],
         },
-        &mut |event| match event {
-            oberon4_core::DaemonEvent::ChatChunk { content } => {
-                print!("{content}");
-                io::stdout()
-                    .flush()
-                    .map_err(|err| OberonError::Storage(format!("stdout flush failed: {err}")))?;
-                stdout_buffer.push_str(&content);
-                stdout_emitted = true;
-                Ok(())
-            }
-            oberon4_core::DaemonEvent::ToolCallDelta { delta } => {
-                let line = render_tool_delta(&mut tool_state, delta);
-                eprintln!("{line}");
-                stderr_buffer.push_str(&line);
-                stderr_buffer.push('\n');
-                stderr_emitted = true;
-                Ok(())
-            }
-            oberon4_core::DaemonEvent::ChatComplete { message } => {
-                final_message = Some(message);
-                Ok(())
-            }
-            oberon4_core::DaemonEvent::Error { message } => Err(OberonError::Validation(message)),
-            other => Err(OberonError::Storage(format!(
-                "unexpected daemon response: {other:?}"
-            ))),
-        },
+        &mut stream_state,
     )?;
 
-    let final_message = final_message.ok_or_else(|| {
+    let final_message = stream_state.final_message.ok_or_else(|| {
         OberonError::Storage("daemon stream ended without ChatComplete".to_string())
     })?;
 
-    if !stdout_emitted && !final_message.content.is_empty() {
+    if !stream_state.stdout_emitted && !final_message.content.is_empty() {
         print!("{}", final_message.content);
         io::stdout()
             .flush()
             .map_err(|err| OberonError::Storage(format!("stdout flush failed: {err}")))?;
-        stdout_buffer = final_message.content.clone();
-        stdout_emitted = true;
+        stream_state.stdout_buffer = final_message.content.clone();
+        stream_state.stdout_emitted = true;
     }
-    if stdout_emitted {
+    if stream_state.stdout_emitted {
         println!();
     }
     for tool_call in &final_message.tool_calls {
         let summary = format!("tool: {} {}", tool_call.name, tool_call.arguments);
-        if !stderr_buffer.contains(&summary) {
+        if !stream_state.stderr_buffer.contains(&summary) {
             eprintln!("{summary}");
-            stderr_buffer.push_str(&summary);
-            stderr_buffer.push('\n');
-            stderr_emitted = true;
+            stream_state.stderr_buffer.push_str(&summary);
+            stream_state.stderr_buffer.push('\n');
+            stream_state.stderr_emitted = true;
         }
     }
 
     Ok(CliOutput {
-        stdout: if stdout_buffer.is_empty() {
+        stdout: if stream_state.stdout_buffer.is_empty() {
             final_message.content
         } else {
-            stdout_buffer
+            stream_state.stdout_buffer
         },
-        stderr: stderr_buffer,
+        stderr: stream_state.stderr_buffer,
         exit_code: 0,
-        stdout_emitted,
-        stderr_emitted,
+        stdout_emitted: stream_state.stdout_emitted,
+        stderr_emitted: stream_state.stderr_emitted,
+    })
+}
+
+#[derive(Default)]
+struct CliStreamState {
+    stdout_buffer: String,
+    stderr_buffer: String,
+    stdout_emitted: bool,
+    stderr_emitted: bool,
+    final_message: Option<ChatMessage>,
+    tool_state: BTreeMap<usize, (String, String)>,
+}
+
+fn stream_daemon_chat(
+    client: &DaemonIpcClient,
+    command: &DaemonCommand,
+    state: &mut CliStreamState,
+) -> Result<(), OberonError> {
+    client.send_stream(command, &mut |event| match event {
+        DaemonEvent::ChatChunk { content } => {
+            print!("{content}");
+            io::stdout()
+                .flush()
+                .map_err(|err| OberonError::Storage(format!("stdout flush failed: {err}")))?;
+            state.stdout_buffer.push_str(&content);
+            state.stdout_emitted = true;
+            Ok(())
+        }
+        DaemonEvent::ToolCallDelta { delta } => {
+            let line = render_tool_delta(&mut state.tool_state, delta);
+            eprintln!("{line}");
+            state.stderr_buffer.push_str(&line);
+            state.stderr_buffer.push('\n');
+            state.stderr_emitted = true;
+            Ok(())
+        }
+        DaemonEvent::ToolResult { result } => {
+            let line = render_tool_result(&result);
+            eprintln!("{line}");
+            state.stderr_buffer.push_str(&line);
+            state.stderr_buffer.push('\n');
+            state.stderr_emitted = true;
+            Ok(())
+        }
+        DaemonEvent::ToolError { error } => {
+            let line = render_tool_error(&error);
+            eprintln!("{line}");
+            state.stderr_buffer.push_str(&line);
+            state.stderr_buffer.push('\n');
+            state.stderr_emitted = true;
+            Ok(())
+        }
+        DaemonEvent::ApprovalRequired {
+            approval_id,
+            payload_json,
+        } => {
+            let prompt = format!(
+                "approval required ({approval_id}): {}\napprove? [y/N]: ",
+                summarize_approval_payload(&payload_json)
+            );
+            eprint!("{prompt}");
+            io::stderr()
+                .flush()
+                .map_err(|err| OberonError::Storage(format!("stderr flush failed: {err}")))?;
+            state.stderr_buffer.push_str(&prompt);
+            let decision = read_cli_approval_decision()?;
+            state.stderr_buffer.push_str(&decision);
+            state.stderr_buffer.push('\n');
+            state.stderr_emitted = true;
+            stream_daemon_chat(
+                client,
+                &DaemonCommand::ResolveApproval {
+                    approval_id,
+                    decision,
+                },
+                state,
+            )
+        }
+        DaemonEvent::ChatPaused { .. } => Ok(()),
+        DaemonEvent::ChatComplete { message } => {
+            state.final_message = Some(message);
+            Ok(())
+        }
+        DaemonEvent::Error { message } => Err(OberonError::Validation(message)),
+        other => Err(OberonError::Storage(format!(
+            "unexpected daemon response: {other:?}"
+        ))),
+    })
+}
+
+fn render_tool_result(result: &ToolResult) -> String {
+    format!(
+        "tool result: {}.{} [{:?}] {}",
+        result.tool, result.command, result.status, result.summary
+    )
+}
+
+fn render_tool_error(error: &ToolError) -> String {
+    format!(
+        "tool error: {} [{}] {}",
+        error.command, error.code, error.message
+    )
+}
+
+fn summarize_approval_payload(payload_json: &str) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(payload_json) else {
+        return payload_json.to_string();
+    };
+    let action = value
+        .get("actionSummary")
+        .and_then(|v| v.as_str())
+        .unwrap_or("pending tool action");
+    let tool = value.get("tool").and_then(|v| v.as_str()).unwrap_or("tool");
+    let command = value
+        .get("command")
+        .and_then(|v| v.as_str())
+        .unwrap_or("command");
+    format!("{tool}.{command}: {action}")
+}
+
+fn read_cli_approval_decision() -> Result<String, OberonError> {
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .map_err(|err| OberonError::Storage(format!("stdin read failed: {err}")))?;
+    let trimmed = input.trim().to_ascii_lowercase();
+    Ok(match trimmed.as_str() {
+        "y" | "yes" | "approve" => "approve".to_string(),
+        _ => "deny".to_string(),
     })
 }
 
@@ -1513,6 +1604,19 @@ fn apply_config_value(config: &mut AppConfig, key: &str, value: &str) -> Result<
     match key {
         "endpoint.base_url" => config.endpoint.base_url = value.to_string(),
         "endpoint.model" => config.endpoint.model = value.to_string(),
+        "endpoint.provider" => {
+            config.endpoint.provider = match value {
+                "open_ai_compatible" | "openai" | "openai_compatible" => {
+                    ChatProviderKind::OpenAiCompatible
+                }
+                "anthropic" => ChatProviderKind::Anthropic,
+                _ => {
+                    return Err(OberonError::Validation(
+                        "endpoint.provider must be open_ai_compatible or anthropic".to_string(),
+                    ));
+                }
+            }
+        }
         "endpoint.api_key_env" => config.endpoint.api_key_env = Some(value.to_string()),
         "runtime.request_timeout_ms" => {
             config.runtime.request_timeout_ms = value.parse().map_err(|_| {
@@ -1947,13 +2051,58 @@ mod tests {
 
     #[test]
     fn chat_command_returns_assistant_reply() {
+        let _guard = env_guard();
+        let socket_path =
+            std::env::temp_dir().join(format!("oberon4-cli-chat-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&socket_path);
+
+        unsafe {
+            std::env::remove_var("OBERON4_FORCE_LOCAL");
+            std::env::set_var("OBERON4_SOCKET_PATH", &socket_path);
+        }
+
+        let thread_socket = socket_path.clone();
+        let handle = thread::spawn(move || {
+            let app = DaemonApp::new(
+                DaemonRuntime::default(),
+                FakeChatProvider::default(),
+                FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
+                FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+                AccountRegistry::default(),
+                InMemorySecretStore::default(),
+                InMemoryAccountMetadataStore::default(),
+            );
+            serve_unix_socket(&thread_socket, app)
+        });
+
+        for _ in 0..20 {
+            if socket_path.exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+
         let mut app = CliApp::default();
         let reply = app.run(CliCommand::Chat {
             message: "hello".to_string(),
         });
 
         assert_eq!(reply.exit_code, 0);
-        assert_eq!(reply.stdout, "pong");
+        assert!(!reply.stdout.trim().is_empty());
+        assert!(reply.stderr.is_empty());
+
+        let stop = DaemonIpcClient::new(&socket_path)
+            .send(&DaemonCommand::Shutdown)
+            .unwrap();
+        match stop {
+            DaemonEvent::Ack { message } => assert_eq!(message, "daemon stopped"),
+            other => panic!("unexpected stop event: {other:?}"),
+        }
+        handle.join().unwrap().unwrap();
+
+        unsafe {
+            std::env::remove_var("OBERON4_SOCKET_PATH");
+        }
     }
 
     #[test]

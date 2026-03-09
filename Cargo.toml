@@ -4,6 +4,7 @@ members = [
   "crates/oberon4-cli",
   "crates/oberon4-core",
   "crates/oberon4-daemon",
+  "crates/oberon4-provider-anthropic",
   "crates/oberon4-provider-openai",
   "crates/oberon4-tray",
   "crates/oberon4-tui",

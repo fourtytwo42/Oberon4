@@ -3,11 +3,49 @@ use crate::{
     SavedSession,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatStreamEvent {
     TextDelta { content: String },
     ToolCallDelta(ChatToolCallDelta),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderFinishState {
+    AssistantTextComplete,
+    ToolCallRequested,
+    ToolCallPending,
+    ToolResultRequired,
+    ResponseComplete,
+    ResponseIncomplete,
+    ProviderError,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderCapabilityMatrix {
+    pub tool_definitions: bool,
+    pub non_streaming_tool_calls: bool,
+    pub streaming_tool_calls: bool,
+    pub partial_argument_deltas: bool,
+    pub mixed_text_and_tool_responses: bool,
+    pub parallel_tool_calls: bool,
+    pub schema_cleaning_required: bool,
+    pub delegated_pending_support: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub parameters_schema: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolAwareProviderResponse {
+    pub message: ChatMessage,
+    pub finish_state: ProviderFinishState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +105,7 @@ pub trait ChatProvider {
         let probe = [ChatMessage {
             role: crate::ChatRole::User,
             content: "health".to_string(),
+            tool_call_id: None,
             tool_calls: Vec::new(),
         }];
         self.send_message(endpoint, model, &probe).map(|_| ())
@@ -75,6 +114,35 @@ pub trait ChatProvider {
     fn apply_runtime_config(&mut self, _config: &AppConfig) -> Result<(), OberonError> {
         Ok(())
     }
+}
+
+pub trait ToolAwareChatProvider {
+    fn stream_tool_aware_message(
+        &self,
+        endpoint: &str,
+        model: &str,
+        messages: &[ChatMessage],
+        tools: &[ProviderToolDefinition],
+        on_event: &mut dyn FnMut(ChatStreamEvent) -> Result<(), OberonError>,
+    ) -> Result<ToolAwareProviderResponse, OberonError>;
+
+    fn send_tool_aware_message(
+        &self,
+        endpoint: &str,
+        model: &str,
+        messages: &[ChatMessage],
+        tools: &[ProviderToolDefinition],
+    ) -> Result<ToolAwareProviderResponse, OberonError> {
+        self.stream_tool_aware_message(endpoint, model, messages, tools, &mut |_| Ok(()))
+    }
+
+    fn provider_capabilities(&self) -> ProviderCapabilityMatrix;
+
+    fn apply_runtime_config(&mut self, _config: &AppConfig) -> Result<(), OberonError> {
+        Ok(())
+    }
+
+    fn endpoint_health(&self, endpoint: &str, model: &str) -> Result<(), OberonError>;
 }
 
 pub trait OAuthProvider {

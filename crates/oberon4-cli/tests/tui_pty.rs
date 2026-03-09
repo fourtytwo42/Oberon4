@@ -232,7 +232,7 @@ fn temp_dir(name: &str) -> PathBuf {
 
 fn debug_binary(name: &str) -> PathBuf {
     ensure_workspace_binaries_built();
-    repo_root().join("target").join("debug").join(name)
+    cargo_target_dir().join("debug").join(name)
 }
 
 fn repo_root() -> PathBuf {
@@ -241,6 +241,12 @@ fn repo_root() -> PathBuf {
         .and_then(Path::parent)
         .expect("crate manifest should live under workspace root")
         .to_path_buf()
+}
+
+fn cargo_target_dir() -> PathBuf {
+    std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo_root().join("target"))
 }
 
 fn ensure_workspace_binaries_built() {
@@ -260,6 +266,11 @@ fn ensure_workspace_binaries_built() {
                 "oberon4-tui",
             ])
             .current_dir(repo_root())
+            .envs(
+                std::env::var_os("CARGO_TARGET_DIR")
+                    .map(|value| vec![("CARGO_TARGET_DIR", value)])
+                    .unwrap_or_default(),
+            )
             .status()
             .expect("workspace binaries should build for PTY tests");
         assert!(

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::error::OberonError;
+use crate::{ChatProviderKind, error::OberonError};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -12,6 +12,7 @@ pub struct AppConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EndpointConfig {
+    pub provider: ChatProviderKind,
     pub base_url: String,
     pub model: String,
     pub api_key_env: Option<String>,
@@ -40,6 +41,7 @@ impl AppConfig {
 impl Default for EndpointConfig {
     fn default() -> Self {
         Self {
+            provider: ChatProviderKind::OpenAiCompatible,
             base_url: "https://api.openai.com".to_string(),
             model: "gpt-4.1-mini".to_string(),
             api_key_env: Some("OPENAI_API_KEY".to_string()),
@@ -62,6 +64,7 @@ impl Default for RuntimeConfig {
 #[cfg(test)]
 mod tests {
     use super::AppConfig;
+    use crate::ChatProviderKind;
 
     #[test]
     fn default_config_round_trips_through_toml() {
@@ -98,6 +101,10 @@ mod tests {
         .expect("config without api_key_env should parse");
 
         assert_eq!(decoded.endpoint.base_url, "http://gateway.example.test");
+        assert_eq!(
+            decoded.endpoint.provider,
+            ChatProviderKind::OpenAiCompatible
+        );
         assert_eq!(decoded.endpoint.model, "gpt-5.1-codex-mini");
         assert_eq!(
             decoded.endpoint.api_key_env.as_deref(),
@@ -115,6 +122,10 @@ mod tests {
                 .expect("endpoint-only config should parse");
 
         assert_eq!(decoded.endpoint.base_url, "http://gateway.example.test");
+        assert_eq!(
+            decoded.endpoint.provider,
+            ChatProviderKind::OpenAiCompatible
+        );
         assert_eq!(decoded.endpoint.model, "gpt-5.1-codex-mini");
         assert_eq!(
             decoded.endpoint.api_key_env.as_deref(),

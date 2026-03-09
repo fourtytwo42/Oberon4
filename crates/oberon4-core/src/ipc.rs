@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AppConfig, ChatMessage, ChatToolCallDelta, DaemonStatus, OAuthCallbackPayload,
-    OAuthProviderKind, SavedSession, StoredAccount,
+    OAuthProviderKind, SavedSession, StoredAccount, ToolError, ToolResult,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,6 +49,10 @@ pub enum DaemonCommand {
         provider: OAuthProviderKind,
         account_id: String,
     },
+    ResolveApproval {
+        approval_id: String,
+        decision: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,6 +66,19 @@ pub enum DaemonEvent {
     },
     ToolCallDelta {
         delta: ChatToolCallDelta,
+    },
+    ToolResult {
+        result: ToolResult,
+    },
+    ToolError {
+        error: ToolError,
+    },
+    ApprovalRequired {
+        approval_id: String,
+        payload_json: String,
+    },
+    ChatPaused {
+        approval_id: String,
     },
     ChatComplete {
         message: ChatMessage,
@@ -107,6 +124,7 @@ mod tests {
             messages: vec![ChatMessage {
                 role: ChatRole::User,
                 content: "hello".to_string(),
+                tool_call_id: None,
                 tool_calls: Vec::new(),
             }],
         };
@@ -156,6 +174,7 @@ mod tests {
                 messages: vec![ChatMessage {
                     role: ChatRole::Assistant,
                     content: "hi".to_string(),
+                    tool_call_id: None,
                     tool_calls: Vec::new(),
                 }],
             },

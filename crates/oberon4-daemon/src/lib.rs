@@ -16,11 +16,14 @@ use serde::{Deserialize, Serialize};
 
 use oberon4_auth::{AccountMetadataStore, AccountRegistry, FileAccountMetadataStore};
 use oberon4_core::{
-    AppConfig, ChatProvider, ChatProviderKind, ChatStreamEvent, ConfigStore, DaemonCommand,
-    DaemonEvent, DaemonStatus, FileConfigStore, FileSecretStore, FileSessionStore,
-    InMemoryConfigStore, InMemorySessionStore, OAuthProvider, OAuthProviderKind, OberonError,
-    PendingOAuthFlow, RequestId, SecretStore, ServiceEnvelope, SessionStore,
+    AppConfig, ChatMessage, ChatProviderKind, ChatRole, ChatStreamEvent, ConfigStore,
+    DaemonCommand, DaemonEvent, DaemonStatus, FileConfigStore, FileSecretStore, FileSessionStore,
+    HostToolRuntime, InMemoryConfigStore, InMemorySessionStore, InvokeRequest, OAuthProvider,
+    OAuthProviderKind, OberonError, PendingOAuthFlow, PlanRequest, ProviderCapabilityMatrix,
+    ProviderToolDefinition, RequestId, SearchRequest, SecretStore, ServiceEnvelope, SessionStore,
+    ToolAwareChatProvider, ToolAwareProviderResponse, ToolDescribeRequest, ToolError, ToolResult,
 };
+use serde_json::json;
 
 pub use plugin_runtime::{
     ArtifactBrokerFoundation, FilePluginRegistry, HOST_RUNTIME_API_VERSION, PluginRuntimeHost,
@@ -91,7 +94,7 @@ fn status_snapshot(
         running: lifecycle == LifecycleState::Running,
         endpoint_base_url: config.endpoint.base_url.clone(),
         model: config.endpoint.model.clone(),
-        active_provider: ChatProviderKind::OpenAiCompatible,
+        active_provider: config.endpoint.provider,
         active_account,
     }
 }
@@ -102,6 +105,76 @@ pub fn health_report(config: &AppConfig, lifecycle: LifecycleState) -> HealthRep
         ready: lifecycle == LifecycleState::Running,
         endpoint_base_url: config.endpoint.base_url.clone(),
         model: config.endpoint.model.clone(),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PendingApprovalTurn {
+    transcript: Vec<ChatMessage>,
+    endpoint: String,
+    model: String,
+    tool_call_id: String,
+    invoke_request: InvokeRequest,
+}
+
+pub struct ProviderRouter<OP, AP> {
+    active_provider: ChatProviderKind,
+    openai: OP,
+    anthropic: AP,
+}
+
+impl<OP, AP> ProviderRouter<OP, AP> {
+    pub fn new(active_provider: ChatProviderKind, openai: OP, anthropic: AP) -> Self {
+        Self {
+            active_provider,
+            openai,
+            anthropic,
+        }
+    }
+}
+
+impl<OP, AP> ToolAwareChatProvider for ProviderRouter<OP, AP>
+where
+    OP: ToolAwareChatProvider,
+    AP: ToolAwareChatProvider,
+{
+    fn stream_tool_aware_message(
+        &self,
+        endpoint: &str,
+        model: &str,
+        messages: &[ChatMessage],
+        tools: &[ProviderToolDefinition],
+        on_event: &mut dyn FnMut(ChatStreamEvent) -> Result<(), OberonError>,
+    ) -> Result<ToolAwareProviderResponse, OberonError> {
+        match self.active_provider {
+            ChatProviderKind::OpenAiCompatible => self
+                .openai
+                .stream_tool_aware_message(endpoint, model, messages, tools, on_event),
+            ChatProviderKind::Anthropic => self
+                .anthropic
+                .stream_tool_aware_message(endpoint, model, messages, tools, on_event),
+        }
+    }
+
+    fn provider_capabilities(&self) -> ProviderCapabilityMatrix {
+        match self.active_provider {
+            ChatProviderKind::OpenAiCompatible => self.openai.provider_capabilities(),
+            ChatProviderKind::Anthropic => self.anthropic.provider_capabilities(),
+        }
+    }
+
+    fn apply_runtime_config(&mut self, config: &AppConfig) -> Result<(), OberonError> {
+        self.active_provider = config.endpoint.provider;
+        self.openai.apply_runtime_config(config)?;
+        self.anthropic.apply_runtime_config(config)?;
+        Ok(())
+    }
+
+    fn endpoint_health(&self, endpoint: &str, model: &str) -> Result<(), OberonError> {
+        match self.active_provider {
+            ChatProviderKind::OpenAiCompatible => self.openai.endpoint_health(endpoint, model),
+            ChatProviderKind::Anthropic => self.anthropic.endpoint_health(endpoint, model),
+        }
     }
 }
 
@@ -177,6 +250,7 @@ pub struct DaemonApp<C, S, P, OO, AO, SS, AS> {
     anthropic_oauth: AO,
     accounts: AccountRegistry,
     pending_oauth_flows: BTreeMap<String, PendingOAuthFlow>,
+    pending_approval_turns: BTreeMap<String, PendingApprovalTurn>,
     secrets: SS,
     account_store: AS,
 }
@@ -185,7 +259,14 @@ impl Default
     for DaemonApp<
         FileConfigStore,
         FileSessionStore,
-        oberon4_provider_openai::OpenAiCompatibleClient<oberon4_provider_openai::ReqwestTransport>,
+        ProviderRouter<
+            oberon4_provider_openai::OpenAiCompatibleClient<
+                oberon4_provider_openai::ReqwestTransport,
+            >,
+            oberon4_provider_anthropic::AnthropicClient<
+                oberon4_provider_anthropic::ReqwestTransport,
+            >,
+        >,
         oberon4_auth::OpenAiOAuthAdapter,
         oberon4_auth::AnthropicOAuthAdapter,
         FileSecretStore,
@@ -206,13 +287,19 @@ impl Default
             config.runtime.stream_responses,
             config.runtime.stream_idle_timeout_ms,
         );
+        let anthropic = oberon4_provider_anthropic::AnthropicClient::new(
+            config.endpoint.base_url.clone(),
+            config.endpoint.api_key_env.clone(),
+            oberon4_provider_anthropic::RetryPolicy::from_config(&config),
+            oberon4_provider_anthropic::ReqwestTransport,
+        );
         Self::new(
             DaemonRuntime {
                 config_store: FileConfigStore::default(),
                 session_store: FileSessionStore::default(),
                 lifecycle: LifecycleState::Stopped,
             },
-            client,
+            ProviderRouter::new(config.endpoint.provider, client, anthropic),
             oberon4_auth::OpenAiOAuthAdapter::default(),
             oberon4_auth::AnthropicOAuthAdapter::default(),
             accounts,
@@ -226,7 +313,7 @@ impl<C, S, P, OO, AO, SS, AS> DaemonApp<C, S, P, OO, AO, SS, AS>
 where
     C: ConfigStore,
     S: SessionStore,
-    P: ChatProvider,
+    P: ToolAwareChatProvider,
     OO: OAuthProvider,
     AO: OAuthProvider,
     SS: SecretStore,
@@ -248,6 +335,7 @@ where
             anthropic_oauth,
             accounts,
             pending_oauth_flows: BTreeMap::new(),
+            pending_approval_turns: BTreeMap::new(),
             secrets,
             account_store,
         }
@@ -310,6 +398,146 @@ where
         Ok(())
     }
 
+    fn build_runtime_host(
+        &self,
+    ) -> Result<PluginRuntimeHost<FilePluginRegistry, StaticPolicyResolver>, OberonError> {
+        let registry = FilePluginRegistry::load_from_roots(&[], HOST_RUNTIME_API_VERSION)?;
+        PluginRuntimeHost::new(registry, StaticPolicyResolver::default())
+    }
+
+    fn provider_tool_definitions() -> Vec<ProviderToolDefinition> {
+        vec![
+            ProviderToolDefinition {
+                name: "tool_search".to_string(),
+                description: "Search installed tools and commands by capability.".to_string(),
+                parameters_schema: json!({
+                    "type":"object",
+                    "properties":{
+                        "query":{"type":"string"},
+                        "limit":{"type":"integer"}
+                    },
+                    "required":["query"]
+                }),
+            },
+            ProviderToolDefinition {
+                name: "tool_describe".to_string(),
+                description: "Describe one tool command with guidance and schemas.".to_string(),
+                parameters_schema: json!({
+                    "type":"object",
+                    "properties":{
+                        "tool":{"type":"string"},
+                        "command":{"type":"string"}
+                    },
+                    "required":["tool","command"]
+                }),
+            },
+            ProviderToolDefinition {
+                name: "tool_plan".to_string(),
+                description: "Plan a tool command before invoking it.".to_string(),
+                parameters_schema: json!({
+                    "type":"object",
+                    "properties":{
+                        "tool":{"type":"string"},
+                        "command":{"type":"string"},
+                        "input":{"type":"object"}
+                    },
+                    "required":["tool","command","input"]
+                }),
+            },
+            ProviderToolDefinition {
+                name: "tool_invoke".to_string(),
+                description: "Invoke a specific tool command.".to_string(),
+                parameters_schema: json!({
+                    "type":"object",
+                    "properties":{
+                        "tool":{"type":"string"},
+                        "command":{"type":"string"},
+                        "input":{"type":"object"}
+                    },
+                    "required":["tool","command","input"]
+                }),
+            },
+            ProviderToolDefinition {
+                name: "tool_policy_inspect".to_string(),
+                description: "Inspect policy and approval requirements for a tool command."
+                    .to_string(),
+                parameters_schema: json!({
+                    "type":"object",
+                    "properties":{
+                        "tool":{"type":"string"},
+                        "command":{"type":"string"}
+                    },
+                    "required":["tool","command"]
+                }),
+            },
+        ]
+    }
+
+    fn invocation_context(&self, tool: &str, command: &str) -> oberon4_core::InvocationContext {
+        oberon4_core::InvocationContext {
+            request_id: RequestId::new(),
+            session_id: "chat".to_string(),
+            plugin_id: tool.to_string(),
+            plugin_version: "builtin".to_string(),
+            command: command.to_string(),
+            deadline: "2099-01-01T00:00:00Z".to_string(),
+            runtime_api_version: HOST_RUNTIME_API_VERSION.to_string(),
+            capability_grants: Vec::new(),
+            workspace_revision: None,
+            memory_limit: 128 * 1024 * 1024,
+            time_limit_ms: 5_000,
+            output_limit_bytes: 128 * 1024,
+            storage_limit_bytes: 256 * 1024 * 1024,
+            network_policy: oberon4_core::NetworkPolicy::BrokeredOnly,
+        }
+    }
+
+    fn parse_required_string(
+        input: &serde_json::Value,
+        field: &str,
+    ) -> Result<String, OberonError> {
+        input
+            .get(field)
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| OberonError::Validation(format!("missing required field: {field}")))
+    }
+
+    fn tool_result_message(
+        tool_call_id: String,
+        value: &serde_json::Value,
+    ) -> Result<ChatMessage, OberonError> {
+        Ok(ChatMessage {
+            role: ChatRole::Tool,
+            content: serde_json::to_string(value)
+                .map_err(|err| OberonError::Storage(format!("tool result encode failed: {err}")))?,
+            tool_call_id: Some(tool_call_id),
+            tool_calls: Vec::new(),
+        })
+    }
+
+    fn append_tool_result(
+        transcript: &mut Vec<ChatMessage>,
+        tool_call_id: String,
+        result: &ToolResult,
+    ) -> Result<(), OberonError> {
+        let value = serde_json::to_value(result)
+            .map_err(|err| OberonError::Storage(format!("tool result serialize failed: {err}")))?;
+        transcript.push(Self::tool_result_message(tool_call_id, &value)?);
+        Ok(())
+    }
+
+    fn append_tool_error(
+        transcript: &mut Vec<ChatMessage>,
+        tool_call_id: String,
+        error: &ToolError,
+    ) -> Result<(), OberonError> {
+        let value = serde_json::to_value(error)
+            .map_err(|err| OberonError::Storage(format!("tool error serialize failed: {err}")))?;
+        transcript.push(Self::tool_result_message(tool_call_id, &value)?);
+        Ok(())
+    }
+
     pub(crate) fn handle_command(
         &mut self,
         command: DaemonCommand,
@@ -332,6 +560,9 @@ where
             }
             DaemonCommand::SendChat { .. } => Err(OberonError::Validation(
                 "SendChat must be handled through the streaming IPC path".to_string(),
+            )),
+            DaemonCommand::ResolveApproval { .. } => Err(OberonError::Validation(
+                "ResolveApproval must be handled through the streaming IPC path".to_string(),
             )),
             DaemonCommand::EndpointHealth => {
                 if self.runtime.lifecycle_state() != LifecycleState::Running {
@@ -500,6 +731,222 @@ where
         self.account_store.save_registry(&self.accounts)
     }
 
+    fn handle_tool_call(
+        &mut self,
+        transcript: &mut Vec<ChatMessage>,
+        tool_call: &oberon4_core::ChatToolCall,
+        host: &impl HostToolRuntime,
+        on_event: &mut dyn FnMut(DaemonEvent) -> Result<(), OberonError>,
+    ) -> Result<bool, OberonError> {
+        let input: serde_json::Value =
+            serde_json::from_str(&tool_call.arguments).map_err(|err| {
+                OberonError::Validation(format!(
+                    "invalid tool arguments for {}: {err}",
+                    tool_call.name
+                ))
+            })?;
+        match tool_call.name.as_str() {
+            "tool_search" => {
+                let result = host.tool_search(&SearchRequest {
+                    query: Self::parse_required_string(&input, "query")?,
+                    limit: input
+                        .get("limit")
+                        .and_then(|value| value.as_u64())
+                        .map(|v| v as u32),
+                    session_id: Some("chat".to_string()),
+                })?;
+                let data = serde_json::to_value(result).map_err(|err| {
+                    OberonError::Storage(format!("search serialize failed: {err}"))
+                })?;
+                let tool_result = ToolResult {
+                    status: oberon4_core::InvokeStatus::Ok,
+                    tool: "tool_search".to_string(),
+                    command: "search".to_string(),
+                    summary: "Tool search completed".to_string(),
+                    data,
+                    artifacts: Vec::new(),
+                    truncated: false,
+                    next_suggested_action: Some("tool_describe".to_string()),
+                };
+                on_event(DaemonEvent::ToolResult {
+                    result: tool_result.clone(),
+                })?;
+                Self::append_tool_result(transcript, tool_call.id.clone(), &tool_result)?;
+                Ok(true)
+            }
+            "tool_describe" => {
+                let result = host.tool_describe(&ToolDescribeRequest {
+                    tool: Self::parse_required_string(&input, "tool")?,
+                    command: Self::parse_required_string(&input, "command")?,
+                })?;
+                let data = serde_json::to_value(result).map_err(|err| {
+                    OberonError::Storage(format!("describe serialize failed: {err}"))
+                })?;
+                let tool_result = ToolResult {
+                    status: oberon4_core::InvokeStatus::Ok,
+                    tool: "tool_describe".to_string(),
+                    command: "describe".to_string(),
+                    summary: "Tool description loaded".to_string(),
+                    data,
+                    artifacts: Vec::new(),
+                    truncated: false,
+                    next_suggested_action: Some("tool_plan".to_string()),
+                };
+                on_event(DaemonEvent::ToolResult {
+                    result: tool_result.clone(),
+                })?;
+                Self::append_tool_result(transcript, tool_call.id.clone(), &tool_result)?;
+                Ok(true)
+            }
+            "tool_policy_inspect" => {
+                let result = host.tool_policy_inspect(&oberon4_core::PolicyInspectRequest {
+                    tool: Self::parse_required_string(&input, "tool")?,
+                    command: Self::parse_required_string(&input, "command")?,
+                })?;
+                let data = serde_json::to_value(result).map_err(|err| {
+                    OberonError::Storage(format!("policy inspect serialize failed: {err}"))
+                })?;
+                let tool_result = ToolResult {
+                    status: oberon4_core::InvokeStatus::Ok,
+                    tool: "tool_policy_inspect".to_string(),
+                    command: "policy_inspect".to_string(),
+                    summary: "Policy inspection completed".to_string(),
+                    data,
+                    artifacts: Vec::new(),
+                    truncated: false,
+                    next_suggested_action: Some("tool_plan".to_string()),
+                };
+                on_event(DaemonEvent::ToolResult {
+                    result: tool_result.clone(),
+                })?;
+                Self::append_tool_result(transcript, tool_call.id.clone(), &tool_result)?;
+                Ok(true)
+            }
+            "tool_plan" => {
+                let tool = Self::parse_required_string(&input, "tool")?;
+                let command = Self::parse_required_string(&input, "command")?;
+                let result = host.tool_plan(&PlanRequest {
+                    command: command.clone(),
+                    input: input.get("input").cloned().unwrap_or_else(|| json!({})),
+                    context: self.invocation_context(&tool, &command),
+                })?;
+                let data = serde_json::to_value(result.clone())
+                    .map_err(|err| OberonError::Storage(format!("plan serialize failed: {err}")))?;
+                let tool_result = ToolResult {
+                    status: oberon4_core::InvokeStatus::Ok,
+                    tool: "tool_plan".to_string(),
+                    command: "plan".to_string(),
+                    summary: "Tool plan completed".to_string(),
+                    data,
+                    artifacts: Vec::new(),
+                    truncated: false,
+                    next_suggested_action: Some("tool_invoke".to_string()),
+                };
+                on_event(DaemonEvent::ToolResult {
+                    result: tool_result.clone(),
+                })?;
+                Self::append_tool_result(transcript, tool_call.id.clone(), &tool_result)?;
+                Ok(true)
+            }
+            "tool_invoke" => {
+                let tool = Self::parse_required_string(&input, "tool")?;
+                let command = Self::parse_required_string(&input, "command")?;
+                let invoke_request = InvokeRequest {
+                    command: command.clone(),
+                    input: input.get("input").cloned().unwrap_or_else(|| json!({})),
+                    context: self.invocation_context(&tool, &command),
+                };
+                let plan = host.tool_plan(&PlanRequest {
+                    command: command.clone(),
+                    input: invoke_request.input.clone(),
+                    context: invoke_request.context.clone(),
+                })?;
+                if plan.approval_required {
+                    let approval_request_id = RequestId::new();
+                    let approval_id = format!("approval-{}", approval_request_id.as_str());
+                    let payload_json =
+                        serde_json::to_string(&plan.approval_preview).map_err(|err| {
+                            OberonError::Storage(format!("approval encode failed: {err}"))
+                        })?;
+                    self.pending_approval_turns.insert(
+                        approval_id.clone(),
+                        PendingApprovalTurn {
+                            transcript: transcript.clone(),
+                            endpoint: self.runtime.load_config()?.endpoint.base_url,
+                            model: self.runtime.load_config()?.endpoint.model,
+                            tool_call_id: tool_call.id.clone(),
+                            invoke_request,
+                        },
+                    );
+                    on_event(DaemonEvent::ApprovalRequired {
+                        approval_id: approval_id.clone(),
+                        payload_json,
+                    })?;
+                    on_event(DaemonEvent::ChatPaused { approval_id })?;
+                    return Ok(false);
+                }
+                let envelope = host.tool_invoke(&invoke_request)?;
+                if let Some(result) = envelope.result {
+                    on_event(DaemonEvent::ToolResult {
+                        result: result.clone(),
+                    })?;
+                    Self::append_tool_result(transcript, tool_call.id.clone(), &result)?;
+                } else if let Some(error) = envelope.error {
+                    on_event(DaemonEvent::ToolError {
+                        error: error.clone(),
+                    })?;
+                    Self::append_tool_error(transcript, tool_call.id.clone(), &error)?;
+                }
+                Ok(true)
+            }
+            other => Err(OberonError::Validation(format!(
+                "unknown host tool: {other}"
+            ))),
+        }
+    }
+
+    fn continue_provider_loop(
+        &mut self,
+        mut transcript: Vec<ChatMessage>,
+        endpoint: String,
+        model: String,
+        on_event: &mut dyn FnMut(DaemonEvent) -> Result<(), OberonError>,
+    ) -> Result<(), OberonError> {
+        let host = self.build_runtime_host()?;
+        let tools = Self::provider_tool_definitions();
+        loop {
+            let reply = self.chat_provider.stream_tool_aware_message(
+                &endpoint,
+                &model,
+                &transcript,
+                &tools,
+                &mut |event| match event {
+                    ChatStreamEvent::TextDelta { content } => {
+                        on_event(DaemonEvent::ChatChunk { content })
+                    }
+                    ChatStreamEvent::ToolCallDelta(delta) => {
+                        on_event(DaemonEvent::ToolCallDelta { delta })
+                    }
+                },
+            )?;
+            transcript.push(reply.message.clone());
+            if reply.finish_state == oberon4_core::ProviderFinishState::ToolCallRequested
+                && !reply.message.tool_calls.is_empty()
+            {
+                for tool_call in &reply.message.tool_calls {
+                    if !self.handle_tool_call(&mut transcript, tool_call, &host, on_event)? {
+                        return Ok(());
+                    }
+                }
+                continue;
+            }
+            on_event(DaemonEvent::ChatComplete {
+                message: reply.message,
+            })?;
+            return Ok(());
+        }
+    }
+
     fn handle_chat_stream(
         &mut self,
         messages: Vec<oberon4_core::ChatMessage>,
@@ -513,20 +960,57 @@ where
 
         let config = self.runtime.load_config()?;
         self.materialize_api_key_env(&config)?;
-        let reply = self.chat_provider.stream_message(
-            &config.endpoint.base_url,
-            &config.endpoint.model,
-            &messages,
-            &mut |event| match event {
-                ChatStreamEvent::TextDelta { content } => {
-                    on_event(DaemonEvent::ChatChunk { content })
-                }
-                ChatStreamEvent::ToolCallDelta(delta) => {
-                    on_event(DaemonEvent::ToolCallDelta { delta })
-                }
-            },
-        )?;
-        on_event(DaemonEvent::ChatComplete { message: reply })
+        self.continue_provider_loop(
+            messages,
+            config.endpoint.base_url,
+            config.endpoint.model,
+            on_event,
+        )
+    }
+
+    fn handle_approval_stream(
+        &mut self,
+        approval_id: String,
+        decision: String,
+        on_event: &mut dyn FnMut(DaemonEvent) -> Result<(), OberonError>,
+    ) -> Result<(), OberonError> {
+        let pending = self
+            .pending_approval_turns
+            .remove(&approval_id)
+            .ok_or_else(|| OberonError::NotFound(format!("approval:{approval_id}")))?;
+        let host = self.build_runtime_host()?;
+        let mut transcript = pending.transcript;
+        if decision.eq_ignore_ascii_case("approve") {
+            let envelope = host.tool_invoke(&pending.invoke_request)?;
+            if let Some(result) = envelope.result {
+                on_event(DaemonEvent::ToolResult {
+                    result: result.clone(),
+                })?;
+                Self::append_tool_result(&mut transcript, pending.tool_call_id.clone(), &result)?;
+            } else if let Some(error) = envelope.error {
+                on_event(DaemonEvent::ToolError {
+                    error: error.clone(),
+                })?;
+                Self::append_tool_error(&mut transcript, pending.tool_call_id.clone(), &error)?;
+            }
+        } else {
+            let error = ToolError {
+                status: oberon4_core::ErrorStatus::Error,
+                code: "APPROVAL_DENIED".to_string(),
+                message: "approval denied by operator".to_string(),
+                retryable: false,
+                request_id: RequestId::new(),
+                plugin_id: pending.invoke_request.context.plugin_id.clone(),
+                plugin_version: pending.invoke_request.context.plugin_version.clone(),
+                command: pending.invoke_request.command.clone(),
+                next_suggested_action: Some("tool_plan".to_string()),
+            };
+            on_event(DaemonEvent::ToolError {
+                error: error.clone(),
+            })?;
+            Self::append_tool_error(&mut transcript, pending.tool_call_id.clone(), &error)?;
+        }
+        self.continue_provider_loop(transcript, pending.endpoint, pending.model, on_event)
     }
 }
 
@@ -616,7 +1100,7 @@ pub fn serve_unix_socket<C, S, P, OO, AO, SS, AS>(
 where
     C: ConfigStore,
     S: SessionStore,
-    P: ChatProvider,
+    P: ToolAwareChatProvider,
     OO: OAuthProvider,
     AO: OAuthProvider,
     SS: SecretStore,
@@ -656,7 +1140,7 @@ fn handle_stream<C, S, P, OO, AO, SS, AS>(
 where
     C: ConfigStore,
     S: SessionStore,
-    P: ChatProvider,
+    P: ToolAwareChatProvider,
     OO: OAuthProvider,
     AO: OAuthProvider,
     SS: SecretStore,
@@ -670,6 +1154,23 @@ where
     match serde_json::from_slice::<DaemonCommand>(&input) {
         Ok(DaemonCommand::SendChat { messages, .. }) => {
             let result = app.handle_chat_stream(messages, &mut |event| write_event(stream, &event));
+            if let Err(err) = result {
+                write_event(
+                    stream,
+                    &DaemonEvent::Error {
+                        message: err.to_string(),
+                    },
+                )?;
+            }
+            Ok(false)
+        }
+        Ok(DaemonCommand::ResolveApproval {
+            approval_id,
+            decision,
+        }) => {
+            let result = app.handle_approval_stream(approval_id, decision, &mut |event| {
+                write_event(stream, &event)
+            });
             if let Err(err) = result {
                 write_event(
                     stream,
@@ -832,6 +1333,7 @@ mod tests {
             vec![ChatMessage {
                 role: ChatRole::User,
                 content: "hello".to_string(),
+                tool_call_id: None,
                 tool_calls: Vec::new(),
             }],
             &mut |event| {
@@ -914,6 +1416,7 @@ mod tests {
                 vec![ChatMessage {
                     role: ChatRole::User,
                     content: "hello".to_string(),
+                    tool_call_id: None,
                     tool_calls: Vec::new(),
                 }],
                 &mut |_| Ok(()),
@@ -990,6 +1493,7 @@ mod tests {
             messages: vec![ChatMessage {
                 role: ChatRole::Assistant,
                 content: "hi".to_string(),
+                tool_call_id: None,
                 tool_calls: Vec::new(),
             }],
         };
@@ -1150,6 +1654,7 @@ mod tests {
             .handle_command(DaemonCommand::SaveConfig {
                 config: AppConfig {
                     endpoint: oberon4_core::EndpointConfig {
+                        provider: ChatProviderKind::OpenAiCompatible,
                         base_url: "http://gateway.example.test".to_string(),
                         model: "gpt-5.1-codex-mini".to_string(),
                         api_key_env: Some("OPENAI_API_KEY".to_string()),
@@ -1170,6 +1675,7 @@ mod tests {
             vec![ChatMessage {
                 role: ChatRole::User,
                 content: "hello".to_string(),
+                tool_call_id: None,
                 tool_calls: Vec::new(),
             }],
             &mut |event| {

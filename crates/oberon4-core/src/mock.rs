@@ -3,7 +3,8 @@ use std::collections::BTreeMap;
 use crate::{
     AppConfig, ChatMessage, ChatProvider, ChatRole, ChatStreamEvent, ConfigStore,
     OAuthCallbackPayload, OAuthProvider, OAuthProviderKind, OAuthStart, OberonError,
-    PendingOAuthFlow, SavedSession, SessionStore, TokenBundle,
+    PendingOAuthFlow, ProviderCapabilityMatrix, ProviderFinishState, ProviderToolDefinition,
+    SavedSession, SessionStore, TokenBundle, ToolAwareChatProvider, ToolAwareProviderResponse,
 };
 
 #[derive(Debug, Clone)]
@@ -33,8 +34,50 @@ impl ChatProvider for FakeChatProvider {
         Ok(ChatMessage {
             role: ChatRole::Assistant,
             content: self.reply.clone(),
+            tool_call_id: None,
             tool_calls: Vec::new(),
         })
+    }
+}
+
+impl ToolAwareChatProvider for FakeChatProvider {
+    fn stream_tool_aware_message(
+        &self,
+        _endpoint: &str,
+        _model: &str,
+        _messages: &[ChatMessage],
+        _tools: &[ProviderToolDefinition],
+        on_event: &mut dyn FnMut(ChatStreamEvent) -> Result<(), OberonError>,
+    ) -> Result<ToolAwareProviderResponse, OberonError> {
+        on_event(ChatStreamEvent::TextDelta {
+            content: self.reply.clone(),
+        })?;
+        Ok(ToolAwareProviderResponse {
+            message: ChatMessage {
+                role: ChatRole::Assistant,
+                content: self.reply.clone(),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+            },
+            finish_state: ProviderFinishState::ResponseComplete,
+        })
+    }
+
+    fn provider_capabilities(&self) -> ProviderCapabilityMatrix {
+        ProviderCapabilityMatrix {
+            tool_definitions: true,
+            non_streaming_tool_calls: true,
+            streaming_tool_calls: true,
+            partial_argument_deltas: true,
+            mixed_text_and_tool_responses: true,
+            parallel_tool_calls: false,
+            schema_cleaning_required: false,
+            delegated_pending_support: false,
+        }
+    }
+
+    fn endpoint_health(&self, _endpoint: &str, _model: &str) -> Result<(), OberonError> {
+        Ok(())
     }
 }
 

@@ -1567,12 +1567,23 @@ dependencies = [
  "jsonschema",
  "oberon4-auth",
  "oberon4-core",
+ "oberon4-provider-anthropic",
  "oberon4-provider-openai",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
  "wasmtime",
  "wasmtime-wasi",
+]
+
+[[package]]
+name = "oberon4-provider-anthropic"
+version = "0.1.0"
+dependencies = [
+ "oberon4-core",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

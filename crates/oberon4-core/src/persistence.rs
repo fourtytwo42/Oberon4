@@ -192,6 +192,7 @@ mod tests {
             messages: vec![ChatMessage {
                 role: ChatRole::Assistant,
                 content: "hello".to_string(),
+                tool_call_id: None,
                 tool_calls: Vec::new(),
             }],
         };

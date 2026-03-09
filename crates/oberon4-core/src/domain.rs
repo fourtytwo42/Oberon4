@@ -6,12 +6,14 @@ pub enum ChatRole {
     System,
     User,
     Assistant,
+    Tool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChatProviderKind {
     OpenAiCompatible,
+    Anthropic,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -45,6 +47,8 @@ impl SessionId {
 pub struct ChatMessage {
     pub role: ChatRole,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ChatToolCall>,
 }
@@ -120,6 +124,7 @@ mod tests {
             messages: vec![ChatMessage {
                 role: ChatRole::User,
                 content: "hello".to_string(),
+                tool_call_id: None,
                 tool_calls: Vec::new(),
             }],
         };
@@ -159,6 +164,7 @@ mod tests {
         let message = ChatMessage {
             role: ChatRole::Assistant,
             content: "Working on it".to_string(),
+            tool_call_id: None,
             tool_calls: vec![ChatToolCall {
                 id: "call_1".to_string(),
                 name: "lookup".to_string(),

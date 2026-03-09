@@ -6,10 +6,12 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use oberon4_core::{
     AppConfig, ChatMessage, ChatProvider, ChatRole, ChatStreamEvent, ChatToolCall,
-    ChatToolCallDelta, OberonError,
+    ChatToolCallDelta, OberonError, ProviderCapabilityMatrix, ProviderFinishState,
+    ProviderToolDefinition, ToolAwareChatProvider, ToolAwareProviderResponse,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,12 +34,18 @@ pub struct OpenAiChatRequest {
     pub model: String,
     pub messages: Vec<OpenAiChatRequestMessage>,
     pub stream: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub tools: Vec<OpenAiToolDefinition>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpenAiChatRequestMessage {
     pub role: String,
     pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub tool_calls: Vec<OpenAiResponseToolCall>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,12 +56,15 @@ pub struct OpenAiChatResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpenAiChatChoice {
     pub message: OpenAiChatResponseMessage,
+    pub finish_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpenAiChatResponseMessage {
     pub role: String,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<OpenAiResponseToolCall>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,6 +96,34 @@ pub struct OpenAiChatToolCallDelta {
 pub struct OpenAiChatFunctionDelta {
     pub name: Option<String>,
     pub arguments: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenAiToolDefinition {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub function: OpenAiFunctionDefinition,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenAiFunctionDefinition {
+    pub name: String,
+    pub description: String,
+    pub parameters: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenAiResponseToolCall {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub function: OpenAiResponseFunctionCall,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenAiResponseFunctionCall {
+    pub name: String,
+    pub arguments: String,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -324,6 +363,7 @@ where
             model: model.to_string(),
             messages: messages.iter().cloned().map(into_request_message).collect(),
             stream: true,
+            tools: Vec::new(),
         };
         let body = serde_json::to_string(&request)
             .map_err(|err| OberonError::Storage(format!("request serialization failed: {err}")))?;
@@ -345,6 +385,7 @@ where
             model: model.to_string(),
             messages: messages.iter().cloned().map(into_request_message).collect(),
             stream: false,
+            tools: Vec::new(),
         };
         let body = serde_json::to_string(&request)
             .map_err(|err| OberonError::Storage(format!("request serialization failed: {err}")))?;
@@ -367,6 +408,69 @@ where
             .message;
 
         into_chat_message(message)
+    }
+
+    pub fn stream_tool_aware_chat_messages(
+        &self,
+        endpoint_override: Option<&str>,
+        model: &str,
+        messages: &[ChatMessage],
+        tools: &[ProviderToolDefinition],
+        on_event: &mut dyn FnMut(ChatStreamEvent) -> Result<(), OberonError>,
+    ) -> Result<ToolAwareProviderResponse, OberonError> {
+        if !self.stream_responses {
+            return self.send_tool_aware_chat_messages(endpoint_override, model, messages, tools);
+        }
+
+        let request = OpenAiChatRequest {
+            model: model.to_string(),
+            messages: messages.iter().cloned().map(into_request_message).collect(),
+            stream: true,
+            tools: tools.iter().cloned().map(into_tool_definition).collect(),
+        };
+        let body = serde_json::to_string(&request)
+            .map_err(|err| OberonError::Storage(format!("request serialization failed: {err}")))?;
+        let url = format!(
+            "{}/v1/chat/completions",
+            self.effective_base_url(endpoint_override)
+        );
+        let bearer_token = self.bearer_token()?;
+        self.stream_tool_with_retry(&url, &body, bearer_token.as_deref(), on_event)
+    }
+
+    pub fn send_tool_aware_chat_messages(
+        &self,
+        endpoint_override: Option<&str>,
+        model: &str,
+        messages: &[ChatMessage],
+        tools: &[ProviderToolDefinition],
+    ) -> Result<ToolAwareProviderResponse, OberonError> {
+        let request = OpenAiChatRequest {
+            model: model.to_string(),
+            messages: messages.iter().cloned().map(into_request_message).collect(),
+            stream: false,
+            tools: tools.iter().cloned().map(into_tool_definition).collect(),
+        };
+        let body = serde_json::to_string(&request)
+            .map_err(|err| OberonError::Storage(format!("request serialization failed: {err}")))?;
+        let url = format!(
+            "{}/v1/chat/completions",
+            self.effective_base_url(endpoint_override)
+        );
+        let response_body = self.post_with_retry(&url, &body, self.bearer_token()?.as_deref())?;
+        let response: OpenAiChatResponse = serde_json::from_str(&response_body).map_err(|err| {
+            OberonError::Validation(format!("malformed provider response: {err}"))
+        })?;
+
+        let choice = response.choices.into_iter().next().ok_or_else(|| {
+            OberonError::Validation("provider response missing choices".to_string())
+        })?;
+
+        let message = into_chat_message(choice.message)?;
+        Ok(ToolAwareProviderResponse {
+            finish_state: normalize_finish_reason(choice.finish_reason.as_deref(), &message),
+            message,
+        })
     }
 
     pub fn endpoint_health(
@@ -488,7 +592,84 @@ where
                     return Ok(ChatMessage {
                         role: assistant_role,
                         content: final_text,
+                        tool_call_id: None,
                         tool_calls: finalize_tool_calls(tool_calls),
+                    });
+                }
+                Err(err) if emitted_any => return Err(err),
+                Err(err) => last_error = Some(err),
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| {
+            OberonError::Storage("provider stream failed without an error".to_string())
+        }))
+    }
+
+    fn stream_tool_with_retry(
+        &self,
+        url: &str,
+        body: &str,
+        bearer_token: Option<&str>,
+        on_event: &mut dyn FnMut(ChatStreamEvent) -> Result<(), OberonError>,
+    ) -> Result<ToolAwareProviderResponse, OberonError> {
+        let attempts = self.retry_policy.max_retries.saturating_add(1);
+        let mut last_error: Option<OberonError> = None;
+
+        for _ in 0..attempts {
+            let mut emitted_any = false;
+            let mut assistant_role = ChatRole::Assistant;
+            let mut assistant_text = String::new();
+            let mut tool_calls: BTreeMap<usize, ToolCallAssembly> = BTreeMap::new();
+            let mut finish_reason: Option<String> = None;
+
+            let result = self.transport.post_sse(
+                url,
+                body,
+                self.retry_policy.timeout_ms,
+                self.stream_idle_timeout_ms,
+                bearer_token,
+                &mut |payload| {
+                    emitted_any = true;
+                    let chunk: OpenAiChatStreamResponse =
+                        serde_json::from_str(&payload).map_err(|err| {
+                            OberonError::Validation(format!(
+                                "malformed provider stream chunk: {err}"
+                            ))
+                        })?;
+                    for choice in chunk.choices {
+                        if let Some(role) = choice.delta.role.as_deref() {
+                            assistant_role = parse_role(role)?;
+                        }
+                        if let Some(content) = choice.delta.content {
+                            if !content.is_empty() {
+                                assistant_text.push_str(&content);
+                                on_event(ChatStreamEvent::TextDelta { content })?;
+                            }
+                        }
+                        for delta in choice.delta.tool_calls.unwrap_or_default() {
+                            let normalized = merge_tool_call_delta(&mut tool_calls, delta);
+                            on_event(ChatStreamEvent::ToolCallDelta(normalized))?;
+                        }
+                        if choice.finish_reason.is_some() {
+                            finish_reason = choice.finish_reason;
+                        }
+                    }
+                    Ok(())
+                },
+            );
+
+            match result {
+                Ok(()) => {
+                    let message = ChatMessage {
+                        role: assistant_role,
+                        content: normalize_assistant_content(assistant_role, assistant_text),
+                        tool_call_id: None,
+                        tool_calls: finalize_tool_calls(tool_calls),
+                    };
+                    return Ok(ToolAwareProviderResponse {
+                        finish_state: normalize_finish_reason(finish_reason.as_deref(), &message),
+                        message,
                     });
                 }
                 Err(err) if emitted_any => return Err(err),
@@ -550,6 +731,48 @@ where
     }
 }
 
+impl<T> ToolAwareChatProvider for OpenAiCompatibleClient<T>
+where
+    T: OpenAiTransport,
+{
+    fn stream_tool_aware_message(
+        &self,
+        endpoint: &str,
+        model: &str,
+        messages: &[ChatMessage],
+        tools: &[ProviderToolDefinition],
+        on_event: &mut dyn FnMut(ChatStreamEvent) -> Result<(), OberonError>,
+    ) -> Result<ToolAwareProviderResponse, OberonError> {
+        let endpoint_override = if endpoint.trim().is_empty() {
+            None
+        } else {
+            Some(endpoint)
+        };
+        self.stream_tool_aware_chat_messages(endpoint_override, model, messages, tools, on_event)
+    }
+
+    fn provider_capabilities(&self) -> ProviderCapabilityMatrix {
+        ProviderCapabilityMatrix {
+            tool_definitions: true,
+            non_streaming_tool_calls: true,
+            streaming_tool_calls: true,
+            partial_argument_deltas: true,
+            mixed_text_and_tool_responses: true,
+            parallel_tool_calls: true,
+            schema_cleaning_required: false,
+            delegated_pending_support: false,
+        }
+    }
+
+    fn apply_runtime_config(&mut self, config: &AppConfig) -> Result<(), OberonError> {
+        <Self as ChatProvider>::apply_runtime_config(self, config)
+    }
+
+    fn endpoint_health(&self, endpoint: &str, model: &str) -> Result<(), OberonError> {
+        <Self as ChatProvider>::endpoint_health(self, endpoint, model)
+    }
+}
+
 pub fn endpoint_summary(config: &AppConfig) -> String {
     format!("{} -> {}", config.endpoint.base_url, config.endpoint.model)
 }
@@ -576,9 +799,23 @@ fn into_request_message(message: ChatMessage) -> OpenAiChatRequestMessage {
             ChatRole::System => "system",
             ChatRole::User => "user",
             ChatRole::Assistant => "assistant",
+            ChatRole::Tool => "tool",
         }
         .to_string(),
         content: message.content,
+        tool_call_id: message.tool_call_id,
+        tool_calls: message
+            .tool_calls
+            .into_iter()
+            .map(|tool_call| OpenAiResponseToolCall {
+                id: tool_call.id,
+                kind: "function".to_string(),
+                function: OpenAiResponseFunctionCall {
+                    name: tool_call.name,
+                    arguments: tool_call.arguments,
+                },
+            })
+            .collect(),
     }
 }
 
@@ -587,6 +824,7 @@ fn into_chat_message(message: OpenAiChatResponseMessage) -> Result<ChatMessage, 
         "system" => ChatRole::System,
         "user" => ChatRole::User,
         "assistant" => ChatRole::Assistant,
+        "tool" => ChatRole::Tool,
         other => {
             return Err(OberonError::Validation(format!(
                 "provider response contained unsupported role: {other}"
@@ -597,7 +835,16 @@ fn into_chat_message(message: OpenAiChatResponseMessage) -> Result<ChatMessage, 
     Ok(ChatMessage {
         role,
         content: normalize_assistant_content(role, message.content),
-        tool_calls: Vec::new(),
+        tool_call_id: None,
+        tool_calls: message
+            .tool_calls
+            .into_iter()
+            .map(|call| ChatToolCall {
+                id: call.id,
+                name: call.function.name,
+                arguments: call.function.arguments,
+            })
+            .collect(),
     })
 }
 
@@ -606,6 +853,7 @@ fn parse_role(role: &str) -> Result<ChatRole, OberonError> {
         "system" => Ok(ChatRole::System),
         "user" => Ok(ChatRole::User),
         "assistant" => Ok(ChatRole::Assistant),
+        "tool" => Ok(ChatRole::Tool),
         other => Err(OberonError::Validation(format!(
             "provider response contained unsupported role: {other}"
         ))),
@@ -702,6 +950,34 @@ fn normalize_assistant_content(role: ChatRole, content: String) -> String {
         }
 
         normalized = left.to_string();
+    }
+}
+
+fn into_tool_definition(tool: ProviderToolDefinition) -> OpenAiToolDefinition {
+    OpenAiToolDefinition {
+        kind: "function".to_string(),
+        function: OpenAiFunctionDefinition {
+            name: tool.name,
+            description: tool.description,
+            parameters: tool.parameters_schema,
+        },
+    }
+}
+
+fn normalize_finish_reason(
+    finish_reason: Option<&str>,
+    message: &ChatMessage,
+) -> ProviderFinishState {
+    match finish_reason {
+        Some("tool_calls") if !message.tool_calls.is_empty() => {
+            ProviderFinishState::ToolCallRequested
+        }
+        Some("stop") | Some("length") | None if message.tool_calls.is_empty() => {
+            ProviderFinishState::ResponseComplete
+        }
+        Some("tool_calls") => ProviderFinishState::ToolCallRequested,
+        _ if !message.tool_calls.is_empty() => ProviderFinishState::ToolCallRequested,
+        _ => ProviderFinishState::ResponseComplete,
     }
 }
 
@@ -849,11 +1125,13 @@ mod tests {
             ChatMessage {
                 role: ChatRole::System,
                 content: "be concise".to_string(),
+                tool_call_id: None,
                 tool_calls: Vec::new(),
             },
             ChatMessage {
                 role: ChatRole::User,
                 content: "hello".to_string(),
+                tool_call_id: None,
                 tool_calls: Vec::new(),
             },
         ];
@@ -903,6 +1181,7 @@ mod tests {
                 &[ChatMessage {
                     role: ChatRole::User,
                     content: "hello".to_string(),
+                    tool_call_id: None,
                     tool_calls: Vec::new(),
                 }],
                 &mut |event| {
@@ -939,6 +1218,7 @@ mod tests {
                 &[ChatMessage {
                     role: ChatRole::User,
                     content: "ping".to_string(),
+                    tool_call_id: None,
                     tool_calls: Vec::new(),
                 }],
             )
@@ -975,6 +1255,7 @@ mod tests {
                 &[ChatMessage {
                     role: ChatRole::User,
                     content: "hello".to_string(),
+                    tool_call_id: None,
                     tool_calls: Vec::new(),
                 }],
             )
@@ -1004,6 +1285,7 @@ mod tests {
                 &[ChatMessage {
                     role: ChatRole::User,
                     content: "hello".to_string(),
+                    tool_call_id: None,
                     tool_calls: Vec::new(),
                 }],
             )
@@ -1032,6 +1314,7 @@ mod tests {
                 &[ChatMessage {
                     role: ChatRole::User,
                     content: "hello".to_string(),
+                    tool_call_id: None,
                     tool_calls: Vec::new(),
                 }],
             )
@@ -1066,6 +1349,7 @@ mod tests {
                 &[ChatMessage {
                     role: ChatRole::User,
                     content: "hello".to_string(),
+                    tool_call_id: None,
                     tool_calls: Vec::new(),
                 }],
             )
@@ -1135,6 +1419,7 @@ mod tests {
                 &[ChatMessage {
                     role: ChatRole::User,
                     content: "hello".to_string(),
+                    tool_call_id: None,
                     tool_calls: Vec::new(),
                 }],
             )
@@ -1163,6 +1448,7 @@ mod tests {
                 &[ChatMessage {
                     role: ChatRole::User,
                     content: "hello".to_string(),
+                    tool_call_id: None,
                     tool_calls: Vec::new(),
                 }],
             )
@@ -1194,6 +1480,7 @@ mod tests {
                 &[ChatMessage {
                     role: ChatRole::User,
                     content: "hello".to_string(),
+                    tool_call_id: None,
                     tool_calls: Vec::new(),
                 }],
             )
@@ -1230,6 +1517,7 @@ mod tests {
                 &[ChatMessage {
                     role: ChatRole::User,
                     content: "hello".to_string(),
+                    tool_call_id: None,
                     tool_calls: Vec::new(),
                 }],
             )
@@ -1261,6 +1549,7 @@ mod tests {
                 &[ChatMessage {
                     role: ChatRole::User,
                     content: "hello".to_string(),
+                    tool_call_id: None,
                     tool_calls: Vec::new(),
                 }],
             )
@@ -1310,6 +1599,7 @@ mod tests {
                 &[ChatMessage {
                     role: ChatRole::User,
                     content: "hello".to_string(),
+                    tool_call_id: None,
                     tool_calls: Vec::new(),
                 }],
             )

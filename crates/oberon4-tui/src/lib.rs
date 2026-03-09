@@ -29,7 +29,7 @@ use oberon4_auth::AccountRegistry;
 use oberon4_core::{
     AppConfig, ChatMessage, ChatProvider, ChatRole, ChatToolCallDelta, InMemoryConfigStore,
     InMemorySessionStore, OAuthProviderKind, OberonError, SavedSession, SessionId, SessionStore,
-    SessionSummary, StoredAccount,
+    SessionSummary, StoredAccount, ToolError, ToolResult,
 };
 use oberon4_daemon::{DaemonIpcClient, DaemonRuntime, LifecycleState};
 use oberon4_provider_openai::{FakeTransport, OpenAiCompatibleClient, RetryPolicy};
@@ -216,6 +216,7 @@ pub struct TuiShellState {
     config_snapshot: AppConfig,
     form_action: Option<FormAction>,
     diagnostics_endpoint_health: String,
+    pending_approval: Option<(String, String)>,
     autocomplete: Option<AutocompleteState>,
     render_tick: u64,
     transcript_scroll: u16,
@@ -278,6 +279,15 @@ struct PendingOAuthConnect {
 enum AsyncUiEvent {
     TextDelta(String),
     ToolCallDelta(ChatToolCallDelta),
+    ToolResult(ToolResult),
+    ToolError(ToolError),
+    ApprovalRequired {
+        approval_id: String,
+        payload_json: String,
+    },
+    ChatPaused {
+        approval_id: String,
+    },
     Complete {
         prompt: String,
         message: ChatMessage,
@@ -356,6 +366,7 @@ impl Default for TuiShellState {
             config_snapshot: AppConfig::default(),
             form_action: None,
             diagnostics_endpoint_health: "unknown".to_string(),
+            pending_approval: None,
             autocomplete: None,
             render_tick: 0,
             transcript_scroll: 0,
@@ -480,7 +491,7 @@ impl TuiApp {
                     summary: SessionSummary {
                         id: SessionId::new(name.clone()),
                         title: name.clone(),
-                        provider: oberon4_core::ChatProviderKind::OpenAiCompatible,
+                        provider: self.runtime.load_config()?.endpoint.provider,
                         model: self.runtime.load_config()?.endpoint.model.clone(),
                     },
                     messages: self.transcript.clone(),
@@ -504,7 +515,7 @@ impl TuiApp {
                     summary: SessionSummary {
                         id: SessionId::new(name.clone()),
                         title: name.clone(),
-                        provider: oberon4_core::ChatProviderKind::OpenAiCompatible,
+                        provider: self.runtime.load_config()?.endpoint.provider,
                         model: self.runtime.load_config()?.endpoint.model.clone(),
                     },
                     messages: self.transcript.clone(),
@@ -547,6 +558,7 @@ impl TuiApp {
                 self.transcript.push(ChatMessage {
                     role: ChatRole::System,
                     content: prompt_text,
+                    tool_call_id: None,
                     tool_calls: Vec::new(),
                 });
             }
@@ -554,6 +566,7 @@ impl TuiApp {
         self.transcript.push(ChatMessage {
             role: ChatRole::User,
             content: prompt.to_string(),
+            tool_call_id: None,
             tool_calls: Vec::new(),
         });
         let config = self.runtime.load_config()?;
@@ -701,7 +714,7 @@ impl DaemonBackedTuiApp {
                     summary: SessionSummary {
                         id: SessionId::new(name.clone()),
                         title: name.clone(),
-                        provider: oberon4_core::ChatProviderKind::OpenAiCompatible,
+                        provider: self.load_config()?.endpoint.provider,
                         model: self.load_config()?.endpoint.model,
                     },
                     messages: self.transcript.clone(),
@@ -738,7 +751,7 @@ impl DaemonBackedTuiApp {
                     summary: SessionSummary {
                         id: SessionId::new(name.clone()),
                         title: name.clone(),
-                        provider: oberon4_core::ChatProviderKind::OpenAiCompatible,
+                        provider: self.load_config()?.endpoint.provider,
                         model: self.load_config()?.endpoint.model,
                     },
                     messages: self.transcript.clone(),
@@ -991,6 +1004,7 @@ impl DaemonBackedTuiApp {
                 messages.push(ChatMessage {
                     role: ChatRole::System,
                     content: prompt_text,
+                    tool_call_id: None,
                     tool_calls: Vec::new(),
                 });
             }
@@ -998,6 +1012,7 @@ impl DaemonBackedTuiApp {
         messages.push(ChatMessage {
             role: ChatRole::User,
             content: prompt.to_string(),
+            tool_call_id: None,
             tool_calls: Vec::new(),
         });
         messages
@@ -1009,6 +1024,7 @@ impl DaemonBackedTuiApp {
                 self.transcript.push(ChatMessage {
                     role: ChatRole::System,
                     content: prompt_text,
+                    tool_call_id: None,
                     tool_calls: Vec::new(),
                 });
             }
@@ -1016,6 +1032,7 @@ impl DaemonBackedTuiApp {
         self.transcript.push(ChatMessage {
             role: ChatRole::User,
             content: prompt.to_string(),
+            tool_call_id: None,
             tool_calls: Vec::new(),
         });
         self.transcript.push(message);
@@ -1037,6 +1054,12 @@ impl DaemonBackedTuiApp {
                     final_message = Some(message);
                     Ok(())
                 }
+                oberon4_core::DaemonEvent::ChatChunk { .. }
+                | oberon4_core::DaemonEvent::ToolCallDelta { .. }
+                | oberon4_core::DaemonEvent::ToolResult { .. }
+                | oberon4_core::DaemonEvent::ToolError { .. }
+                | oberon4_core::DaemonEvent::ApprovalRequired { .. }
+                | oberon4_core::DaemonEvent::ChatPaused { .. } => on_event(event),
                 oberon4_core::DaemonEvent::Error { message } => {
                     Err(OberonError::Validation(message))
                 }
@@ -2981,6 +3004,21 @@ fn start_async_submit(
         return Ok(None);
     }
 
+    if let Some((approval_id, _payload_json)) = shell.pending_approval.clone() {
+        let decision = match trimmed.as_str() {
+            "approve" | "yes" | "y" => "approve",
+            "deny" | "no" | "n" => "deny",
+            _ => {
+                shell.set_activity(
+                    ActivityState::Error,
+                    "enter approve or deny to resolve the pending tool action",
+                );
+                return Ok(None);
+            }
+        };
+        return start_async_approval_resolution(app, shell, approval_id, decision.to_string());
+    }
+
     let app_clone = app.clone();
     let prompt = trimmed.clone();
     shell.input.clear();
@@ -3015,6 +3053,20 @@ fn start_async_submit(
                 oberon4_core::DaemonEvent::ToolCallDelta { delta } => {
                     AsyncUiEvent::ToolCallDelta(delta)
                 }
+                oberon4_core::DaemonEvent::ToolResult { result } => {
+                    AsyncUiEvent::ToolResult(result)
+                }
+                oberon4_core::DaemonEvent::ToolError { error } => AsyncUiEvent::ToolError(error),
+                oberon4_core::DaemonEvent::ApprovalRequired {
+                    approval_id,
+                    payload_json,
+                } => AsyncUiEvent::ApprovalRequired {
+                    approval_id,
+                    payload_json,
+                },
+                oberon4_core::DaemonEvent::ChatPaused { approval_id } => {
+                    AsyncUiEvent::ChatPaused { approval_id }
+                }
                 other => {
                     return Err(OberonError::Storage(format!(
                         "unexpected daemon stream event: {other:?}"
@@ -3037,6 +3089,91 @@ fn start_async_submit(
         started_at: Instant::now(),
         timeout,
         assistant_line_index,
+        tool_line_indices: BTreeMap::new(),
+        tool_state: BTreeMap::new(),
+    }))
+}
+
+fn start_async_approval_resolution(
+    app: &mut DaemonBackedTuiApp,
+    shell: &mut TuiShellState,
+    approval_id: String,
+    decision: String,
+) -> Result<Option<PendingSubmission>, OberonError> {
+    let app_clone = app.clone();
+    shell.input.clear();
+    shell.set_activity(ActivityState::WaitingOnProvider, "resolving approval...");
+    let timeout = app
+        .load_config()
+        .map(|config| Duration::from_millis(config.runtime.stream_idle_timeout_ms))
+        .unwrap_or_else(|_| Duration::from_secs(30));
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let stream_sender = sender.clone();
+        let result = app_clone.client.send_stream(
+            &oberon4_core::DaemonCommand::ResolveApproval {
+                approval_id,
+                decision,
+            },
+            &mut |event| {
+                let mapped = match event {
+                    oberon4_core::DaemonEvent::ChatChunk { content } => {
+                        AsyncUiEvent::TextDelta(content)
+                    }
+                    oberon4_core::DaemonEvent::ToolCallDelta { delta } => {
+                        AsyncUiEvent::ToolCallDelta(delta)
+                    }
+                    oberon4_core::DaemonEvent::ToolResult { result } => {
+                        AsyncUiEvent::ToolResult(result)
+                    }
+                    oberon4_core::DaemonEvent::ToolError { error } => {
+                        AsyncUiEvent::ToolError(error)
+                    }
+                    oberon4_core::DaemonEvent::ApprovalRequired {
+                        approval_id,
+                        payload_json,
+                    } => AsyncUiEvent::ApprovalRequired {
+                        approval_id,
+                        payload_json,
+                    },
+                    oberon4_core::DaemonEvent::ChatPaused { approval_id } => {
+                        AsyncUiEvent::ChatPaused { approval_id }
+                    }
+                    oberon4_core::DaemonEvent::ChatComplete { message } => {
+                        return stream_sender
+                            .send(AsyncUiEvent::Complete {
+                                prompt: String::new(),
+                                message,
+                            })
+                            .map_err(|_| {
+                                OberonError::Storage("tui stream channel closed".to_string())
+                            });
+                    }
+                    oberon4_core::DaemonEvent::Error { message } => {
+                        return Err(OberonError::Validation(message));
+                    }
+                    other => {
+                        return Err(OberonError::Storage(format!(
+                            "unexpected daemon stream event: {other:?}"
+                        )));
+                    }
+                };
+                stream_sender
+                    .send(mapped)
+                    .map_err(|_| OberonError::Storage("tui stream channel closed".to_string()))
+            },
+        );
+
+        if let Err(err) = result {
+            let _ = sender.send(AsyncUiEvent::Failed(err));
+        }
+    });
+
+    Ok(Some(PendingSubmission {
+        receiver,
+        started_at: Instant::now(),
+        timeout,
+        assistant_line_index: shell.transcript.len().saturating_sub(1),
         tool_line_indices: BTreeMap::new(),
         tool_state: BTreeMap::new(),
     }))
@@ -3135,13 +3272,59 @@ fn handle_async_ui_event(
                 }
             }
         }
+        AsyncUiEvent::ToolResult(result) => {
+            shell.transcript.push(UiLine {
+                role: "tool".to_string(),
+                content: format!(
+                    "result {}.{}: {}",
+                    result.tool, result.command, result.summary
+                ),
+            });
+            shell.scroll_transcript_to_bottom();
+        }
+        AsyncUiEvent::ToolError(error) => {
+            shell.transcript.push(UiLine {
+                role: "error".to_string(),
+                content: format!(
+                    "tool {} failed [{}]: {}",
+                    error.command, error.code, error.message
+                ),
+            });
+            shell.scroll_transcript_to_bottom();
+        }
+        AsyncUiEvent::ApprovalRequired {
+            approval_id,
+            payload_json,
+        } => {
+            shell.pending_approval = Some((approval_id, payload_json.clone()));
+            shell.transcript.push(UiLine {
+                role: "approval".to_string(),
+                content: format!(
+                    "approval required: {} (type approve or deny)",
+                    summarize_approval_payload(&payload_json)
+                ),
+            });
+            shell.scroll_transcript_to_bottom();
+            shell.set_activity(ActivityState::WaitingOnProvider, "approval required");
+        }
+        AsyncUiEvent::ChatPaused { approval_id } => {
+            shell
+                .pending_approval
+                .get_or_insert((approval_id, String::new()));
+            shell.set_activity(ActivityState::WaitingOnProvider, "chat paused for approval");
+        }
         AsyncUiEvent::Complete { prompt, message } => {
             let pending = pending_submission.take();
             if let Some(pending) = pending {
                 finalize_streamed_assistant(shell, &pending, &message);
             }
-            app.apply_successful_prompt(&prompt, message.clone());
-            let _ = shell.autosave_current_session(app, &prompt, &message.content);
+            if prompt.is_empty() {
+                app.transcript.push(message);
+            } else {
+                app.apply_successful_prompt(&prompt, message.clone());
+                let _ = shell.autosave_current_session(app, &prompt, &message.content);
+            }
+            shell.pending_approval = None;
             shell.set_activity(ActivityState::Idle, "response complete");
             shell.refresh_runtime_data(app);
         }
@@ -4433,6 +4616,10 @@ fn submit_inline_input(
             let _ = merge_tool_ui_delta(&mut tool_state, delta);
             Ok(())
         }
+        oberon4_core::DaemonEvent::ToolResult { .. }
+        | oberon4_core::DaemonEvent::ToolError { .. }
+        | oberon4_core::DaemonEvent::ApprovalRequired { .. }
+        | oberon4_core::DaemonEvent::ChatPaused { .. } => Ok(()),
         other => Err(OberonError::Storage(format!(
             "unexpected daemon stream event: {other:?}"
         ))),
@@ -5119,7 +5306,24 @@ fn role_label(role: ChatRole) -> &'static str {
         ChatRole::System => "system",
         ChatRole::User => "user",
         ChatRole::Assistant => "assistant",
+        ChatRole::Tool => "tool",
     }
+}
+
+fn summarize_approval_payload(payload_json: &str) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(payload_json) else {
+        return payload_json.to_string();
+    };
+    let action = value
+        .get("actionSummary")
+        .and_then(|v| v.as_str())
+        .unwrap_or("pending tool action");
+    let tool = value.get("tool").and_then(|v| v.as_str()).unwrap_or("tool");
+    let command = value
+        .get("command")
+        .and_then(|v| v.as_str())
+        .unwrap_or("command");
+    format!("{tool}.{command}: {action}")
 }
 
 fn default_provider_client() -> OpenAiCompatibleClient<FakeTransport> {
@@ -6174,6 +6378,7 @@ mod tests {
         let message = ChatMessage {
             role: ChatRole::Assistant,
             content: "Hello!".to_string(),
+            tool_call_id: None,
             tool_calls: Vec::new(),
         };
 

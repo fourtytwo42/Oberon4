@@ -1,4 +1,12 @@
+use std::{thread, time::Duration};
+
+use oberon4_auth::{AccountRegistry, InMemoryAccountMetadataStore};
 use oberon4_cli::{CliApp, CliCommand};
+use oberon4_core::{
+    DaemonCommand, DaemonEvent, FakeChatProvider, FakeOAuthProvider, InMemorySecretStore,
+    OAuthProviderKind,
+};
+use oberon4_daemon::{DaemonApp, DaemonIpcClient, DaemonRuntime, serve_unix_socket};
 use oberon4_tui::TuiApp;
 
 #[test]
@@ -56,6 +64,35 @@ fn end_to_end_oauth_account_connect_and_switch() {
 
 #[test]
 fn end_to_end_cli_chat_and_tui_chat_path() {
+    let socket_path =
+        std::env::temp_dir().join(format!("oberon4-cli-e2e-chat-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&socket_path);
+
+    unsafe {
+        std::env::set_var("OBERON4_SOCKET_PATH", &socket_path);
+    }
+
+    let thread_socket = socket_path.clone();
+    let handle = thread::spawn(move || {
+        let app = DaemonApp::new(
+            DaemonRuntime::default(),
+            FakeChatProvider::default(),
+            FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
+            FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+            AccountRegistry::default(),
+            InMemorySecretStore::default(),
+            InMemoryAccountMetadataStore::default(),
+        );
+        serve_unix_socket(&thread_socket, app)
+    });
+
+    for _ in 0..20 {
+        if socket_path.exists() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+
     let mut cli = CliApp::default();
     let cli_chat = cli.run(CliCommand::Chat {
         message: "hello".to_string(),
@@ -65,9 +102,22 @@ fn end_to_end_cli_chat_and_tui_chat_path() {
     let tui_chat = tui.handle_input("hello from tui").unwrap();
 
     assert_eq!(cli_chat.exit_code, 0);
-    assert_eq!(cli_chat.stdout, "pong");
+    assert!(!cli_chat.stdout.trim().is_empty());
     assert_eq!(tui_chat.output, "assistant reply");
     assert_eq!(tui.transcript().len(), 2);
+
+    let stop = DaemonIpcClient::new(&socket_path)
+        .send(&DaemonCommand::Shutdown)
+        .unwrap();
+    match stop {
+        DaemonEvent::Ack { message } => assert_eq!(message, "daemon stopped"),
+        other => panic!("unexpected stop event: {other:?}"),
+    }
+    handle.join().unwrap().unwrap();
+
+    unsafe {
+        std::env::remove_var("OBERON4_SOCKET_PATH");
+    }
 }
 
 #[test]

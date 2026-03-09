@@ -50,7 +50,8 @@ pub use plugin_runtime::{
 pub use result::ServiceEnvelope;
 pub use service::{
     ChatProvider, ChatStreamEvent, ConfigStore, OAuthCallbackPayload, OAuthProvider, OAuthStart,
-    PendingOAuthFlow, SessionStore, TokenBundle,
+    PendingOAuthFlow, ProviderCapabilityMatrix, ProviderFinishState, ProviderToolDefinition,
+    SessionStore, TokenBundle, ToolAwareChatProvider, ToolAwareProviderResponse,
 };
 pub use state::{
     FileSecretStore, InMemorySecretStore, InMemoryStateStore, SecretStore, StateStore,
