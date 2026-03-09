@@ -15,6 +15,8 @@ use oberon4_core::{
     ToolInvokeResponseEnvelope, ToolTier, WorkspaceImpact,
 };
 
+use crate::plugin_runtime_exec::ExecutionEngine;
+
 pub const HOST_RUNTIME_API_VERSION: &str = "1.0";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +64,7 @@ pub struct RuntimeBrokerFoundations {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegisteredPlugin {
     pub manifest_path: PathBuf,
+    pub wasm_path: PathBuf,
     pub manifest: PluginManifest,
 }
 
@@ -95,6 +98,13 @@ impl FilePluginRegistry {
             let manifest_paths = discover_manifest_paths(root)?;
             for manifest_path in manifest_paths {
                 let manifest = load_manifest(&manifest_path)?;
+                let wasm_path = manifest_path.with_file_name("plugin.wasm");
+                if !wasm_path.is_file() {
+                    return Err(OberonError::ManifestValidation(format!(
+                        "{}: missing plugin.wasm adjacent to plugin.json",
+                        manifest_path.display()
+                    )));
+                }
                 let validation = validate_manifest(&manifest, runtime_api_version);
                 if !validation.valid {
                     let issues = validation
@@ -132,6 +142,7 @@ impl FilePluginRegistry {
                     plugin_id,
                     RegisteredPlugin {
                         manifest_path,
+                        wasm_path,
                         manifest,
                     },
                 );
@@ -150,6 +161,10 @@ impl FilePluginRegistry {
             .get(tool)
             .ok_or_else(|| OberonError::NotFound(format!("plugin:{tool}")))
     }
+}
+
+pub trait RegisteredPluginAccess: PluginRegistry {
+    fn registered_plugin(&self, tool: &str) -> Result<RegisteredPlugin, OberonError>;
 }
 
 impl PluginRegistry for FilePluginRegistry {
@@ -286,6 +301,12 @@ impl PluginRegistry for FilePluginRegistry {
     }
 }
 
+impl RegisteredPluginAccess for FilePluginRegistry {
+    fn registered_plugin(&self, tool: &str) -> Result<RegisteredPlugin, OberonError> {
+        self.get_registered_plugin(tool).cloned()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StaticPolicyResolver {
     operating_mode: OperatingMode,
@@ -365,15 +386,15 @@ impl PolicyResolver for StaticPolicyResolver {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginRuntimeHost<R, P> {
     registry: R,
     policy: P,
     broker_foundations: RuntimeBrokerFoundations,
+    execution: ExecutionEngine,
 }
 
 impl<R, P> PluginRuntimeHost<R, P> {
-    pub fn new(registry: R, policy: P) -> Self {
+    pub fn new(registry: R, policy: P) -> Result<Self, OberonError> {
         Self::with_foundations(registry, policy, RuntimeBrokerFoundations::default())
     }
 
@@ -381,12 +402,14 @@ impl<R, P> PluginRuntimeHost<R, P> {
         registry: R,
         policy: P,
         broker_foundations: RuntimeBrokerFoundations,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, OberonError> {
+        let execution = ExecutionEngine::new(broker_foundations.clone())?;
+        Ok(Self {
             registry,
             policy,
             broker_foundations,
-        }
+            execution,
+        })
     }
 
     pub fn broker_foundations(&self) -> &RuntimeBrokerFoundations {
@@ -454,7 +477,7 @@ where
 
 impl<R, P> HostToolRuntime for PluginRuntimeHost<R, P>
 where
-    R: PluginRegistry,
+    R: PluginRegistry + RegisteredPluginAccess,
     P: PolicyResolver,
 {
     fn tool_search(&self, request: &SearchRequest) -> Result<SearchResponse, OberonError> {
@@ -484,20 +507,18 @@ where
         let resolution = self
             .policy
             .resolve(&request.context.plugin_id, &command, &manifest)?;
-        let approval_preview = self.approval_payload_for_plan(request)?.map(|payload| {
-            oberon4_core::CommandPlanPreview {
+        let effective_request = PlanRequest {
+            command: request.command.clone(),
+            input: request.input.clone(),
+            context: apply_policy_to_context(&request.context, &resolution.resource_limits),
+        };
+        let unsupported = unsupported_wp2_capabilities(&command);
+        let approval_preview = self
+            .approval_payload_for_plan(&effective_request)?
+            .map(|payload| oberon4_core::CommandPlanPreview {
                 summary: payload.summary,
                 workspace_impact: payload.workspace_impact,
-            }
-        });
-        let side_effects = command.side_effects.clone();
-        let capabilities_required = command.required_capabilities.clone();
-        let estimated_cost = match side_effects {
-            SideEffectClass::Destructive => oberon4_core::EstimatedCost::High,
-            SideEffectClass::ExternalWrite => oberon4_core::EstimatedCost::Medium,
-            _ => oberon4_core::EstimatedCost::Low,
-        };
-        let preconditions = preconditions_for(&command);
+            });
 
         let mut blocking_issues = resolution
             .capabilities
@@ -506,15 +527,62 @@ where
             .map(|capability| format!("blocked capability: {capability}"))
             .collect::<Vec<_>>();
         blocking_issues.extend(resolution.blocking_issues);
+        if !unsupported.is_empty() {
+            blocking_issues.push(format!(
+                "WP2 does not support required capabilities: {}",
+                unsupported.join(", ")
+            ));
+        }
+
+        if !resolution.capabilities.blocked.is_empty() || !unsupported.is_empty() {
+            return Ok(PlanResult {
+                status: PlanStatus::Ok,
+                side_effects: command.side_effects.clone(),
+                approval_required: resolution.approval_required,
+                capabilities_required: command.required_capabilities.clone(),
+                estimated_cost: estimate_cost(&command.side_effects),
+                estimated_steps: 0,
+                preconditions: preconditions_for(&command),
+                blocking_issues,
+                resource_limits: Some(resolution.resource_limits),
+                approval_preview,
+            });
+        }
+
+        let registered = self
+            .registry
+            .registered_plugin(&request.context.plugin_id)?;
+        let plugin_plan = if command.supports_planning {
+            Some(
+                self.execution
+                    .plan(&registered, &command, &effective_request)
+                    .map_err(map_tool_error_to_oberon_error)?,
+            )
+        } else {
+            None
+        };
+        if let Some(plugin_plan) = plugin_plan.as_ref() {
+            validate_plugin_plan_contract(plugin_plan, &command, &effective_request)?;
+            blocking_issues.extend(plugin_plan.blocking_issues.clone());
+        }
 
         Ok(PlanResult {
             status: PlanStatus::Ok,
-            side_effects,
+            side_effects: command.side_effects.clone(),
             approval_required: resolution.approval_required,
-            capabilities_required,
-            estimated_cost,
-            estimated_steps: 1,
-            preconditions,
+            capabilities_required: command.required_capabilities.clone(),
+            estimated_cost: plugin_plan
+                .as_ref()
+                .map(|plan| plan.estimated_cost.clone())
+                .unwrap_or_else(|| estimate_cost(&command.side_effects)),
+            estimated_steps: plugin_plan
+                .as_ref()
+                .map(|plan| plan.estimated_steps)
+                .unwrap_or(1),
+            preconditions: plugin_plan
+                .as_ref()
+                .map(|plan| plan.preconditions.clone())
+                .unwrap_or_else(|| preconditions_for(&command)),
             blocking_issues,
             resource_limits: Some(resolution.resource_limits),
             approval_preview,
@@ -537,9 +605,16 @@ where
             .registry
             .command_manifest(&request.context.plugin_id, &request.command)?;
         validate_request_shape(&command, request.input.as_object().is_some())?;
+        validate_output_schema_shape(&command)?;
         let resolution = self
             .policy
             .resolve(&request.context.plugin_id, &command, &manifest)?;
+        let effective_request = oberon4_core::InvokeRequest {
+            command: request.command.clone(),
+            input: request.input.clone(),
+            context: apply_policy_to_context(&request.context, &resolution.resource_limits),
+        };
+        let unsupported = unsupported_wp2_capabilities(&command);
 
         if !resolution.capabilities.blocked.is_empty() {
             return Ok(ToolInvokeResponseEnvelope {
@@ -560,23 +635,54 @@ where
                 }),
             });
         }
+        if !unsupported.is_empty() {
+            return Ok(ToolInvokeResponseEnvelope {
+                result: None,
+                error: Some(ToolError {
+                    status: ErrorStatus::Error,
+                    code: "NOT_YET_SUPPORTED_IN_WP2".to_string(),
+                    message: format!(
+                        "WP2 does not support required capabilities: {}",
+                        unsupported.join(", ")
+                    ),
+                    retryable: false,
+                    request_id: request.context.request_id.clone(),
+                    plugin_id: request.context.plugin_id.clone(),
+                    plugin_version: request.context.plugin_version.clone(),
+                    command: request.command.clone(),
+                    next_suggested_action: Some("tool_policy_inspect".to_string()),
+                }),
+            });
+        }
+
+        let registered = self
+            .registry
+            .registered_plugin(&request.context.plugin_id)?;
+        let invoke_result = match self
+            .execution
+            .invoke(&registered, &command, &effective_request)
+        {
+            Ok(result) => result,
+            Err(error) => {
+                return Ok(ToolInvokeResponseEnvelope {
+                    result: None,
+                    error: Some(error),
+                });
+            }
+        };
 
         Ok(ToolInvokeResponseEnvelope {
-            result: None,
-            error: Some(ToolError {
-                status: ErrorStatus::Error,
-                code: "NOT_YET_EXECUTABLE".to_string(),
-                message: format!(
-                    "{}.{} is registered but execution is not available until WP2",
-                    request.context.plugin_id, request.command
-                ),
-                retryable: false,
-                request_id: request.context.request_id.clone(),
-                plugin_id: request.context.plugin_id.clone(),
-                plugin_version: request.context.plugin_version.clone(),
+            result: Some(oberon4_core::ToolResult {
+                status: invoke_result.status,
+                tool: request.context.plugin_id.clone(),
                 command: request.command.clone(),
-                next_suggested_action: Some("tool_plan".to_string()),
+                summary: invoke_result.summary,
+                data: invoke_result.data,
+                artifacts: invoke_result.artifacts,
+                truncated: false,
+                next_suggested_action: invoke_result.next_suggested_action,
             }),
+            error: None,
         })
     }
 
@@ -837,6 +943,14 @@ fn preconditions_for(command: &PluginCommandManifest) -> Vec<String> {
     }
 }
 
+fn estimate_cost(side_effects: &SideEffectClass) -> oberon4_core::EstimatedCost {
+    match side_effects {
+        SideEffectClass::Destructive => oberon4_core::EstimatedCost::High,
+        SideEffectClass::ExternalWrite => oberon4_core::EstimatedCost::Medium,
+        _ => oberon4_core::EstimatedCost::Low,
+    }
+}
+
 fn validate_request_shape(
     command: &PluginCommandManifest,
     input_is_object: bool,
@@ -854,6 +968,93 @@ fn validate_request_shape(
         )));
     }
     Ok(())
+}
+
+fn validate_output_schema_shape(command: &PluginCommandManifest) -> Result<(), OberonError> {
+    if !command.output_schema.is_object() {
+        return Err(OberonError::ContractMismatch(format!(
+            "command '{}.{}' output schema must be a JSON object",
+            command.name, command.version
+        )));
+    }
+    Ok(())
+}
+
+fn validate_plugin_plan_contract(
+    plugin_plan: &PlanResult,
+    command: &PluginCommandManifest,
+    request: &PlanRequest,
+) -> Result<(), OberonError> {
+    if plugin_plan.side_effects != command.side_effects {
+        return Err(OberonError::ContractMismatch(format!(
+            "plugin plan side effects for '{}.{}' did not match manifest declaration in request {}",
+            request.context.plugin_id,
+            request.command,
+            request.context.request_id.as_str()
+        )));
+    }
+    if plugin_plan.capabilities_required != command.required_capabilities {
+        return Err(OberonError::ContractMismatch(format!(
+            "plugin plan capabilities for '{}.{}' did not match manifest declaration in request {}",
+            request.context.plugin_id,
+            request.command,
+            request.context.request_id.as_str()
+        )));
+    }
+    Ok(())
+}
+
+fn map_tool_error_to_oberon_error(error: ToolError) -> OberonError {
+    match error.code.as_str() {
+        "CAPABILITY_DENIED" => OberonError::PolicyDenied(error.message),
+        "RUNTIME_CONTRACT_MISMATCH" => OberonError::ContractMismatch(error.message),
+        "NOT_YET_SUPPORTED_IN_WP2" => OberonError::Validation(error.message),
+        "RUNTIME_COMPONENT_LOAD_FAILED"
+        | "RESOURCE_LIMIT_TIMEOUT"
+        | "RESOURCE_LIMIT_MEMORY"
+        | "RESOURCE_LIMIT_OUTPUT"
+        | "RESOURCE_LIMIT_STORAGE" => OberonError::Storage(error.message),
+        _ => OberonError::Validation(error.message),
+    }
+}
+
+fn apply_policy_to_context(
+    context: &oberon4_core::InvocationContext,
+    limits: &ResourceLimits,
+) -> oberon4_core::InvocationContext {
+    oberon4_core::InvocationContext {
+        request_id: context.request_id.clone(),
+        session_id: context.session_id.clone(),
+        plugin_id: context.plugin_id.clone(),
+        plugin_version: context.plugin_version.clone(),
+        command: context.command.clone(),
+        deadline: context.deadline.clone(),
+        runtime_api_version: context.runtime_api_version.clone(),
+        capability_grants: context.capability_grants.clone(),
+        workspace_revision: context.workspace_revision.clone(),
+        memory_limit: limits.memory_bytes.unwrap_or(context.memory_limit),
+        time_limit_ms: limits.time_ms.unwrap_or(context.time_limit_ms),
+        output_limit_bytes: limits.output_bytes.unwrap_or(context.output_limit_bytes),
+        storage_limit_bytes: limits.storage_bytes.unwrap_or(context.storage_limit_bytes),
+        network_policy: limits
+            .network_policy
+            .clone()
+            .unwrap_or_else(|| context.network_policy.clone()),
+    }
+}
+
+fn unsupported_wp2_capabilities(command: &PluginCommandManifest) -> Vec<String> {
+    command
+        .required_capabilities
+        .iter()
+        .filter(|capability| {
+            !matches!(
+                capability.as_str(),
+                "storage.private" | "storage.session" | "storage.cache"
+            )
+        })
+        .cloned()
+        .collect()
 }
 
 fn workspace_impact_from_plan(request: &PlanRequest) -> Option<WorkspaceImpact> {
@@ -1043,6 +1244,7 @@ mod tests {
             serde_json::to_vec_pretty(manifest).unwrap(),
         )
         .unwrap();
+        fs::write(plugin_dir.join("plugin.wasm"), b"not-a-real-component").unwrap();
     }
 
     fn sample_context() -> InvocationContext {
@@ -1172,7 +1374,7 @@ mod tests {
         let registry =
             FilePluginRegistry::load_from_roots(&[root.clone()], HOST_RUNTIME_API_VERSION).unwrap();
         let policy = StaticPolicyResolver::default();
-        let host = PluginRuntimeHost::new(registry, policy);
+        let host = PluginRuntimeHost::new(registry, policy).unwrap();
 
         let plan = host
             .tool_plan(&PlanRequest {
@@ -1186,7 +1388,11 @@ mod tests {
             })
             .unwrap();
         assert!(plan.approval_required);
-        assert!(plan.blocking_issues.is_empty());
+        assert!(
+            plan.blocking_issues
+                .iter()
+                .any(|issue| issue.contains("WP2 does not support required capabilities"))
+        );
         assert_eq!(plan.resource_limits.unwrap().time_ms, Some(4_000));
 
         let inspect = host
@@ -1241,7 +1447,7 @@ mod tests {
             },
             BTreeSet::from(["workspace.write".to_string()]),
         );
-        let host = PluginRuntimeHost::new(registry, policy);
+        let host = PluginRuntimeHost::new(registry, policy).unwrap();
 
         let response = host
             .tool_invoke(&InvokeRequest {
@@ -1264,13 +1470,13 @@ mod tests {
     }
 
     #[test]
-    fn invoke_fails_closed_before_wp2_execution() {
+    fn invoke_fails_closed_for_wp2_unsupported_capabilities() {
         let root = temp_dir("invoke");
         let manifest = sample_manifest();
         write_manifest(&root, &manifest);
         let registry =
             FilePluginRegistry::load_from_roots(&[root.clone()], HOST_RUNTIME_API_VERSION).unwrap();
-        let host = PluginRuntimeHost::new(registry, StaticPolicyResolver::default());
+        let host = PluginRuntimeHost::new(registry, StaticPolicyResolver::default()).unwrap();
 
         let response = host
             .tool_invoke(&InvokeRequest {
@@ -1285,7 +1491,7 @@ mod tests {
             .unwrap();
         assert!(response.result.is_none());
         let error = response.error.expect("error should be present");
-        assert_eq!(error.code, "NOT_YET_EXECUTABLE");
+        assert_eq!(error.code, "NOT_YET_SUPPORTED_IN_WP2");
         assert!(!error.retryable);
 
         let _ = fs::remove_dir_all(root);

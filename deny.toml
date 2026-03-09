@@ -6,16 +6,22 @@ all-features = true
 yanked = "deny"
 ignore = [
   { id = "RUSTSEC-2024-0436", reason = "ratatui transitively depends on paste; no safe upgrade is available yet" },
+  { id = "RUSTSEC-2025-0118", reason = "WP2 pins wasmtime 34.0.2 on the Rust 1.85 toolchain; upgrade tracked as a time-bound exception until the runtime can move to a patched Wasmtime line" },
+  { id = "RUSTSEC-2026-0006", reason = "WP2 pins wasmtime 34.0.2 on the Rust 1.85 toolchain; upgrade tracked as a time-bound exception until the runtime can move to a patched Wasmtime line" },
+  { id = "RUSTSEC-2026-0020", reason = "WP2 pins wasmtime 34.0.2 on the Rust 1.85 toolchain; upgrade tracked as a time-bound exception until the runtime can move to a patched Wasmtime line" },
+  { id = "RUSTSEC-2026-0021", reason = "WP2 pins wasmtime 34.0.2 on the Rust 1.85 toolchain; upgrade tracked as a time-bound exception until the runtime can move to a patched Wasmtime line" },
 ]
 
 [licenses]
 allow = [
   "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
   "BSD-2-Clause",
   "BSD-3-Clause",
   "CDLA-Permissive-2.0",
   "ISC",
   "MIT",
+  "MIT-0",
   "MPL-2.0",
   "OpenSSL",
   "Unicode-3.0",

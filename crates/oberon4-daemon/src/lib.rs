@@ -1,4 +1,5 @@
 pub mod plugin_runtime;
+pub mod plugin_runtime_exec;
 
 use std::{
     collections::BTreeMap,
@@ -23,6 +24,7 @@ pub use plugin_runtime::{
     RegisteredPlugin, RuntimeBrokerFoundations, StaticPolicyResolver, StorageBrokerFoundation,
     validate_manifest,
 };
+pub use plugin_runtime_exec::ExecutionEngine;
 
 pub fn daemon_status(config: &AppConfig) -> ServiceEnvelope<String> {
     ServiceEnvelope::success(format!(

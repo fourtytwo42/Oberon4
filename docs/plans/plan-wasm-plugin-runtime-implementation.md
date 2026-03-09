@@ -116,19 +116,19 @@ Evidence:
 - `cargo fmt --all`
 
 ### Phase 2: WASM/WASI Execution Layer
-- [ ] `WP2.1` Integrate the selected WASM/WASI runtime.
-- [ ] `WP2.2` Implement per-invocation instance lifecycle.
-- [ ] `WP2.3` Implement invocation context injection:
+- [x] `WP2.1` Integrate the selected WASM/WASI runtime.
+- [x] `WP2.2` Implement per-invocation instance lifecycle.
+- [x] `WP2.3` Implement invocation context injection:
   - request ids
   - handles
   - resolved limits
   - workspace revision where applicable
-- [ ] `WP2.4` Enforce:
+- [x] `WP2.4` Enforce:
   - memory limits
   - wall-clock timeouts
   - output limits
   - storage growth limits
-- [ ] `WP2.5` Implement structured resource-limit failures.
+- [x] `WP2.5` Implement structured resource-limit failures.
 
 Dependencies:
 - depends on `EG-WP1`
@@ -138,6 +138,10 @@ Verification gate `EG-WP2`:
 - memory limit tests pass
 - output limit tests pass
 - structured limit error tests pass
+Evidence:
+- `cargo test -p oberon4-daemon`
+- `cargo test -p oberon4-daemon --test plugin_runtime_execution`
+- `cargo fmt --all`
 
 ### Phase 3: Secret and Service Brokers
 - [ ] `WP3.1` Implement host secret broker contract with:
