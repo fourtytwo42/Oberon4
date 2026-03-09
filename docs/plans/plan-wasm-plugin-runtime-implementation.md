@@ -1,11 +1,11 @@
 # Plan: Oberon4 WASM/WASI Plugin Runtime Implementation
 
 Version: 0.1
-Status: draft
+Status: completed
 Owner: Oberon4
 WorkflowType: feature-development
 WorkflowMode: incremental-gates
-TaskState: planned
+TaskState: done
 Stack: rust
 Risk: high-risk
 
@@ -322,8 +322,12 @@ Expected evidence categories:
 - shared-workspace conflict results
 - install-and-go package validation results
 
-## 8. Open Implementation Decisions
-- choose the WASM runtime and component-model strategy
-- choose the initial Rust crate boundaries for runtime, brokers, and package logic
-- choose whether the first git implementation is fully embedded immediately or temporarily backed by a host adapter behind the same contract
-- choose the initial secure-store adapter order for each supported OS
+## 8. Completion Transition
+The `WP0` through `WP7` runtime implementation sequence is complete.
+
+Execution now moves to:
+- `docs/plans/plan-oberon4-v0.1-release-validation.md`
+- `docs/task-briefs/task-brief-oberon4-v0.1-human-acceptance.md`
+- `docs/plans/plan-oberon4-post-v0.1-backlog.md`
+
+This plan remains the canonical build-history and evidence artifact for the WASM/WASI plugin runtime, but it is no longer the active execution plan.

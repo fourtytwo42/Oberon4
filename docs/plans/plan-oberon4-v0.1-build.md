@@ -1,7 +1,7 @@
 # Plan: Oberon4 v0.1 Build
 
 Version: 0.1
-Status: active
+Status: completed
 Owner: Oberon4
 WorkflowType: feature-development
 WorkflowMode: incremental-gates
@@ -280,3 +280,11 @@ Human testing may begin only when:
 - files changed
 - remaining risks
 - next step
+
+## 10. Post-Build Transition
+The v0.1 build sequence is complete. Active execution should now use:
+- `docs/plans/plan-oberon4-v0.1-release-validation.md`
+- `docs/task-briefs/task-brief-oberon4-v0.1-human-acceptance.md`
+- `docs/plans/plan-oberon4-post-v0.1-backlog.md`
+
+This plan remains the canonical record of the build phases and their verification gates, but new work should no longer extend the `P*` build sequence.

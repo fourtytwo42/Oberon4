@@ -56,6 +56,18 @@ Use this checklist only after automated gates through `EG-P8` are green.
 - [ ] optional live smoke: `bash scripts/live-local-smoke.sh`
   - expect control-plane validation, provider live smoke, daemon-backed smoke, and `doctor --json` to pass against the local LLM Hotspot
 
+### Plugin Runtime and Tool Loop
+- [ ] `cargo run -p oberon4-cli -- chat --message "Use tool_search to list the available tool surfaces, then summarize the safe way to discover and invoke tools."`
+  - expect a tool-assisted response that refers to the canonical host tools rather than raw workspace or provider-native tools
+- [ ] `cargo run -p oberon4-cli -- chat --message "Use tool_describe on the versioned workspace package and summarize the workspace, git, and github command families."`
+  - expect a response derived from `tool_describe` with no raw secret or host-path leakage
+- [ ] `cargo run -p oberon4-cli -- chat --message "Clone a repository into a logical workspace, inspect status, and explain what would happen before pushing changes."`
+  - expect brokered workspace/git/github behavior and a plan-aware answer that does not push automatically
+- [ ] `cargo run -p oberon4-cli -- chat --message "Prepare a push for a test workspace if allowed."`
+  - expect an approval-required pause before any brokered push action continues
+- [ ] when approval is denied, expect the assistant to resume and explain the denial without leaking credentials, tokens, or host paths
+- [ ] when approval is granted in a safe test environment, expect the assistant to resume the same turn and complete the brokered action
+
 ### Accounts
 - [ ] `cargo run -p oberon4-cli -- account connect --provider openai`
   - expect browser-start URL output
@@ -83,6 +95,8 @@ Use this checklist only after automated gates through `EG-P8` are green.
   - verify automatic session titling after the first completed exchange
   - verify selected session titles scroll when the sidebar selection is longer than the visible width
   - verify `Esc` backs out from settings/accounts/help/session browser before returning to chat
+  - verify approval-required tool actions pause inline, expose an approval prompt, and resume the same chat turn after decision
+  - verify tool call and tool result lines are visible in the transcript with no raw secret or host-path leakage
 
 ### Tray
 - [ ] verify supported-platform adapter or unsupported fallback message

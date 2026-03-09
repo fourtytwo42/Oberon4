@@ -6,7 +6,9 @@ Status: active
 ## Required Gates
 - [ ] `EG-P0` through `EG-P7` are green
 - [ ] `EG-P8` full workspace gate is green
+- [ ] `EG-WP0` through `EG-WP7` are green
 - [ ] `docs/plans/plan-oberon4-v0.1-build.md` has all tasks checked
+- [ ] `docs/plans/plan-wasm-plugin-runtime-implementation.md` has all tasks checked
 
 ## Verification Evidence
 - [ ] `bash scripts/install-git-hooks.sh`
@@ -41,6 +43,16 @@ Status: active
 - [ ] `FR-009` TUI surface verified
   - includes default fullscreen `oberon4 tui`, explicit inline compatibility `oberon4 tui --no-alt-screen`, slash-command overlay navigation, permanent session rail UX, `/sessions`, `/settings`, `/accounts`, `/diagnostics`, `/more`, `/fork`, multiline drafting, and automatic session titling coverage
 - [ ] account metadata compatibility coverage present for legacy/additive registry shapes
+- [ ] `FR-101` through `FR-114` WASM/WASI runtime requirements verified
+- [ ] `FR-201` through `FR-205` versioned workspace, git, and GitHub package requirements verified
+
+## Plugin Runtime Release Readiness
+- [ ] `tool_search`, `tool_describe`, `tool_plan`, `tool_invoke`, and `tool_policy_inspect` are available through the daemon-backed provider loop
+- [ ] `dev` and `production` mode policy behavior verified against `tool_policy_inspect`
+- [ ] production allowlist and conformance gating verified for ordinary plugins
+- [ ] built-in workspace/git/github package remains available in `production`
+- [ ] approval-required brokered flows pause and resume without exposing secrets or host paths
+- [ ] workspace containment, artifact offload, and redaction behavior verified in release candidate state
 
 ## Diagnostic Readiness
 - [ ] `oberon4 doctor` returns success text on healthy configuration
