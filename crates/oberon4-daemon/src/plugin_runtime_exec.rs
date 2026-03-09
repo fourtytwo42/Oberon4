@@ -257,6 +257,45 @@ impl ExecutionEngine {
         })
     }
 
+    pub fn validate_component_contract(
+        &self,
+        plugin: &RegisteredPlugin,
+    ) -> Result<(), OberonError> {
+        let component = self.load_component(plugin)?;
+        let mut linker = Linker::new(&self.engine);
+        add_to_linker_sync(&mut linker)
+            .map_err(|err| OberonError::Storage(format!("wasmtime linker init failed: {err}")))?;
+        let stdout = MemoryOutputPipe::new(8 * 1024);
+        let stderr = MemoryOutputPipe::new(8 * 1024);
+        let state = ExecutionStoreState {
+            table: ResourceTable::new(),
+            wasi: WasiCtxBuilder::new().stdout(stdout).stderr(stderr).build(),
+            limits: StoreLimitsBuilder::new()
+                .memory_size(16 * 1024 * 1024)
+                .build(),
+        };
+        let mut store = Store::new(&self.engine, state);
+        store.limiter(|state| &mut state.limits);
+        store.set_epoch_deadline(1_000);
+        store.epoch_deadline_trap();
+
+        let instance =
+            OberonPlugin::instantiate(&mut store, &component, &linker).map_err(|err| {
+                OberonError::ContractMismatch(format!("component instantiate failed: {err}"))
+            })?;
+        let exports = instance.oberon_plugin_runtime_plugin_runtime();
+        exports.call_describe_plugin(&mut store).map_err(|err| {
+            OberonError::ContractMismatch(format!("describe-plugin failed: {err}"))
+        })?;
+        exports
+            .call_list_commands(&mut store)
+            .map_err(|err| OberonError::ContractMismatch(format!("list-commands failed: {err}")))?;
+        exports
+            .call_health_check(&mut store)
+            .map_err(|err| OberonError::ContractMismatch(format!("health-check failed: {err}")))?;
+        Ok(())
+    }
+
     fn load_component(&self, plugin: &RegisteredPlugin) -> Result<Component, OberonError> {
         let key = format!(
             "{}@{}:{}:{}",

@@ -6,10 +6,11 @@ use std::{
 };
 
 use oberon4_core::{
-    ApprovalExpectation, ApprovalRequestPayload, ApprovalResourceLimits, ArtifactRetentionPolicy,
-    BrokeredServiceResult, CapabilityManifest, EffectiveCapabilities, ErrorStatus, GithubRequest,
-    HostToolRuntime, InvokeStatus, ManifestValidationIssue, ManifestValidationResult,
-    NetworkPolicy, OauthRequest, OberonError, OperatingMode, PlanRequest, PlanResult, PlanStatus,
+    AllowlistStatus, ApprovalExpectation, ApprovalRequestPayload, ApprovalResourceLimits,
+    ArtifactRetentionPolicy, BrokeredServiceResult, CapabilityManifest, ConformanceStatus,
+    EffectiveCapabilities, ErrorStatus, GithubRequest, HostToolRuntime, InvokeStatus,
+    ManifestValidationIssue, ManifestValidationResult, NetworkPolicy, OauthRequest, OberonError,
+    OperatingMode, PlanRequest, PlanResult, PlanStatus, PluginAdmissionStatus,
     PluginCommandManifest, PluginDescription, PluginManifest, PluginRegistry, PolicyInspectRequest,
     PolicyInspectResponse, PolicyResolution, PolicyResolver, PreconditionModel, RedactionPipeline,
     RedactionProfile, RedactionTargetKind, RequestId, ResourceLimits, SearchMatch, SearchRequest,
@@ -78,6 +79,17 @@ pub struct RegisteredPlugin {
     pub wasm_path: PathBuf,
     pub manifest: PluginManifest,
     pub tool_tier: ToolTier,
+    pub manifest_validation: ManifestValidationResult,
+    pub conformance_status: ConformanceStatus,
+    pub conformance_issues: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginAdmissionMetadata {
+    pub is_builtin: bool,
+    pub allowlist_status: AllowlistStatus,
+    pub conformance_status: ConformanceStatus,
+    pub production_eligible: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,6 +118,7 @@ impl FilePluginRegistry {
     ) -> Result<Self, OberonError> {
         let mut plugins = BTreeMap::new();
         let mut index = Vec::new();
+        let conformance_engine = ExecutionEngine::new(RuntimeBrokerFoundations::default())?;
 
         for registered in PluginRuntimeVersionedPackage::registered_plugins() {
             insert_registered_plugin(
@@ -114,6 +127,7 @@ impl FilePluginRegistry {
                 registered,
                 runtime_api_version,
                 false,
+                Some(&conformance_engine),
             )?;
         }
 
@@ -136,9 +150,16 @@ impl FilePluginRegistry {
                         wasm_path,
                         manifest,
                         tool_tier: ToolTier::OrdinaryPlugin,
+                        manifest_validation: ManifestValidationResult {
+                            valid: true,
+                            issues: Vec::new(),
+                        },
+                        conformance_status: ConformanceStatus::NotRun,
+                        conformance_issues: Vec::new(),
                     },
                     runtime_api_version,
                     true,
+                    Some(&conformance_engine),
                 )?;
             }
         }
@@ -154,6 +175,10 @@ impl FilePluginRegistry {
         self.plugins
             .get(tool)
             .ok_or_else(|| OberonError::NotFound(format!("plugin:{tool}")))
+    }
+
+    pub fn all_registered_plugins(&self) -> Vec<RegisteredPlugin> {
+        self.plugins.values().cloned().collect()
     }
 }
 
@@ -200,6 +225,7 @@ impl PluginRegistry for FilePluginRegistry {
                     approval_required: approval_required_for(
                         &entry.side_effects,
                         entry.approval_expectation.as_ref(),
+                        &OperatingMode::Dev,
                     ),
                     capabilities_required: entry.capabilities_required.clone(),
                     confidence: format!("{:.2}", (score.min(100) as f32) / 100.0),
@@ -304,21 +330,33 @@ impl RegisteredPluginAccess for FilePluginRegistry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StaticPolicyResolver {
     operating_mode: OperatingMode,
-    default_limits: ResourceLimits,
+    dev_limits: ResourceLimits,
+    production_limits: ResourceLimits,
+    allowlisted_checksums: BTreeSet<String>,
+    plugin_admission: BTreeMap<String, PluginAdmissionMetadata>,
     blocked_capabilities: BTreeSet<String>,
 }
 
 impl Default for StaticPolicyResolver {
     fn default() -> Self {
         Self {
-            operating_mode: OperatingMode::Production,
-            default_limits: ResourceLimits {
+            operating_mode: OperatingMode::Dev,
+            dev_limits: ResourceLimits {
                 memory_bytes: Some(134_217_728),
                 time_ms: Some(5_000),
                 storage_bytes: Some(268_435_456),
                 output_bytes: Some(131_072),
                 network_policy: Some(NetworkPolicy::Denied),
             },
+            production_limits: ResourceLimits {
+                memory_bytes: Some(100_663_296),
+                time_ms: Some(3_000),
+                storage_bytes: Some(134_217_728),
+                output_bytes: Some(65_536),
+                network_policy: Some(NetworkPolicy::Denied),
+            },
+            allowlisted_checksums: BTreeSet::new(),
+            plugin_admission: BTreeMap::new(),
             blocked_capabilities: BTreeSet::new(),
         }
     }
@@ -327,14 +365,124 @@ impl Default for StaticPolicyResolver {
 impl StaticPolicyResolver {
     pub fn new(
         operating_mode: OperatingMode,
-        default_limits: ResourceLimits,
+        dev_limits: ResourceLimits,
+        production_limits: ResourceLimits,
+        allowlisted_checksums: BTreeSet<String>,
+        plugin_admission: BTreeMap<String, PluginAdmissionMetadata>,
         blocked_capabilities: BTreeSet<String>,
     ) -> Self {
         Self {
             operating_mode,
-            default_limits,
+            dev_limits,
+            production_limits,
+            allowlisted_checksums,
+            plugin_admission,
             blocked_capabilities,
         }
+    }
+
+    pub fn for_registered_plugins(
+        operating_mode: OperatingMode,
+        allowlisted_checksums: impl IntoIterator<Item = String>,
+        plugins: impl IntoIterator<Item = RegisteredPlugin>,
+    ) -> Self {
+        let defaults = Self::default();
+        Self::with_limits_for_registered_plugins(
+            operating_mode,
+            defaults.dev_limits,
+            defaults.production_limits,
+            allowlisted_checksums,
+            plugins,
+            defaults.blocked_capabilities,
+        )
+    }
+
+    pub fn with_limits_for_registered_plugins(
+        operating_mode: OperatingMode,
+        dev_limits: ResourceLimits,
+        production_limits: ResourceLimits,
+        allowlisted_checksums: impl IntoIterator<Item = String>,
+        plugins: impl IntoIterator<Item = RegisteredPlugin>,
+        blocked_capabilities: BTreeSet<String>,
+    ) -> Self {
+        let allowlisted_checksums = allowlisted_checksums.into_iter().collect::<BTreeSet<_>>();
+        let plugin_admission = plugins
+            .into_iter()
+            .map(|plugin| {
+                let allowlist_status = if plugin.tool_tier == ToolTier::OrdinaryPlugin {
+                    if allowlisted_checksums.contains(&plugin.manifest.provenance.checksum) {
+                        AllowlistStatus::Allowlisted
+                    } else if matches!(operating_mode, OperatingMode::Production) {
+                        AllowlistStatus::Missing
+                    } else {
+                        AllowlistStatus::NotRequired
+                    }
+                } else {
+                    AllowlistStatus::ExemptBuiltIn
+                };
+                let production_eligible = plugin.tool_tier != ToolTier::OrdinaryPlugin
+                    || (matches!(allowlist_status, AllowlistStatus::Allowlisted)
+                        && matches!(plugin.conformance_status, ConformanceStatus::Passed)
+                        && plugin.manifest_validation.valid);
+                (
+                    plugin.manifest.id.clone(),
+                    PluginAdmissionMetadata {
+                        is_builtin: plugin.tool_tier != ToolTier::OrdinaryPlugin,
+                        allowlist_status,
+                        conformance_status: plugin.conformance_status,
+                        production_eligible,
+                    },
+                )
+            })
+            .collect();
+
+        Self {
+            operating_mode,
+            dev_limits,
+            production_limits,
+            allowlisted_checksums,
+            plugin_admission,
+            blocked_capabilities,
+        }
+    }
+
+    fn effective_limits(&self) -> &ResourceLimits {
+        match self.operating_mode {
+            OperatingMode::Dev => &self.dev_limits,
+            OperatingMode::Production => &self.production_limits,
+        }
+    }
+
+    fn admission_for(&self, tool: &str, manifest: &PluginManifest) -> PluginAdmissionMetadata {
+        self.plugin_admission.get(tool).cloned().unwrap_or_else(|| {
+            let is_builtin = matches!(tool, "workspace" | "git" | "github");
+            let allowlist_status = if is_builtin {
+                AllowlistStatus::ExemptBuiltIn
+            } else if self
+                .allowlisted_checksums
+                .contains(&manifest.provenance.checksum)
+            {
+                AllowlistStatus::Allowlisted
+            } else if matches!(self.operating_mode, OperatingMode::Production) {
+                AllowlistStatus::Missing
+            } else {
+                AllowlistStatus::NotRequired
+            };
+            let conformance_status = if is_builtin {
+                ConformanceStatus::Passed
+            } else {
+                ConformanceStatus::NotRun
+            };
+            let production_eligible = is_builtin
+                || (matches!(allowlist_status, AllowlistStatus::Allowlisted)
+                    && matches!(conformance_status, ConformanceStatus::Passed));
+            PluginAdmissionMetadata {
+                is_builtin,
+                allowlist_status,
+                conformance_status,
+                production_eligible,
+            }
+        })
     }
 }
 
@@ -348,6 +496,8 @@ impl PolicyResolver for StaticPolicyResolver {
         let mut allowed = Vec::new();
         let mut blocked = Vec::new();
         let mut reason_codes = Vec::new();
+        let mut blocking_issues = Vec::new();
+        let admission = self.admission_for(tool, manifest);
 
         for capability in &command.required_capabilities {
             if self.blocked_capabilities.contains(capability) {
@@ -358,11 +508,44 @@ impl PolicyResolver for StaticPolicyResolver {
             }
         }
 
-        let approval_required =
-            approval_required_for(&command.side_effects, command.approval_expectation.as_ref());
+        if matches!(self.operating_mode, OperatingMode::Production) && !admission.is_builtin {
+            if !matches!(admission.allowlist_status, AllowlistStatus::Allowlisted) {
+                reason_codes.push("blocked_by_allowlist".to_string());
+                blocking_issues.push(format!(
+                    "plugin '{}' is not allowlisted for production mode",
+                    tool
+                ));
+            }
+            if !matches!(admission.conformance_status, ConformanceStatus::Passed) {
+                reason_codes.push("blocked_by_conformance".to_string());
+                blocking_issues.push(format!(
+                    "plugin '{}' conformance status is {:?}",
+                    tool, admission.conformance_status
+                ));
+            }
+            if !admission.production_eligible {
+                reason_codes.push("blocked_by_mode".to_string());
+            }
+        }
+
+        if matches!(self.operating_mode, OperatingMode::Production)
+            && matches!(command.side_effects, SideEffectClass::Destructive)
+        {
+            reason_codes.push("blocked_by_contract".to_string());
+            blocking_issues.push(format!(
+                "destructive command '{}.{}' is blocked in production mode",
+                tool, command.name
+            ));
+        }
+
+        let approval_required = approval_required_for(
+            &command.side_effects,
+            command.approval_expectation.as_ref(),
+            &self.operating_mode,
+        );
 
         let resource_limits = merge_resource_limits(
-            &self.default_limits,
+            self.effective_limits(),
             manifest.requested_resources.as_ref(),
             command.requested_resources.as_ref(),
         );
@@ -374,8 +557,16 @@ impl PolicyResolver for StaticPolicyResolver {
             approval_required,
             resource_limits,
             operating_mode: self.operating_mode.clone(),
+            plugin_admission_status: if blocking_issues.is_empty() {
+                PluginAdmissionStatus::Allowed
+            } else {
+                PluginAdmissionStatus::Blocked
+            },
+            allowlist_status: admission.allowlist_status,
+            conformance_status: admission.conformance_status,
+            production_eligible: admission.production_eligible,
             reason_codes,
-            blocking_issues: Vec::new(),
+            blocking_issues,
         })
     }
 }
@@ -764,6 +955,29 @@ where
             diff_summary: None,
         }))
     }
+
+    fn ensure_plugin_admitted(
+        &self,
+        resolution: &PolicyResolution,
+        tool: &str,
+        command: &str,
+    ) -> Result<(), OberonError> {
+        if matches!(
+            resolution.plugin_admission_status,
+            PluginAdmissionStatus::Allowed
+        ) {
+            return Ok(());
+        }
+
+        let reason = if resolution.reason_codes.is_empty() {
+            "plugin blocked by operating mode policy".to_string()
+        } else {
+            resolution.reason_codes.join(", ")
+        };
+        Err(OberonError::PolicyDenied(format!(
+            "plugin '{tool}.{command}' is not admitted: {reason}"
+        )))
+    }
 }
 
 impl<R, P> HostToolRuntime for PluginRuntimeHost<R, P>
@@ -772,13 +986,40 @@ where
     P: PolicyResolver,
 {
     fn tool_search(&self, request: &SearchRequest) -> Result<SearchResponse, OberonError> {
-        self.registry.search(request)
+        let mut response = self.registry.search(request)?;
+        response.matches = response
+            .matches
+            .into_iter()
+            .filter_map(|mut entry| {
+                let manifest = self.registry.manifest(&entry.tool).ok()?;
+                let command = self
+                    .registry
+                    .command_manifest(&entry.tool, &entry.command)
+                    .ok()?;
+                let resolution = self.policy.resolve(&entry.tool, &command, &manifest).ok()?;
+                if !matches!(
+                    resolution.plugin_admission_status,
+                    PluginAdmissionStatus::Allowed
+                ) {
+                    return None;
+                }
+                entry.approval_required = resolution.approval_required;
+                Some(entry)
+            })
+            .collect();
+        Ok(response)
     }
 
     fn tool_describe(
         &self,
         request: &ToolDescribeRequest,
     ) -> Result<ToolDescribeResponse, OberonError> {
+        let manifest = self.registry.manifest(&request.tool)?;
+        let command = self
+            .registry
+            .command_manifest(&request.tool, &request.command)?;
+        let resolution = self.policy.resolve(&request.tool, &command, &manifest)?;
+        self.ensure_plugin_admitted(&resolution, &request.tool, &request.command)?;
         self.registry.describe(request)
     }
 
@@ -798,6 +1039,7 @@ where
         let resolution = self
             .policy
             .resolve(&request.context.plugin_id, &command, &manifest)?;
+        self.ensure_plugin_admitted(&resolution, &request.context.plugin_id, &request.command)?;
         let effective_request = PlanRequest {
             command: request.command.clone(),
             input: request.input.clone(),
@@ -965,6 +1207,7 @@ where
         let resolution = self
             .policy
             .resolve(&request.context.plugin_id, &command, &manifest)?;
+        self.ensure_plugin_admitted(&resolution, &request.context.plugin_id, &request.command)?;
         let effective_request = oberon4_core::InvokeRequest {
             command: request.command.clone(),
             input: request.input.clone(),
@@ -1252,6 +1495,10 @@ where
             approval_required: resolution.approval_required,
             resource_limits: resolution.resource_limits,
             operating_mode: resolution.operating_mode,
+            plugin_admission_status: resolution.plugin_admission_status,
+            allowlist_status: resolution.allowlist_status,
+            conformance_status: resolution.conformance_status,
+            production_eligible: resolution.production_eligible,
             reason_codes: {
                 let mut reason_codes = resolution.reason_codes;
                 if workspace_allowed {
@@ -1389,11 +1636,13 @@ fn load_manifest(path: &Path) -> Result<PluginManifest, OberonError> {
 fn insert_registered_plugin(
     plugins: &mut BTreeMap<String, RegisteredPlugin>,
     index: &mut Vec<IndexedCommand>,
-    registered: RegisteredPlugin,
+    mut registered: RegisteredPlugin,
     runtime_api_version: &str,
     require_executable: bool,
+    conformance_engine: Option<&ExecutionEngine>,
 ) -> Result<(), OberonError> {
     let validation = validate_manifest(&registered.manifest, runtime_api_version);
+    registered.manifest_validation = validation.clone();
     if !validation.valid {
         let issues = validation
             .issues
@@ -1413,6 +1662,16 @@ fn insert_registered_plugin(
             "{}: missing plugin.wasm adjacent to plugin.json",
             registered.manifest_path.display()
         )));
+    }
+
+    if registered.tool_tier == ToolTier::OrdinaryPlugin {
+        let (conformance_status, conformance_issues) =
+            evaluate_plugin_conformance(&registered, conformance_engine)?;
+        registered.conformance_status = conformance_status;
+        registered.conformance_issues = conformance_issues;
+    } else {
+        registered.conformance_status = ConformanceStatus::Passed;
+        registered.conformance_issues.clear();
     }
 
     let plugin_id = registered.manifest.id.clone();
@@ -1442,6 +1701,44 @@ fn insert_registered_plugin(
 
     plugins.insert(plugin_id, registered);
     Ok(())
+}
+
+fn evaluate_plugin_conformance(
+    registered: &RegisteredPlugin,
+    conformance_engine: Option<&ExecutionEngine>,
+) -> Result<(ConformanceStatus, Vec<String>), OberonError> {
+    let mut issues = Vec::new();
+
+    if !registered.manifest_validation.valid {
+        issues.extend(
+            registered
+                .manifest_validation
+                .issues
+                .iter()
+                .map(|issue| format!("manifest:{}", issue.code)),
+        );
+    }
+
+    if registered.tool_tier == ToolTier::OrdinaryPlugin {
+        if !registered.wasm_path.is_file() {
+            issues.push("component:missing_wasm".to_string());
+        } else if let Some(engine) = conformance_engine {
+            if let Err(err) = engine.validate_component_contract(registered) {
+                issues.push(format!("component:{}", err));
+            }
+        } else {
+            return Ok((
+                ConformanceStatus::NotRun,
+                vec!["conformance:not_run".to_string()],
+            ));
+        }
+    }
+
+    if issues.is_empty() {
+        Ok((ConformanceStatus::Passed, Vec::new()))
+    } else {
+        Ok((ConformanceStatus::Failed, issues))
+    }
 }
 
 fn declared_capabilities(capabilities: &CapabilityManifest) -> BTreeSet<String> {
@@ -1542,8 +1839,15 @@ fn stricter_network_policy(default: NetworkPolicy, requested: NetworkPolicy) -> 
 fn approval_required_for(
     side_effects: &SideEffectClass,
     approval_expectation: Option<&ApprovalExpectation>,
+    operating_mode: &OperatingMode,
 ) -> bool {
     if matches!(approval_expectation, Some(ApprovalExpectation::Required)) {
+        return true;
+    }
+
+    if matches!(operating_mode, OperatingMode::Production)
+        && matches!(side_effects, SideEffectClass::PluginPrivateWrite)
+    {
         return true;
     }
 
@@ -1880,16 +2184,19 @@ mod tests {
         RuntimeBrokerFoundations, StaticPolicyResolver, validate_manifest,
     };
     use oberon4_core::{
-        ApprovalExpectation, ArtifactCapabilityManifest, CapabilityManifest, HostToolRuntime,
-        InvocationContext, InvokeRequest, LifecycleActions, LifecycleHooks, NetworkPolicy,
-        OperatingMode, PlanRequest, PluginCommandManifest, PluginExample, PluginManifest,
-        PolicyInspectRequest, PromptingManifest, ProvenanceManifest, ResourceBudgetRequest,
-        ResourceLimits, SearchRequest, SignatureMetadata, StorageCapabilityManifest,
-        ToolDescribeRequest, WorkspaceCapabilityManifest,
+        AllowlistStatus, ApprovalExpectation, ArtifactCapabilityManifest, CapabilityManifest,
+        ConformanceStatus, HostToolRuntime, InvocationContext, InvokeRequest, LifecycleActions,
+        LifecycleHooks, NetworkPolicy, OperatingMode, PlanRequest, PluginAdmissionStatus,
+        PluginCommandManifest, PluginExample, PluginManifest, PolicyInspectRequest,
+        PromptingManifest, ProvenanceManifest, ResourceBudgetRequest, ResourceLimits,
+        SearchRequest, SignatureMetadata, StorageCapabilityManifest, ToolDescribeRequest,
+        WorkspaceCapabilityManifest,
     };
     use oberon4_core::{BuildMetadata, CapabilityGrant, CapabilityGrantKind, HandleOperation};
     use oberon4_core::{ManifestValidationResult, PluginRegistry, SideEffectClass};
     use oberon4_core::{OberonError, RequestId};
+
+    const VALID_WASM: &[u8] = include_bytes!("../tests/fixtures/plugin-runtime/valid/plugin.wasm");
 
     fn temp_dir(label: &str) -> std::path::PathBuf {
         let nonce = SystemTime::now()
@@ -1995,7 +2302,7 @@ mod tests {
         }
     }
 
-    fn write_manifest(root: &std::path::Path, manifest: &PluginManifest) {
+    fn write_manifest_with_wasm(root: &std::path::Path, manifest: &PluginManifest, wasm: &[u8]) {
         let plugin_dir = root.join(&manifest.id);
         fs::create_dir_all(&plugin_dir).unwrap();
         fs::write(
@@ -2003,7 +2310,11 @@ mod tests {
             serde_json::to_vec_pretty(manifest).unwrap(),
         )
         .unwrap();
-        fs::write(plugin_dir.join("plugin.wasm"), b"not-a-real-component").unwrap();
+        fs::write(plugin_dir.join("plugin.wasm"), wasm).unwrap();
+    }
+
+    fn write_manifest(root: &std::path::Path, manifest: &PluginManifest) {
+        write_manifest_with_wasm(root, manifest, b"not-a-real-component");
     }
 
     fn sample_context() -> InvocationContext {
@@ -2134,7 +2445,11 @@ mod tests {
         write_manifest(&root, &manifest);
         let registry =
             FilePluginRegistry::load_from_roots(&[root.clone()], HOST_RUNTIME_API_VERSION).unwrap();
-        let policy = StaticPolicyResolver::default();
+        let policy = StaticPolicyResolver::for_registered_plugins(
+            OperatingMode::Dev,
+            Vec::<String>::new(),
+            registry.all_registered_plugins(),
+        );
         let host = PluginRuntimeHost::new(registry, policy).unwrap();
 
         let plan = host
@@ -2159,7 +2474,14 @@ mod tests {
             })
             .unwrap();
         assert!(inspect.approval_required);
-        assert_eq!(inspect.operating_mode, OperatingMode::Production);
+        assert_eq!(inspect.operating_mode, OperatingMode::Dev);
+        assert_eq!(
+            inspect.plugin_admission_status,
+            PluginAdmissionStatus::Allowed
+        );
+        assert_eq!(inspect.allowlist_status, AllowlistStatus::NotRequired);
+        assert_eq!(inspect.conformance_status, ConformanceStatus::Failed);
+        assert!(!inspect.production_eligible);
         assert_eq!(
             inspect.capabilities.allowed,
             vec!["workspace.write".to_string()]
@@ -2190,10 +2512,10 @@ mod tests {
     fn denied_capability_returns_deterministic_policy_error() {
         let root = temp_dir("policy-block");
         let manifest = sample_manifest();
-        write_manifest(&root, &manifest);
+        write_manifest_with_wasm(&root, &manifest, VALID_WASM);
         let registry =
             FilePluginRegistry::load_from_roots(&[root.clone()], HOST_RUNTIME_API_VERSION).unwrap();
-        let policy = StaticPolicyResolver::new(
+        let policy = StaticPolicyResolver::with_limits_for_registered_plugins(
             OperatingMode::Production,
             ResourceLimits {
                 memory_bytes: Some(134_217_728),
@@ -2202,6 +2524,15 @@ mod tests {
                 output_bytes: Some(131_072),
                 network_policy: Some(NetworkPolicy::Denied),
             },
+            ResourceLimits {
+                memory_bytes: Some(100_663_296),
+                time_ms: Some(3_000),
+                storage_bytes: Some(134_217_728),
+                output_bytes: Some(65_536),
+                network_policy: Some(NetworkPolicy::Denied),
+            },
+            vec![manifest.provenance.checksum.clone()],
+            registry.all_registered_plugins(),
             BTreeSet::from(["workspace.write".to_string()]),
         );
         let host = PluginRuntimeHost::new(registry, policy).unwrap();
@@ -2252,6 +2583,188 @@ mod tests {
         assert!(!error.retryable);
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn dev_mode_loads_valid_ordinary_plugins_without_allowlist_enforcement() {
+        let root = temp_dir("dev-mode");
+        let manifest = sample_manifest();
+        write_manifest_with_wasm(&root, &manifest, VALID_WASM);
+        let registry =
+            FilePluginRegistry::load_from_roots(&[root.clone()], HOST_RUNTIME_API_VERSION).unwrap();
+        let policy = StaticPolicyResolver::for_registered_plugins(
+            OperatingMode::Dev,
+            Vec::<String>::new(),
+            registry.all_registered_plugins(),
+        );
+        let host = PluginRuntimeHost::new(registry, policy).unwrap();
+
+        let search = host
+            .tool_search(&SearchRequest {
+                query: "write file".to_string(),
+                limit: None,
+                session_id: None,
+            })
+            .unwrap();
+        assert!(
+            search
+                .matches
+                .iter()
+                .any(|entry| entry.tool == "workspace-git")
+        );
+
+        let inspect = host
+            .tool_policy_inspect(&PolicyInspectRequest {
+                tool: "workspace-git".to_string(),
+                command: "write_file_atomic".to_string(),
+            })
+            .unwrap();
+        assert_eq!(inspect.operating_mode, OperatingMode::Dev);
+        assert_eq!(
+            inspect.plugin_admission_status,
+            PluginAdmissionStatus::Allowed
+        );
+        assert_eq!(inspect.allowlist_status, AllowlistStatus::NotRequired);
+        assert_eq!(inspect.conformance_status, ConformanceStatus::Passed);
+        assert!(!inspect.production_eligible);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn production_mode_blocks_non_allowlisted_ordinary_plugins() {
+        let root = temp_dir("prod-allowlist");
+        let manifest = sample_manifest();
+        write_manifest_with_wasm(&root, &manifest, VALID_WASM);
+        let registry =
+            FilePluginRegistry::load_from_roots(&[root.clone()], HOST_RUNTIME_API_VERSION).unwrap();
+        let policy = StaticPolicyResolver::for_registered_plugins(
+            OperatingMode::Production,
+            Vec::<String>::new(),
+            registry.all_registered_plugins(),
+        );
+        let host = PluginRuntimeHost::new(registry, policy).unwrap();
+
+        let search = host
+            .tool_search(&SearchRequest {
+                query: "write file".to_string(),
+                limit: None,
+                session_id: None,
+            })
+            .unwrap();
+        assert!(
+            !search
+                .matches
+                .iter()
+                .any(|entry| entry.tool == "workspace-git")
+        );
+
+        let inspect = host
+            .tool_policy_inspect(&PolicyInspectRequest {
+                tool: "workspace-git".to_string(),
+                command: "write_file_atomic".to_string(),
+            })
+            .unwrap();
+        assert_eq!(
+            inspect.plugin_admission_status,
+            PluginAdmissionStatus::Blocked
+        );
+        assert_eq!(inspect.allowlist_status, AllowlistStatus::Missing);
+        assert_eq!(inspect.conformance_status, ConformanceStatus::Passed);
+        assert!(
+            inspect
+                .reason_codes
+                .contains(&"blocked_by_allowlist".to_string())
+        );
+        assert!(
+            inspect
+                .reason_codes
+                .contains(&"blocked_by_mode".to_string())
+        );
+
+        let describe = host.tool_describe(&ToolDescribeRequest {
+            tool: "workspace-git".to_string(),
+            command: "write_file_atomic".to_string(),
+        });
+        assert!(matches!(describe, Err(OberonError::PolicyDenied(_))));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn production_mode_blocks_plugins_with_failed_conformance() {
+        let root = temp_dir("prod-conformance");
+        let manifest = sample_manifest();
+        write_manifest(&root, &manifest);
+        let registry =
+            FilePluginRegistry::load_from_roots(&[root.clone()], HOST_RUNTIME_API_VERSION).unwrap();
+        let policy = StaticPolicyResolver::for_registered_plugins(
+            OperatingMode::Production,
+            vec![manifest.provenance.checksum.clone()],
+            registry.all_registered_plugins(),
+        );
+        let host = PluginRuntimeHost::new(registry, policy).unwrap();
+
+        let inspect = host
+            .tool_policy_inspect(&PolicyInspectRequest {
+                tool: "workspace-git".to_string(),
+                command: "write_file_atomic".to_string(),
+            })
+            .unwrap();
+        assert_eq!(
+            inspect.plugin_admission_status,
+            PluginAdmissionStatus::Blocked
+        );
+        assert_eq!(inspect.allowlist_status, AllowlistStatus::Allowlisted);
+        assert_eq!(inspect.conformance_status, ConformanceStatus::Failed);
+        assert!(
+            inspect
+                .reason_codes
+                .contains(&"blocked_by_conformance".to_string())
+        );
+        assert!(
+            inspect
+                .reason_codes
+                .contains(&"blocked_by_mode".to_string())
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn builtins_remain_available_in_production_with_stricter_limits() {
+        let registry = FilePluginRegistry::load_from_roots(&[], HOST_RUNTIME_API_VERSION).unwrap();
+        let policy = StaticPolicyResolver::for_registered_plugins(
+            OperatingMode::Production,
+            Vec::<String>::new(),
+            registry.all_registered_plugins(),
+        );
+        let host = PluginRuntimeHost::new(registry, policy).unwrap();
+
+        let describe = host
+            .tool_describe(&ToolDescribeRequest {
+                tool: "git".to_string(),
+                command: "push".to_string(),
+            })
+            .unwrap();
+        assert_eq!(describe.tool, "git");
+
+        let inspect = host
+            .tool_policy_inspect(&PolicyInspectRequest {
+                tool: "git".to_string(),
+                command: "push".to_string(),
+            })
+            .unwrap();
+        assert_eq!(inspect.operating_mode, OperatingMode::Production);
+        assert_eq!(
+            inspect.plugin_admission_status,
+            PluginAdmissionStatus::Allowed
+        );
+        assert_eq!(inspect.allowlist_status, AllowlistStatus::ExemptBuiltIn);
+        assert_eq!(inspect.conformance_status, ConformanceStatus::Passed);
+        assert!(inspect.production_eligible);
+        assert_eq!(inspect.resource_limits.time_ms, Some(2_000));
+        assert_eq!(inspect.resource_limits.output_bytes, Some(65_536));
     }
 
     #[test]

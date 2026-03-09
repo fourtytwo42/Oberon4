@@ -488,6 +488,14 @@ pub struct PolicyInspectResponse {
     pub resource_limits: ResourceLimits,
     #[serde(rename = "operatingMode")]
     pub operating_mode: OperatingMode,
+    #[serde(rename = "pluginAdmissionStatus")]
+    pub plugin_admission_status: PluginAdmissionStatus,
+    #[serde(rename = "allowlistStatus")]
+    pub allowlist_status: AllowlistStatus,
+    #[serde(rename = "conformanceStatus")]
+    pub conformance_status: ConformanceStatus,
+    #[serde(rename = "productionEligible")]
+    pub production_eligible: bool,
     #[serde(default, rename = "reasonCodes")]
     pub reason_codes: Vec<String>,
     #[serde(default, rename = "serviceHandlesUsed")]
@@ -841,6 +849,14 @@ pub struct PolicyResolution {
     pub resource_limits: ResourceLimits,
     #[serde(rename = "operatingMode")]
     pub operating_mode: OperatingMode,
+    #[serde(rename = "pluginAdmissionStatus")]
+    pub plugin_admission_status: PluginAdmissionStatus,
+    #[serde(rename = "allowlistStatus")]
+    pub allowlist_status: AllowlistStatus,
+    #[serde(rename = "conformanceStatus")]
+    pub conformance_status: ConformanceStatus,
+    #[serde(rename = "productionEligible")]
+    pub production_eligible: bool,
     #[serde(default, rename = "reasonCodes")]
     pub reason_codes: Vec<String>,
     #[serde(default, rename = "blockingIssues")]
@@ -1185,6 +1201,30 @@ pub enum OperatingMode {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum PluginAdmissionStatus {
+    Allowed,
+    Blocked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AllowlistStatus {
+    NotRequired,
+    Allowlisted,
+    Missing,
+    ExemptBuiltIn,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConformanceStatus {
+    Passed,
+    Failed,
+    NotRun,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SecretClass {
     ApiCredential,
     OauthCredential,
@@ -1290,16 +1330,17 @@ pub enum WorkspacePreconditionStatus {
 #[cfg(test)]
 mod tests {
     use super::{
-        ApprovalDecision, ApprovalDecisionPayload, ApprovalExpectation, ApprovalRequestPayload,
-        ApprovalResourceLimits, ArtifactReference, BuildMetadata, CapabilityGrant,
-        CapabilityGrantKind, CapabilityManifest, CommandSchemaReference, DiffSummary,
-        EffectiveCapabilities, EstimatedCost, HandleOperation, InvocationContext, InvokeMetrics,
-        InvokeRequest, InvokeResult, InvokeStatus, LifecycleActions, LifecycleHooks,
-        ManifestValidationIssue, ManifestValidationResult, NetworkPolicy, OperatingMode,
-        PlanRequest, PlanResult, PlanStatus, PluginCommandManifest, PluginDescription,
-        PluginExample, PluginManifest, PolicyInspectResponse, PolicyResolution, PreconditionModel,
-        PromptingManifest, ProvenanceManifest, RemoteImpact, ResourceBudgetRequest, ResourceLimits,
-        SearchMatch, SearchRequest, SearchResponse, SecretClass, SecurityLevel, SideEffectClass,
+        AllowlistStatus, ApprovalDecision, ApprovalDecisionPayload, ApprovalExpectation,
+        ApprovalRequestPayload, ApprovalResourceLimits, ArtifactReference, BuildMetadata,
+        CapabilityGrant, CapabilityGrantKind, CapabilityManifest, CommandSchemaReference,
+        ConformanceStatus, DiffSummary, EffectiveCapabilities, EstimatedCost, HandleOperation,
+        InvocationContext, InvokeMetrics, InvokeRequest, InvokeResult, InvokeStatus,
+        LifecycleActions, LifecycleHooks, ManifestValidationIssue, ManifestValidationResult,
+        NetworkPolicy, OperatingMode, PlanRequest, PlanResult, PlanStatus, PluginAdmissionStatus,
+        PluginCommandManifest, PluginDescription, PluginExample, PluginManifest,
+        PolicyInspectResponse, PolicyResolution, PreconditionModel, PromptingManifest,
+        ProvenanceManifest, RemoteImpact, ResourceBudgetRequest, ResourceLimits, SearchMatch,
+        SearchRequest, SearchResponse, SecretClass, SecurityLevel, SideEffectClass,
         SignatureMetadata, ToolDescribeRequest, ToolDescribeRequestEnvelope, ToolDescribeResponse,
         ToolDescribeResponseEnvelope, ToolError, ToolGuidance, ToolInvokeRequestEnvelope,
         ToolInvokeResponseEnvelope, ToolPlanRequestEnvelope, ToolPlanResponseEnvelope, ToolResult,
@@ -1566,6 +1607,10 @@ mod tests {
                 network_policy: Some(NetworkPolicy::BrokeredOnly),
             },
             operating_mode: OperatingMode::Production,
+            plugin_admission_status: PluginAdmissionStatus::Allowed,
+            allowlist_status: AllowlistStatus::Allowlisted,
+            conformance_status: ConformanceStatus::Passed,
+            production_eligible: true,
             reason_codes: Vec::new(),
             service_handles_used: vec!["svc_github_main".to_string()],
             secret_classes_involved: vec![SecretClass::OauthCredential],
@@ -1886,6 +1931,10 @@ mod tests {
                 network_policy: Some(NetworkPolicy::Denied),
             },
             operating_mode: OperatingMode::Production,
+            plugin_admission_status: PluginAdmissionStatus::Allowed,
+            allowlist_status: AllowlistStatus::Allowlisted,
+            conformance_status: ConformanceStatus::Passed,
+            production_eligible: true,
             reason_codes: Vec::new(),
             blocking_issues: Vec::new(),
         };

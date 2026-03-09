@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{ChatProviderKind, error::OberonError};
+use crate::{ChatProviderKind, error::OberonError, plugin_runtime::OperatingMode};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -26,6 +26,8 @@ pub struct RuntimeConfig {
     pub max_retries: u8,
     pub log_level: String,
     pub stream_responses: bool,
+    pub operating_mode: OperatingMode,
+    pub allowed_plugin_checksums: Vec<String>,
 }
 
 impl AppConfig {
@@ -57,6 +59,8 @@ impl Default for RuntimeConfig {
             max_retries: 2,
             log_level: "info".to_string(),
             stream_responses: true,
+            operating_mode: OperatingMode::Dev,
+            allowed_plugin_checksums: Vec::new(),
         }
     }
 }
@@ -64,7 +68,7 @@ impl Default for RuntimeConfig {
 #[cfg(test)]
 mod tests {
     use super::AppConfig;
-    use crate::ChatProviderKind;
+    use crate::{ChatProviderKind, OperatingMode};
 
     #[test]
     fn default_config_round_trips_through_toml() {
@@ -91,6 +95,8 @@ mod tests {
         assert_eq!(decoded.runtime.stream_idle_timeout_ms, 30_000);
         assert_eq!(decoded.runtime.max_retries, 0);
         assert!(decoded.runtime.stream_responses);
+        assert_eq!(decoded.runtime.operating_mode, OperatingMode::Dev);
+        assert!(decoded.runtime.allowed_plugin_checksums.is_empty());
     }
 
     #[test]
@@ -113,6 +119,8 @@ mod tests {
         assert_eq!(decoded.runtime.request_timeout_ms, 12_000);
         assert_eq!(decoded.runtime.stream_idle_timeout_ms, 9_000);
         assert!(!decoded.runtime.stream_responses);
+        assert_eq!(decoded.runtime.operating_mode, OperatingMode::Dev);
+        assert!(decoded.runtime.allowed_plugin_checksums.is_empty());
     }
 
     #[test]

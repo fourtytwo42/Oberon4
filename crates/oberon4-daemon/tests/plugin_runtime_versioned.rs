@@ -149,6 +149,15 @@ fn policy_with_blocked(capability: &str) -> StaticPolicyResolver {
             output_bytes: Some(131_072),
             network_policy: Some(NetworkPolicy::Denied),
         },
+        ResourceLimits {
+            memory_bytes: Some(100_663_296),
+            time_ms: Some(3_000),
+            storage_bytes: Some(134_217_728),
+            output_bytes: Some(65_536),
+            network_policy: Some(NetworkPolicy::Denied),
+        },
+        BTreeSet::new(),
+        std::collections::BTreeMap::new(),
         BTreeSet::from([capability.to_string()]),
     )
 }

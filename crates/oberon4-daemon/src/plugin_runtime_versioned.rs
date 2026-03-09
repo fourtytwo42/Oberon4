@@ -11,12 +11,13 @@ use std::{
 use oberon4_core::plugin_runtime::DiffSummary;
 use oberon4_core::{
     ApprovalExpectation, ArtifactBroker, ArtifactCreateRequest, ArtifactReference, BuildMetadata,
-    CapabilityManifest, CommandPlanPreview, GithubRequest, InvokeStatus, LifecycleActions,
-    LifecycleHooks, OberonError, PlanRequest, PluginCommandManifest, PluginExample, PluginManifest,
-    PreconditionModel, PromptingManifest, ProvenanceManifest, RequestId, ResourceBudgetRequest,
-    SecurityLevel, ServiceBroker, SideEffectClass, SignatureMetadata, ToolError,
-    ToolInvokeResponseEnvelope, ToolResult, ToolTier, WorkspaceBroker, WorkspaceHandle,
-    WorkspaceImpact, WorkspacePatchRequest, WorkspacePreconditionStatus, WorkspaceWriteRequest,
+    CapabilityManifest, CommandPlanPreview, ConformanceStatus, GithubRequest, InvokeStatus,
+    LifecycleActions, LifecycleHooks, ManifestValidationResult, OberonError, PlanRequest,
+    PluginCommandManifest, PluginExample, PluginManifest, PreconditionModel, PromptingManifest,
+    ProvenanceManifest, RequestId, ResourceBudgetRequest, SecurityLevel, ServiceBroker,
+    SideEffectClass, SignatureMetadata, ToolError, ToolInvokeResponseEnvelope, ToolResult,
+    ToolTier, WorkspaceBroker, WorkspaceHandle, WorkspaceImpact, WorkspacePatchRequest,
+    WorkspacePreconditionStatus, WorkspaceWriteRequest,
 };
 use serde::{Deserialize, Serialize};
 
@@ -109,18 +110,36 @@ impl PluginRuntimeVersionedPackage {
                 wasm_path: PathBuf::from("<builtin:workspace>"),
                 manifest: workspace_manifest(),
                 tool_tier: ToolTier::BrokeredPrivileged,
+                manifest_validation: ManifestValidationResult {
+                    valid: true,
+                    issues: Vec::new(),
+                },
+                conformance_status: ConformanceStatus::Passed,
+                conformance_issues: Vec::new(),
             },
             RegisteredPlugin {
                 manifest_path: PathBuf::from("<builtin:git>"),
                 wasm_path: PathBuf::from("<builtin:git>"),
                 manifest: git_manifest(),
                 tool_tier: ToolTier::BrokeredPrivileged,
+                manifest_validation: ManifestValidationResult {
+                    valid: true,
+                    issues: Vec::new(),
+                },
+                conformance_status: ConformanceStatus::Passed,
+                conformance_issues: Vec::new(),
             },
             RegisteredPlugin {
                 manifest_path: PathBuf::from("<builtin:github>"),
                 wasm_path: PathBuf::from("<builtin:github>"),
                 manifest: github_manifest(),
                 tool_tier: ToolTier::BrokeredPrivileged,
+                manifest_validation: ManifestValidationResult {
+                    valid: true,
+                    issues: Vec::new(),
+                },
+                conformance_status: ConformanceStatus::Passed,
+                conformance_issues: Vec::new(),
             },
         ]
     }

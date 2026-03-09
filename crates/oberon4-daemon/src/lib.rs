@@ -401,8 +401,14 @@ where
     fn build_runtime_host(
         &self,
     ) -> Result<PluginRuntimeHost<FilePluginRegistry, StaticPolicyResolver>, OberonError> {
+        let config = self.runtime.load_config()?;
         let registry = FilePluginRegistry::load_from_roots(&[], HOST_RUNTIME_API_VERSION)?;
-        PluginRuntimeHost::new(registry, StaticPolicyResolver::default())
+        let policy = StaticPolicyResolver::for_registered_plugins(
+            config.runtime.operating_mode.clone(),
+            config.runtime.allowed_plugin_checksums.clone(),
+            registry.all_registered_plugins(),
+        );
+        PluginRuntimeHost::new(registry, policy)
     }
 
     fn provider_tool_definitions() -> Vec<ProviderToolDefinition> {
@@ -1665,6 +1671,8 @@ mod tests {
                         max_retries: 0,
                         log_level: "info".to_string(),
                         stream_responses: true,
+                        operating_mode: oberon4_core::OperatingMode::Dev,
+                        allowed_plugin_checksums: Vec::new(),
                     },
                 },
             })

@@ -270,12 +270,12 @@ Evidence:
 - `env CARGO_TARGET_DIR=/home/hendo420/.cache/oberon4-target CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test --workspace`
 
 ### Phase 7: Mode and Release Hardening
-- [ ] `WP7.1` Implement `dev` and `production` operating mode policy resolution.
-- [ ] `WP7.2` Implement stricter production gating:
+- [x] `WP7.1` Implement `dev` and `production` operating mode policy resolution.
+- [x] `WP7.2` Implement stricter production gating:
   - validated or allowlisted plugins
   - stricter budgets
   - stricter approvals
-- [ ] `WP7.3` Add conformance and threat-model-driven regression tests.
+- [x] `WP7.3` Add conformance and threat-model-driven regression tests.
 
 Dependencies:
 - depends on `EG-WP6`
@@ -284,6 +284,16 @@ Verification gate `EG-WP7`:
 - dev/production mode tests pass
 - conformance suite passes
 - threat-model coverage review completed against `docs/security/threat-model-wasm-plugin-runtime.md`
+Evidence:
+- `cargo fmt --check`
+- `env CARGO_TARGET_DIR=/home/hendo420/.cache/oberon4-target CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p oberon4-core`
+- `env CARGO_TARGET_DIR=/home/hendo420/.cache/oberon4-target CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p oberon4-daemon`
+- `env CARGO_TARGET_DIR=/home/hendo420/.cache/oberon4-target CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy --workspace --all-targets -- -D warnings`
+- `env CARGO_TARGET_DIR=/home/hendo420/.cache/oberon4-target CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test --workspace`
+- `PATH=\"$HOME/.cargo/bin:$PATH\" bash scripts/oberon4-security-gate.sh`
+- `bash scripts/policy-drift-audit.sh`
+- `bash scripts/exception-debt-report.sh`
+- `env CARGO_TARGET_DIR=/home/hendo420/.cache/oberon4-target CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' bash scripts/local-ci-gate.sh`
 
 ## 6. Requirement Mapping
 - `FR-101` to `FR-110`: `WP0` to `WP3`, `WP6`, `WP7`

@@ -305,10 +305,18 @@ fn context_with_workspace(
 }
 
 fn policy_with_limits(
+    registry: &FilePluginRegistry,
     limits: ResourceLimits,
     blocked_capabilities: BTreeSet<String>,
 ) -> StaticPolicyResolver {
-    StaticPolicyResolver::new(OperatingMode::Production, limits, blocked_capabilities)
+    StaticPolicyResolver::with_limits_for_registered_plugins(
+        OperatingMode::Production,
+        limits.clone(),
+        limits,
+        vec!["sha256:fixture".to_string()],
+        registry.all_registered_plugins(),
+        blocked_capabilities,
+    )
 }
 
 fn host_with_github_service(
@@ -489,20 +497,18 @@ fn denied_capability_is_blocked_before_invocation() {
 
     let registry =
         FilePluginRegistry::load_from_roots(&[root.clone()], HOST_RUNTIME_API_VERSION).unwrap();
-    let host = PluginRuntimeHost::new(
-        registry,
-        policy_with_limits(
-            ResourceLimits {
-                memory_bytes: Some(134_217_728),
-                time_ms: Some(5_000),
-                storage_bytes: Some(268_435_456),
-                output_bytes: Some(131_072),
-                network_policy: Some(NetworkPolicy::Denied),
-            },
-            BTreeSet::from(["storage.private".to_string()]),
-        ),
-    )
-    .unwrap();
+    let policy = policy_with_limits(
+        &registry,
+        ResourceLimits {
+            memory_bytes: Some(134_217_728),
+            time_ms: Some(5_000),
+            storage_bytes: Some(268_435_456),
+            output_bytes: Some(131_072),
+            network_policy: Some(NetworkPolicy::Denied),
+        },
+        BTreeSet::from(["storage.private".to_string()]),
+    );
+    let host = PluginRuntimeHost::new(registry, policy).unwrap();
 
     let response = host
         .tool_invoke(&InvokeRequest {
@@ -615,20 +621,18 @@ fn output_limit_returns_structured_error() {
 
     let registry =
         FilePluginRegistry::load_from_roots(&[root.clone()], HOST_RUNTIME_API_VERSION).unwrap();
-    let host = PluginRuntimeHost::new(
-        registry,
-        policy_with_limits(
-            ResourceLimits {
-                memory_bytes: Some(134_217_728),
-                time_ms: Some(5_000),
-                storage_bytes: Some(268_435_456),
-                output_bytes: Some(512),
-                network_policy: Some(NetworkPolicy::Denied),
-            },
-            BTreeSet::new(),
-        ),
-    )
-    .unwrap();
+    let policy = policy_with_limits(
+        &registry,
+        ResourceLimits {
+            memory_bytes: Some(134_217_728),
+            time_ms: Some(5_000),
+            storage_bytes: Some(268_435_456),
+            output_bytes: Some(512),
+            network_policy: Some(NetworkPolicy::Denied),
+        },
+        BTreeSet::new(),
+    );
+    let host = PluginRuntimeHost::new(registry, policy).unwrap();
 
     let response = host
         .tool_invoke(&InvokeRequest {
@@ -655,20 +659,18 @@ fn storage_limit_returns_structured_error() {
 
     let registry =
         FilePluginRegistry::load_from_roots(&[root.clone()], HOST_RUNTIME_API_VERSION).unwrap();
-    let host = PluginRuntimeHost::new(
-        registry,
-        policy_with_limits(
-            ResourceLimits {
-                memory_bytes: Some(134_217_728),
-                time_ms: Some(5_000),
-                storage_bytes: Some(512),
-                output_bytes: Some(131_072),
-                network_policy: Some(NetworkPolicy::Denied),
-            },
-            BTreeSet::new(),
-        ),
-    )
-    .unwrap();
+    let policy = policy_with_limits(
+        &registry,
+        ResourceLimits {
+            memory_bytes: Some(134_217_728),
+            time_ms: Some(5_000),
+            storage_bytes: Some(512),
+            output_bytes: Some(131_072),
+            network_policy: Some(NetworkPolicy::Denied),
+        },
+        BTreeSet::new(),
+    );
+    let host = PluginRuntimeHost::new(registry, policy).unwrap();
 
     let response = host
         .tool_invoke(&InvokeRequest {
@@ -730,20 +732,18 @@ fn timeout_returns_structured_error() {
 
     let registry =
         FilePluginRegistry::load_from_roots(&[root.clone()], HOST_RUNTIME_API_VERSION).unwrap();
-    let host = PluginRuntimeHost::new(
-        registry,
-        policy_with_limits(
-            ResourceLimits {
-                memory_bytes: Some(134_217_728),
-                time_ms: Some(1),
-                storage_bytes: Some(268_435_456),
-                output_bytes: Some(131_072),
-                network_policy: Some(NetworkPolicy::Denied),
-            },
-            BTreeSet::new(),
-        ),
-    )
-    .unwrap();
+    let policy = policy_with_limits(
+        &registry,
+        ResourceLimits {
+            memory_bytes: Some(134_217_728),
+            time_ms: Some(1),
+            storage_bytes: Some(268_435_456),
+            output_bytes: Some(131_072),
+            network_policy: Some(NetworkPolicy::Denied),
+        },
+        BTreeSet::new(),
+    );
+    let host = PluginRuntimeHost::new(registry, policy).unwrap();
 
     let response = host
         .tool_invoke(&InvokeRequest {
@@ -770,20 +770,18 @@ fn memory_limit_returns_structured_error() {
 
     let registry =
         FilePluginRegistry::load_from_roots(&[root.clone()], HOST_RUNTIME_API_VERSION).unwrap();
-    let host = PluginRuntimeHost::new(
-        registry,
-        policy_with_limits(
-            ResourceLimits {
-                memory_bytes: Some(8_388_608),
-                time_ms: Some(20_000),
-                storage_bytes: Some(268_435_456),
-                output_bytes: Some(131_072),
-                network_policy: Some(NetworkPolicy::Denied),
-            },
-            BTreeSet::new(),
-        ),
-    )
-    .unwrap();
+    let policy = policy_with_limits(
+        &registry,
+        ResourceLimits {
+            memory_bytes: Some(8_388_608),
+            time_ms: Some(20_000),
+            storage_bytes: Some(268_435_456),
+            output_bytes: Some(131_072),
+            network_policy: Some(NetworkPolicy::Denied),
+        },
+        BTreeSet::new(),
+    );
+    let host = PluginRuntimeHost::new(registry, policy).unwrap();
 
     let response = host
         .tool_invoke(&InvokeRequest {
