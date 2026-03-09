@@ -13,8 +13,9 @@ use std::{
 use jsonschema::validator_for;
 use oberon4_core::plugin_runtime::{InvokeMetrics, InvokeResult, InvokeStatus};
 use oberon4_core::{
-    ErrorStatus, InvocationContext, NetworkPolicy, OberonError, PlanRequest, PlanResult,
-    PluginCommandManifest, RequestId, ToolError, default_data_dir,
+    ArtifactBroker, ArtifactCreateRequest, ArtifactReference, ArtifactRetention, ErrorStatus,
+    InvocationContext, NetworkPolicy, OberonError, PlanRequest, PlanResult, PluginCommandManifest,
+    RequestId, ToolError, WorkspaceBroker, WorkspaceHandle, default_data_dir,
 };
 use wasmtime::{
     Config, Engine, Store, StoreLimits, StoreLimitsBuilder, Trap,
@@ -37,6 +38,7 @@ use self::exports::oberon::plugin_runtime::plugin_runtime as guest;
 pub struct ExecutionEngine {
     engine: Engine,
     cache: Mutex<BTreeMap<String, CachedComponent>>,
+    broker_foundations: RuntimeBrokerFoundations,
     shutdown: Arc<AtomicBool>,
     ticker: Option<thread::JoinHandle<()>>,
 }
@@ -84,6 +86,7 @@ impl ExecutionEngine {
         Ok(Self {
             engine,
             cache: Mutex::new(BTreeMap::new()),
+            broker_foundations: _broker_foundations,
             shutdown,
             ticker: Some(ticker),
         })
@@ -95,6 +98,7 @@ impl ExecutionEngine {
         plugin: &RegisteredPlugin,
         command: &PluginCommandManifest,
         request: &PlanRequest,
+        workspace_broker: &dyn WorkspaceBroker,
     ) -> Result<PlanResult, ToolError> {
         let component = self
             .load_component(plugin)
@@ -103,7 +107,7 @@ impl ExecutionEngine {
         add_to_linker_sync(&mut linker)
             .map_err(|err| self.load_error(OberonError::Storage(err.to_string()), request))?;
         let mut store = self
-            .build_store(plugin, command, &request.context)
+            .build_store(plugin, command, &request.context, workspace_broker)
             .map_err(|err| self.load_error(err, request))?;
         let plugin_instance = OberonPlugin::instantiate(&mut store, &component, &linker)
             .map_err(|err| self.runtime_error("RUNTIME_COMPONENT_LOAD_FAILED", err, request))?;
@@ -117,7 +121,7 @@ impl ExecutionEngine {
             .map_err(|err| self.trap_error(err, request, start_instant()))?
             .map_err(|err| self.guest_error(err, request))?;
 
-        self.enforce_storage_limit(plugin, &request.context)
+        self.enforce_storage_limit(plugin, &request.context, workspace_broker)
             .map_err(|err| self.limit_error(err, request))?;
 
         let plan = PlanResult {
@@ -145,6 +149,8 @@ impl ExecutionEngine {
         plugin: &RegisteredPlugin,
         command: &PluginCommandManifest,
         request: &oberon4_core::InvokeRequest,
+        workspace_broker: &dyn WorkspaceBroker,
+        artifact_broker: &dyn ArtifactBroker,
     ) -> Result<InvokeResult, ToolError> {
         let started = Instant::now();
         let component = self
@@ -154,7 +160,7 @@ impl ExecutionEngine {
         add_to_linker_sync(&mut linker)
             .map_err(|err| self.load_error(OberonError::Storage(err.to_string()), request))?;
         let mut store = self
-            .build_store(plugin, command, &request.context)
+            .build_store(plugin, command, &request.context, workspace_broker)
             .map_err(|err| self.load_error(err, request))?;
         let plugin_instance = OberonPlugin::instantiate(&mut store, &component, &linker)
             .map_err(|err| self.runtime_error("RUNTIME_COMPONENT_LOAD_FAILED", err, request))?;
@@ -168,27 +174,73 @@ impl ExecutionEngine {
             .map_err(|err| self.trap_error(err, request, started))?
             .map_err(|err| self.guest_error(err, request))?;
 
-        self.enforce_output_limit(&request.context, &result.summary, &result.data_json)
-            .map_err(|err| self.limit_error(err, request))?;
-        self.enforce_storage_limit(plugin, &request.context)
+        self.enforce_storage_limit(plugin, &request.context, workspace_broker)
             .map_err(|err| self.limit_error(err, request))?;
 
         if !result.artifacts.is_empty() {
             return Err(self.contract_error(
                 "RUNTIME_CONTRACT_MISMATCH",
-                "artifacts are not supported until WP4",
+                "plugins may not mint artifacts directly; host offload is authoritative",
                 request,
             ));
         }
 
-        let data = serde_json::from_str(&result.data_json).map_err(|err| {
+        let raw_data = serde_json::from_str(&result.data_json).map_err(|err| {
             self.contract_error(
                 "RUNTIME_CONTRACT_MISMATCH",
                 &format!("plugin returned invalid json payload: {err}"),
                 request,
             )
         })?;
+        let raw_total = result.summary.len() + result.data_json.len();
+        let (data, artifacts) = if command.supports_artifacts
+            && raw_total
+                > self
+                    .broker_foundations
+                    .artifact
+                    .inline_output_threshold_bytes as usize
+        {
+            let artifact = artifact_broker
+                .create_artifact(&ArtifactCreateRequest {
+                    media_type: "application/json".to_string(),
+                    retention: ArtifactRetention::ShortTerm,
+                    bytes: result.data_json.as_bytes().to_vec(),
+                    producer_tool: Some(request.command.clone()),
+                    producer_plugin: Some(request.context.plugin_id.clone()),
+                })
+                .map_err(|err| self.limit_error(err, request))?;
+            (
+                serde_json::json!({
+                    "artifact": {
+                        "artifactId": artifact.artifact_id,
+                        "mediaType": artifact.media_type,
+                        "size": artifact.size,
+                        "truncated": false,
+                    }
+                }),
+                vec![ArtifactReference {
+                    artifact_id: artifact.artifact_id,
+                    media_type: artifact.media_type,
+                    size: artifact.size,
+                    retention: Some(artifact.retention),
+                    truncated: false,
+                }],
+            )
+        } else {
+            self.enforce_output_limit(&request.context, &result.summary, &result.data_json)
+                .map_err(|err| self.limit_error(err, request))?;
+            (raw_data, Vec::new())
+        };
         self.validate_schema(&command.output_schema, &data, request)?;
+        let final_json = serde_json::to_string(&data).map_err(|err| {
+            self.contract_error(
+                "RUNTIME_CONTRACT_MISMATCH",
+                &format!("plugin output serialization failed: {err}"),
+                request,
+            )
+        })?;
+        self.enforce_output_limit(&request.context, &result.summary, &final_json)
+            .map_err(|err| self.limit_error(err, request))?;
 
         Ok(InvokeResult {
             status: match result.status {
@@ -197,7 +249,7 @@ impl ExecutionEngine {
             },
             summary: result.summary,
             data,
-            artifacts: Vec::new(),
+            artifacts,
             metrics: InvokeMetrics {
                 duration_ms: started.elapsed().as_millis() as u64,
             },
@@ -250,6 +302,7 @@ impl ExecutionEngine {
         plugin: &RegisteredPlugin,
         command: &PluginCommandManifest,
         context: &InvocationContext,
+        workspace_broker: &dyn WorkspaceBroker,
     ) -> Result<Store<ExecutionStoreState>, OberonError> {
         let output_limit = usize::try_from(context.output_limit_bytes)
             .map_err(|_| OberonError::Validation("output limit exceeds usize".to_string()))?;
@@ -259,7 +312,14 @@ impl ExecutionEngine {
         let stderr = MemoryOutputPipe::new(output_limit);
         let state = ExecutionStoreState {
             table: ResourceTable::new(),
-            wasi: self.build_wasi(plugin, command, context, stdout.clone(), stderr.clone())?,
+            wasi: self.build_wasi(
+                plugin,
+                command,
+                context,
+                stdout.clone(),
+                stderr.clone(),
+                workspace_broker,
+            )?,
             limits: StoreLimitsBuilder::new().memory_size(memory_limit).build(),
         };
         let mut store = Store::new(&self.engine, state);
@@ -276,13 +336,14 @@ impl ExecutionEngine {
         context: &InvocationContext,
         stdout: MemoryOutputPipe,
         stderr: MemoryOutputPipe,
+        workspace_broker: &dyn WorkspaceBroker,
     ) -> Result<WasiCtx, OberonError> {
         let mut builder = WasiCtxBuilder::new();
         builder.stdout(stdout).stderr(stderr);
         builder.arg(&plugin.manifest.id);
         builder.arg(&command.name);
 
-        for mount in self.mounts_for(plugin, context)? {
+        for mount in self.mounts_for(plugin, context, workspace_broker)? {
             builder
                 .preopened_dir(
                     &mount.host_path,
@@ -306,6 +367,7 @@ impl ExecutionEngine {
         &self,
         plugin: &RegisteredPlugin,
         context: &InvocationContext,
+        workspace_broker: &dyn WorkspaceBroker,
     ) -> Result<Vec<StorageMount>, OberonError> {
         let mut mounts = Vec::new();
         let data_root = default_data_dir().join("plugin-runtime");
@@ -333,6 +395,32 @@ impl ExecutionEngine {
             })?;
             mounts.push(StorageMount::read_write(host_path, "/session"));
         }
+        if plugin.manifest.capabilities.workspace.read
+            || plugin.manifest.capabilities.workspace.write
+        {
+            let Some(workspace_grant) = context.capability_grants.iter().find(|grant| {
+                matches!(
+                    grant.kind,
+                    oberon4_core::CapabilityGrantKind::WorkspaceHandle
+                )
+            }) else {
+                return Err(OberonError::PolicyDenied(
+                    "workspace-capable commands require a workspace handle grant".to_string(),
+                ));
+            };
+            let workspace = WorkspaceHandle {
+                workspace_handle: workspace_grant.id.clone(),
+            };
+            workspace_broker.create_or_attach_workspace(&workspace)?;
+            let host_path = default_data_dir()
+                .join("plugin-runtime")
+                .join("workspaces")
+                .join(hex_name(&workspace.workspace_handle));
+            fs::create_dir_all(&host_path).map_err(|err| {
+                OberonError::Storage(format!("create workspace mount failed: {err}"))
+            })?;
+            mounts.push(StorageMount::read_write(host_path, "/workspace"));
+        }
         Ok(mounts)
     }
 
@@ -356,8 +444,9 @@ impl ExecutionEngine {
         &self,
         plugin: &RegisteredPlugin,
         context: &InvocationContext,
+        workspace_broker: &dyn WorkspaceBroker,
     ) -> Result<(), OberonError> {
-        let roots = self.mounts_for(plugin, context)?;
+        let roots = self.mounts_for(plugin, context, workspace_broker)?;
         let total: u64 = roots
             .iter()
             .map(|mount| dir_size(&mount.host_path))
@@ -646,5 +735,21 @@ fn convert_side_effects(value: guest::SideEffectClass) -> oberon4_core::SideEffe
         guest::SideEffectClass::ExternalRead => oberon4_core::SideEffectClass::ExternalRead,
         guest::SideEffectClass::ExternalWrite => oberon4_core::SideEffectClass::ExternalWrite,
         guest::SideEffectClass::Destructive => oberon4_core::SideEffectClass::Destructive,
+    }
+}
+
+fn hex_name(value: &str) -> String {
+    value
+        .as_bytes()
+        .iter()
+        .flat_map(|byte| [nibble_to_hex(byte >> 4), nibble_to_hex(byte & 0x0f)])
+        .collect()
+}
+
+fn nibble_to_hex(value: u8) -> char {
+    match value {
+        0..=9 => (b'0' + value) as char,
+        10..=15 => (b'a' + (value - 10)) as char,
+        _ => '0',
     }
 }

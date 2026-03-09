@@ -1,5 +1,6 @@
 pub mod plugin_runtime;
 pub mod plugin_runtime_broker;
+pub mod plugin_runtime_data;
 pub mod plugin_runtime_exec;
 
 use std::{
@@ -31,6 +32,7 @@ pub use plugin_runtime_broker::{
     PluginRuntimeServiceBroker, SecretBackend, SecretBinding, ServiceBinding, ServiceTransport,
     WindowsSecretBackend,
 };
+pub use plugin_runtime_data::{PluginRuntimeArtifactBroker, PluginRuntimeWorkspaceBroker};
 pub use plugin_runtime_exec::ExecutionEngine;
 
 pub fn daemon_status(config: &AppConfig) -> ServiceEnvelope<String> {

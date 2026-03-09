@@ -11,14 +11,15 @@ use oberon4_core::{
     CapabilityGrantKind, CapabilityManifest, HandleOperation, HostToolRuntime, InMemorySecretStore,
     InvocationContext, InvokeRequest, LifecycleActions, LifecycleHooks, NetworkPolicy,
     OperatingMode, PlanRequest, PluginCommandManifest, PluginExample, PluginManifest,
-    PromptingManifest, ProvenanceManifest, RequestId, ResourceBudgetRequest, ResourceLimits,
-    SecretStore, SideEffectClass, SignatureMetadata, StorageCapabilityManifest,
+    PolicyInspectRequest, PromptingManifest, ProvenanceManifest, RequestId, ResourceBudgetRequest,
+    ResourceLimits, SecretStore, SideEffectClass, SignatureMetadata, StorageCapabilityManifest,
     WorkspaceCapabilityManifest,
 };
 use oberon4_daemon::{
     EncryptedLocalSecretBackend, FilePluginRegistry, HOST_RUNTIME_API_VERSION,
     InMemoryServiceTransport, PluginRuntimeHost, PluginRuntimeRedactor, PluginRuntimeSecretBroker,
-    PluginRuntimeServiceBroker, SecretBinding, ServiceBinding, StaticPolicyResolver,
+    PluginRuntimeServiceBroker, RuntimeBrokerFoundations, SecretBinding, ServiceBinding,
+    StaticPolicyResolver,
 };
 
 const VALID_WASM: &[u8] = include_bytes!("fixtures/plugin-runtime/valid/plugin.wasm");
@@ -280,6 +281,27 @@ fn context(plugin_id: &str, command: &str) -> InvocationContext {
         storage_limit_bytes: 268_435_456,
         network_policy: NetworkPolicy::Denied,
     }
+}
+
+fn context_with_workspace(
+    plugin_id: &str,
+    command: &str,
+    workspace_handle: &str,
+    workspace_revision: Option<&str>,
+) -> InvocationContext {
+    let mut context = context(plugin_id, command);
+    context.capability_grants.push(CapabilityGrant {
+        kind: CapabilityGrantKind::WorkspaceHandle,
+        id: workspace_handle.to_string(),
+        operations: vec![
+            HandleOperation::Read,
+            HandleOperation::Write,
+            HandleOperation::List,
+            HandleOperation::Stat,
+        ],
+    });
+    context.workspace_revision = workspace_revision.map(str::to_string);
+    context
 }
 
 fn policy_with_limits(
@@ -775,6 +797,156 @@ fn memory_limit_returns_structured_error() {
     assert_eq!(
         response.error.expect("error expected").code,
         "RESOURCE_LIMIT_MEMORY"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn workspace_capability_is_supported_with_granted_handle_and_revision() {
+    let root = temp_dir("workspace-capability");
+    let mut manifest = fixture_manifest("wp4-workspace");
+    manifest.capabilities.workspace = WorkspaceCapabilityManifest {
+        read: true,
+        write: true,
+    };
+    let echo = manifest
+        .commands
+        .iter_mut()
+        .find(|command| command.name == "echo")
+        .unwrap();
+    echo.required_capabilities = vec!["workspace.write".to_string()];
+    echo.precondition_model = Some(oberon4_core::PreconditionModel::WorkspaceRevision);
+    echo.supports_planning = false;
+    write_bundle(&root, &manifest, VALID_WASM, true);
+
+    let registry =
+        FilePluginRegistry::load_from_roots(&[root.clone()], HOST_RUNTIME_API_VERSION).unwrap();
+    let host = PluginRuntimeHost::new(registry, StaticPolicyResolver::default()).unwrap();
+
+    let plan = host
+        .tool_plan(&PlanRequest {
+            command: "echo".to_string(),
+            input: serde_json::json!({ "message": "hello workspace" }),
+            context: context_with_workspace("wp4-workspace", "echo", "ws_fixture", Some("rev-0")),
+        })
+        .unwrap();
+    assert!(plan.blocking_issues.is_empty());
+
+    let response = host
+        .tool_invoke(&InvokeRequest {
+            command: "echo".to_string(),
+            input: serde_json::json!({ "message": "hello workspace" }),
+            context: context_with_workspace("wp4-workspace", "echo", "ws_fixture", Some("rev-0")),
+        })
+        .unwrap();
+    let result = response.result.expect("result expected");
+    assert_eq!(result.data["message"], "hello workspace");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn artifact_capable_command_offloads_large_output() {
+    let root = temp_dir("artifact-offload");
+    let mut manifest = fixture_manifest("wp4-artifact");
+    manifest.capabilities.artifacts = ArtifactCapabilityManifest {
+        read: false,
+        create: true,
+    };
+    let big_output = manifest
+        .commands
+        .iter_mut()
+        .find(|command| command.name == "big_output")
+        .unwrap();
+    big_output.required_capabilities = vec!["artifact.create".to_string()];
+    big_output.supports_artifacts = true;
+    big_output.output_schema = serde_json::json!({
+        "type": "object",
+        "required": ["artifact"],
+        "properties": {
+            "artifact": {
+                "type": "object",
+                "required": ["artifactId", "mediaType", "size", "truncated"],
+                "properties": {
+                    "artifactId": { "type": "string" },
+                    "mediaType": { "type": "string" },
+                    "size": { "type": "integer", "minimum": 1 },
+                    "truncated": { "type": "boolean" }
+                }
+            }
+        }
+    });
+    write_bundle(&root, &manifest, VALID_WASM, true);
+
+    let registry =
+        FilePluginRegistry::load_from_roots(&[root.clone()], HOST_RUNTIME_API_VERSION).unwrap();
+    let mut foundations = RuntimeBrokerFoundations::default();
+    foundations.artifact.inline_output_threshold_bytes = 256;
+    let host =
+        PluginRuntimeHost::with_foundations(registry, StaticPolicyResolver::default(), foundations)
+            .unwrap();
+
+    let response = host
+        .tool_invoke(&InvokeRequest {
+            command: "big_output".to_string(),
+            input: serde_json::json!({ "bytes": 10_000 }),
+            context: context("wp4-artifact", "big_output"),
+        })
+        .unwrap();
+
+    let result = response.result.expect("result expected");
+    assert_eq!(result.artifacts.len(), 1);
+    assert_eq!(
+        result.data["artifact"]["artifactId"],
+        serde_json::Value::String(result.artifacts[0].artifact_id.clone())
+    );
+    assert_eq!(result.data["artifact"]["mediaType"], "application/json");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn policy_inspect_reports_workspace_and_artifact_capabilities() {
+    let root = temp_dir("policy-inspect");
+    let mut manifest = fixture_manifest("wp4-policy");
+    manifest.capabilities.workspace = WorkspaceCapabilityManifest {
+        read: true,
+        write: false,
+    };
+    manifest.capabilities.artifacts = ArtifactCapabilityManifest {
+        read: false,
+        create: true,
+    };
+    let command = manifest
+        .commands
+        .iter_mut()
+        .find(|entry| entry.name == "big_output")
+        .unwrap();
+    command.required_capabilities =
+        vec!["workspace.read".to_string(), "artifact.create".to_string()];
+    command.supports_artifacts = true;
+    write_bundle(&root, &manifest, VALID_WASM, true);
+
+    let registry =
+        FilePluginRegistry::load_from_roots(&[root.clone()], HOST_RUNTIME_API_VERSION).unwrap();
+    let host = PluginRuntimeHost::new(registry, StaticPolicyResolver::default()).unwrap();
+
+    let response = host
+        .tool_policy_inspect(&PolicyInspectRequest {
+            tool: "wp4-policy".to_string(),
+            command: "big_output".to_string(),
+        })
+        .unwrap();
+    assert!(
+        response
+            .reason_codes
+            .contains(&"workspace_capability_declared".to_string())
+    );
+    assert!(
+        response
+            .reason_codes
+            .contains(&"artifact_capability_declared".to_string())
     );
 
     let _ = fs::remove_dir_all(root);

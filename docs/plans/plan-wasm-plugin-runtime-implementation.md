@@ -188,16 +188,16 @@ Evidence:
 - `env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p oberon4-daemon`
 
 ### Phase 4: Workspace and Artifact Brokers
-- [ ] `WP4.1` Implement logical workspace broker with:
+- [x] `WP4.1` Implement logical workspace broker with:
   - `workspace_handle`
   - normalized relative path enforcement
   - revision tracking
-- [ ] `WP4.2` Implement workspace containment protections:
+- [x] `WP4.2` Implement workspace containment protections:
   - absolute path rejection
   - traversal rejection
   - symlink or reparse-point escape prevention
-- [ ] `WP4.3` Implement artifact broker with retention and eviction policy.
-- [ ] `WP4.4` Implement shared-workspace conflict detection and revision preconditions.
+- [x] `WP4.3` Implement artifact broker with retention and eviction policy.
+- [x] `WP4.4` Implement shared-workspace conflict detection and revision preconditions.
 
 Dependencies:
 - depends on `EG-WP2`
@@ -208,6 +208,9 @@ Verification gate `EG-WP4`:
 - shared-workspace conflict tests pass
 - artifact retention and eviction tests pass
 - cross-platform path semantics tests pass
+Evidence:
+- `cargo test -p oberon4-core`
+- `env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p oberon4-daemon`
 
 ### Phase 5: Versioned Workspace Package
 - [ ] `WP5.1` Implement `workspace.*` commands:

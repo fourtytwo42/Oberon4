@@ -615,6 +615,62 @@ pub struct ArtifactHandle {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactMetadata {
+    #[serde(rename = "artifactId")]
+    pub artifact_id: String,
+    #[serde(rename = "mediaType")]
+    pub media_type: String,
+    pub size: u64,
+    pub retention: ArtifactRetention,
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
+    #[serde(default, rename = "producerTool")]
+    pub producer_tool: Option<String>,
+    #[serde(default, rename = "producerPlugin")]
+    pub producer_plugin: Option<String>,
+    #[serde(default)]
+    pub checksum: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactRetentionPolicy {
+    #[serde(rename = "maxArtifactBytes")]
+    pub max_artifact_bytes: u64,
+    #[serde(rename = "maxRetainedBytes")]
+    pub max_retained_bytes: u64,
+    #[serde(rename = "sessionTtlSeconds")]
+    pub session_ttl_seconds: u64,
+    #[serde(rename = "shortTermTtlSeconds")]
+    pub short_term_ttl_seconds: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactCreateRequest {
+    #[serde(rename = "mediaType")]
+    pub media_type: String,
+    pub retention: ArtifactRetention,
+    pub bytes: Vec<u8>,
+    #[serde(default, rename = "producerTool")]
+    pub producer_tool: Option<String>,
+    #[serde(default, rename = "producerPlugin")]
+    pub producer_plugin: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactReadResult {
+    pub metadata: ArtifactMetadata,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactOffloadResult {
+    pub artifact: ArtifactReference,
+    #[serde(rename = "inlineReplaced")]
+    pub inline_replaced: bool,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceHandle {
     #[serde(rename = "workspaceHandle")]
     pub workspace_handle: String,
@@ -641,9 +697,98 @@ pub struct WorkspaceRevisionRef {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceMetadata {
+    #[serde(rename = "workspaceHandle")]
+    pub workspace_handle: String,
+    #[serde(rename = "workspaceId")]
+    pub workspace_id: String,
+    #[serde(rename = "workspaceRevision")]
+    pub workspace_revision: String,
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: String,
+    #[serde(default, rename = "lastMutationRequestId")]
+    pub last_mutation_request_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceEntry {
     pub name: String,
     pub kind: WorkspacePathKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspacePathMetadata {
+    #[serde(rename = "logicalPath")]
+    pub logical_path: String,
+    pub entry: WorkspaceEntry,
+    #[serde(rename = "sizeBytes")]
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceListResult {
+    #[serde(rename = "workspaceHandle")]
+    pub workspace_handle: String,
+    #[serde(rename = "workspaceRevision")]
+    pub workspace_revision: String,
+    #[serde(rename = "logicalPath")]
+    pub logical_path: String,
+    pub entries: Vec<WorkspacePathMetadata>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceReadResult {
+    #[serde(rename = "workspaceHandle")]
+    pub workspace_handle: String,
+    #[serde(rename = "workspaceRevision")]
+    pub workspace_revision: String,
+    #[serde(rename = "logicalPath")]
+    pub logical_path: String,
+    pub content: String,
+    #[serde(rename = "bytesRead")]
+    pub bytes_read: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceConflict {
+    #[serde(rename = "workspaceHandle")]
+    pub workspace_handle: String,
+    #[serde(rename = "logicalPath")]
+    pub logical_path: String,
+    #[serde(default, rename = "expectedRevision")]
+    pub expected_revision: Option<String>,
+    #[serde(rename = "actualRevision")]
+    pub actual_revision: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceWriteRequest {
+    #[serde(rename = "workspaceHandle")]
+    pub workspace_handle: String,
+    #[serde(rename = "logicalPath")]
+    pub logical_path: String,
+    pub content: String,
+    #[serde(default, rename = "expectedRevision")]
+    pub expected_revision: Option<String>,
+    #[serde(default, rename = "requestId")]
+    pub request_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspacePatchRequest {
+    #[serde(rename = "workspaceHandle")]
+    pub workspace_handle: String,
+    #[serde(rename = "logicalPath")]
+    pub logical_path: String,
+    pub search: String,
+    pub replace: String,
+    #[serde(default, rename = "expectedRevision")]
+    pub expected_revision: Option<String>,
+    #[serde(default, rename = "requestId")]
+    pub request_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -660,6 +805,14 @@ pub struct WorkspaceWriteResult {
     #[serde(rename = "preconditionStatus")]
     pub precondition_status: WorkspacePreconditionStatus,
     pub touched: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceMutationResult {
+    #[serde(default)]
+    pub result: Option<WorkspaceWriteResult>,
+    #[serde(default)]
+    pub conflict: Option<WorkspaceConflict>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -895,6 +1048,56 @@ pub trait ServiceBroker {
         &self,
         request: &WalletSignMessageRequest,
     ) -> Result<String, crate::OberonError>;
+}
+
+pub trait WorkspaceBroker {
+    fn create_or_attach_workspace(
+        &self,
+        workspace: &WorkspaceHandle,
+    ) -> Result<WorkspaceMetadata, crate::OberonError>;
+    fn workspace_metadata(
+        &self,
+        workspace: &WorkspaceHandle,
+    ) -> Result<WorkspaceMetadata, crate::OberonError>;
+    fn list_dir(
+        &self,
+        workspace: &WorkspaceHandle,
+        logical_path: &str,
+    ) -> Result<WorkspaceListResult, crate::OberonError>;
+    fn stat_path(
+        &self,
+        workspace: &WorkspaceHandle,
+        logical_path: &str,
+    ) -> Result<WorkspacePathMetadata, crate::OberonError>;
+    fn read_file(
+        &self,
+        workspace: &WorkspaceHandle,
+        logical_path: &str,
+    ) -> Result<WorkspaceReadResult, crate::OberonError>;
+    fn write_file_atomic(
+        &self,
+        request: &WorkspaceWriteRequest,
+    ) -> Result<WorkspaceMutationResult, crate::OberonError>;
+    fn apply_patch(
+        &self,
+        request: &WorkspacePatchRequest,
+    ) -> Result<WorkspaceMutationResult, crate::OberonError>;
+}
+
+pub trait ArtifactBroker {
+    fn create_artifact(
+        &self,
+        request: &ArtifactCreateRequest,
+    ) -> Result<ArtifactMetadata, crate::OberonError>;
+    fn resolve_artifact(
+        &self,
+        artifact: &ArtifactHandle,
+    ) -> Result<ArtifactMetadata, crate::OberonError>;
+    fn read_artifact(
+        &self,
+        artifact: &ArtifactHandle,
+        max_bytes: u64,
+    ) -> Result<ArtifactReadResult, crate::OberonError>;
 }
 
 pub trait RedactionPipeline {

@@ -6,22 +6,23 @@ use std::{
 };
 
 use oberon4_core::{
-    ApprovalExpectation, ApprovalRequestPayload, ApprovalResourceLimits, BrokeredServiceResult,
-    CapabilityManifest, EffectiveCapabilities, ErrorStatus, GithubRequest, HostToolRuntime,
-    InvokeStatus, ManifestValidationIssue, ManifestValidationResult, NetworkPolicy, OauthRequest,
-    OberonError, OperatingMode, PlanRequest, PlanResult, PlanStatus, PluginCommandManifest,
-    PluginDescription, PluginManifest, PluginRegistry, PolicyInspectRequest, PolicyInspectResponse,
-    PolicyResolution, PolicyResolver, PreconditionModel, RedactionPipeline, RedactionProfile,
-    RedactionTargetKind, RequestId, ResourceLimits, SearchMatch, SearchRequest, SearchResponse,
-    SecretBroker, SecretClass, SecurityLevel, ServiceBroker, SideEffectClass, ToolDescribeRequest,
-    ToolDescribeResponse, ToolError, ToolGuidance, ToolInvokeResponseEnvelope, ToolTier,
-    WorkspaceImpact,
+    ApprovalExpectation, ApprovalRequestPayload, ApprovalResourceLimits, ArtifactRetentionPolicy,
+    BrokeredServiceResult, CapabilityManifest, EffectiveCapabilities, ErrorStatus, GithubRequest,
+    HostToolRuntime, InvokeStatus, ManifestValidationIssue, ManifestValidationResult,
+    NetworkPolicy, OauthRequest, OberonError, OperatingMode, PlanRequest, PlanResult, PlanStatus,
+    PluginCommandManifest, PluginDescription, PluginManifest, PluginRegistry, PolicyInspectRequest,
+    PolicyInspectResponse, PolicyResolution, PolicyResolver, PreconditionModel, RedactionPipeline,
+    RedactionProfile, RedactionTargetKind, RequestId, ResourceLimits, SearchMatch, SearchRequest,
+    SearchResponse, SecretBroker, SecretClass, SecurityLevel, ServiceBroker, SideEffectClass,
+    ToolDescribeRequest, ToolDescribeResponse, ToolError, ToolGuidance, ToolInvokeResponseEnvelope,
+    ToolTier, WorkspaceBroker, WorkspaceHandle, WorkspaceImpact,
 };
 
 use crate::plugin_runtime_broker::{
     InMemoryServiceTransport, NativeSecretBackendUnavailable, PluginRuntimeRedactor,
     PluginRuntimeSecretBroker, PluginRuntimeServiceBroker,
 };
+use crate::plugin_runtime_data::{PluginRuntimeArtifactBroker, PluginRuntimeWorkspaceBroker};
 use crate::plugin_runtime_exec::ExecutionEngine;
 
 pub const HOST_RUNTIME_API_VERSION: &str = "1.0";
@@ -403,6 +404,8 @@ pub struct PluginRuntimeHost<R, P> {
     _secret_broker: Arc<dyn SecretBroker + Send + Sync>,
     service_broker: Arc<dyn ServiceBroker + Send + Sync>,
     redactor: Arc<dyn RedactionPipeline + Send + Sync>,
+    workspace_broker: Arc<PluginRuntimeWorkspaceBroker>,
+    artifact_broker: Arc<PluginRuntimeArtifactBroker>,
 }
 
 impl<R, P> PluginRuntimeHost<R, P> {
@@ -442,6 +445,42 @@ impl<R, P> PluginRuntimeHost<R, P> {
         service_broker: Arc<dyn ServiceBroker + Send + Sync>,
         redactor: Arc<dyn RedactionPipeline + Send + Sync>,
     ) -> Result<Self, OberonError> {
+        let data_root = oberon4_core::default_data_dir().join("plugin-runtime");
+        let workspace_broker = Arc::new(PluginRuntimeWorkspaceBroker::new(
+            data_root.join("workspaces"),
+        )?);
+        let artifact_broker = Arc::new(PluginRuntimeArtifactBroker::new(
+            data_root.join("artifacts"),
+            ArtifactRetentionPolicy {
+                max_artifact_bytes: broker_foundations.artifact.max_artifact_bytes,
+                max_retained_bytes: broker_foundations.artifact.retained_artifact_bytes,
+                session_ttl_seconds: 3600,
+                short_term_ttl_seconds: 86_400,
+            },
+        )?);
+        Self::with_runtime_infrastructure(
+            registry,
+            policy,
+            broker_foundations,
+            secret_broker,
+            service_broker,
+            redactor,
+            workspace_broker,
+            artifact_broker,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_runtime_infrastructure(
+        registry: R,
+        policy: P,
+        broker_foundations: RuntimeBrokerFoundations,
+        secret_broker: Arc<dyn SecretBroker + Send + Sync>,
+        service_broker: Arc<dyn ServiceBroker + Send + Sync>,
+        redactor: Arc<dyn RedactionPipeline + Send + Sync>,
+        workspace_broker: Arc<PluginRuntimeWorkspaceBroker>,
+        artifact_broker: Arc<PluginRuntimeArtifactBroker>,
+    ) -> Result<Self, OberonError> {
         let execution = ExecutionEngine::new(broker_foundations.clone())?;
         Ok(Self {
             registry,
@@ -451,6 +490,8 @@ impl<R, P> PluginRuntimeHost<R, P> {
             _secret_broker: secret_broker,
             service_broker,
             redactor,
+            workspace_broker,
+            artifact_broker,
         })
     }
 
@@ -469,6 +510,56 @@ where
             .get("serviceHandle")
             .and_then(|value| value.as_str())
             .map(str::to_string)
+    }
+
+    fn workspace_handle_from_context(
+        context: &oberon4_core::InvocationContext,
+    ) -> Option<WorkspaceHandle> {
+        context
+            .capability_grants
+            .iter()
+            .find(|grant| {
+                matches!(
+                    grant.kind,
+                    oberon4_core::CapabilityGrantKind::WorkspaceHandle
+                )
+            })
+            .map(|grant| WorkspaceHandle {
+                workspace_handle: grant.id.clone(),
+            })
+    }
+
+    fn command_uses_workspace(command: &PluginCommandManifest) -> bool {
+        command
+            .required_capabilities
+            .iter()
+            .any(|capability| matches!(capability.as_str(), "workspace.read" | "workspace.write"))
+    }
+
+    fn command_uses_artifacts(command: &PluginCommandManifest) -> bool {
+        command
+            .required_capabilities
+            .iter()
+            .any(|capability| matches!(capability.as_str(), "artifact.read" | "artifact.create"))
+            || command.supports_artifacts
+    }
+
+    fn validate_workspace_access(
+        &self,
+        command: &PluginCommandManifest,
+        context: &oberon4_core::InvocationContext,
+    ) -> Result<Option<oberon4_core::WorkspaceMetadata>, OberonError> {
+        if !Self::command_uses_workspace(command) {
+            return Ok(None);
+        }
+        let workspace = Self::workspace_handle_from_context(context).ok_or_else(|| {
+            OberonError::PolicyDenied(
+                "workspace-capable commands require a granted workspace handle".to_string(),
+            )
+        })?;
+        self.workspace_broker
+            .create_or_attach_workspace(&workspace)
+            .map(Some)
     }
 
     fn service_metadata_from_request(
@@ -705,7 +796,7 @@ where
             input: request.input.clone(),
             context: apply_policy_to_context(&request.context, &resolution.resource_limits),
         };
-        let unsupported = unsupported_capabilities_after_wp3(&command);
+        let unsupported = unsupported_capabilities_after_wp4(&command);
         let approval_preview = self
             .approval_payload_for_plan(&effective_request)?
             .map(|payload| oberon4_core::CommandPlanPreview {
@@ -722,7 +813,7 @@ where
         blocking_issues.extend(resolution.blocking_issues);
         if !unsupported.is_empty() {
             blocking_issues.push(format!(
-                "WP3 does not support required capabilities: {}",
+                "WP4 does not support required capabilities: {}",
                 unsupported.join(", ")
             ));
         }
@@ -731,6 +822,24 @@ where
         {
             blocking_issues
                 .push("brokered service commands require serviceHandle input".to_string());
+        }
+        if Self::command_uses_workspace(&command) {
+            match self.validate_workspace_access(&command, &effective_request.context) {
+                Ok(Some(metadata)) => {
+                    if matches!(
+                        command.precondition_model,
+                        Some(PreconditionModel::WorkspaceRevision)
+                    ) && effective_request.context.workspace_revision.is_none()
+                    {
+                        blocking_issues.push(format!(
+                            "workspace writes require current workspace revision for {}",
+                            metadata.workspace_handle
+                        ));
+                    }
+                }
+                Ok(None) => {}
+                Err(err) => blocking_issues.push(err.to_string()),
+            }
         }
 
         if !resolution.capabilities.blocked.is_empty() || !unsupported.is_empty() {
@@ -769,7 +878,12 @@ where
         let plugin_plan = if command.supports_planning {
             Some(
                 self.execution
-                    .plan(&registered, &command, &effective_request)
+                    .plan(
+                        &registered,
+                        &command,
+                        &effective_request,
+                        self.workspace_broker.as_ref(),
+                    )
                     .map_err(map_tool_error_to_oberon_error)?,
             )
         } else {
@@ -828,7 +942,7 @@ where
             input: request.input.clone(),
             context: apply_policy_to_context(&request.context, &resolution.resource_limits),
         };
-        let unsupported = unsupported_capabilities_after_wp3(&command);
+        let unsupported = unsupported_capabilities_after_wp4(&command);
 
         if !resolution.capabilities.blocked.is_empty() {
             let error = self.redact_tool_error(
@@ -859,9 +973,30 @@ where
                     status: ErrorStatus::Error,
                     code: "NOT_YET_SUPPORTED_IN_WP2".to_string(),
                     message: format!(
-                        "WP3 does not support required capabilities: {}",
+                        "WP4 does not support required capabilities: {}",
                         unsupported.join(", ")
                     ),
+                    retryable: false,
+                    request_id: request.context.request_id.clone(),
+                    plugin_id: request.context.plugin_id.clone(),
+                    plugin_version: request.context.plugin_version.clone(),
+                    command: request.command.clone(),
+                    next_suggested_action: Some("tool_policy_inspect".to_string()),
+                },
+                &self.redaction_profile_for_input(&request.input)?,
+            )?;
+            return Ok(ToolInvokeResponseEnvelope {
+                result: None,
+                error: Some(error),
+            });
+        }
+
+        if let Err(err) = self.validate_workspace_access(&command, &effective_request.context) {
+            let error = self.redact_tool_error(
+                ToolError {
+                    status: ErrorStatus::Error,
+                    code: "CAPABILITY_DENIED".to_string(),
+                    message: err.to_string(),
                     retryable: false,
                     request_id: request.context.request_id.clone(),
                     plugin_id: request.context.plugin_id.clone(),
@@ -954,10 +1089,13 @@ where
         let registered = self
             .registry
             .registered_plugin(&request.context.plugin_id)?;
-        let invoke_result = match self
-            .execution
-            .invoke(&registered, &command, &effective_request)
-        {
+        let invoke_result = match self.execution.invoke(
+            &registered,
+            &command,
+            &effective_request,
+            self.workspace_broker.as_ref(),
+            self.artifact_broker.as_ref(),
+        ) {
             Ok(result) => result,
             Err(error) => {
                 let profile = self.redaction_profile_for_input(&request.input)?;
@@ -1016,6 +1154,8 @@ where
             .registry
             .command_manifest(&request.tool, &request.command)?;
         let resolution = self.policy.resolve(&request.tool, &command, &manifest)?;
+        let workspace_allowed = Self::command_uses_workspace(&command);
+        let artifact_allowed = Self::command_uses_artifacts(&command);
         let service_handles_used = service_capabilities(&command)
             .into_iter()
             .map(String::from)
@@ -1028,7 +1168,16 @@ where
             approval_required: resolution.approval_required,
             resource_limits: resolution.resource_limits,
             operating_mode: resolution.operating_mode,
-            reason_codes: resolution.reason_codes,
+            reason_codes: {
+                let mut reason_codes = resolution.reason_codes;
+                if workspace_allowed {
+                    reason_codes.push("workspace_capability_declared".to_string());
+                }
+                if artifact_allowed {
+                    reason_codes.push("artifact_capability_declared".to_string());
+                }
+                reason_codes
+            },
             service_handles_used,
             secret_classes_involved: inferred_secret_classes(&command),
             security_levels: Vec::new(),
@@ -1377,7 +1526,7 @@ fn apply_policy_to_context(
     }
 }
 
-fn unsupported_capabilities_after_wp3(command: &PluginCommandManifest) -> Vec<String> {
+fn unsupported_capabilities_after_wp4(command: &PluginCommandManifest) -> Vec<String> {
     command
         .required_capabilities
         .iter()
@@ -1387,6 +1536,10 @@ fn unsupported_capabilities_after_wp3(command: &PluginCommandManifest) -> Vec<St
                 "storage.private"
                     | "storage.session"
                     | "storage.cache"
+                    | "workspace.read"
+                    | "workspace.write"
+                    | "artifact.read"
+                    | "artifact.create"
                     | "github.request"
                     | "service.github.request"
                     | "oauth.request"
@@ -1511,9 +1664,23 @@ fn workspace_impact_from_plan(request: &PlanRequest) -> Option<WorkspaceImpact> 
     let workspace_handle = request
         .input
         .get("workspaceHandle")
-        .and_then(|value| value.as_str())?;
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .or_else(|| {
+            request
+                .context
+                .capability_grants
+                .iter()
+                .find(|grant| {
+                    matches!(
+                        grant.kind,
+                        oberon4_core::CapabilityGrantKind::WorkspaceHandle
+                    )
+                })
+                .map(|grant| grant.id.clone())
+        })?;
     Some(WorkspaceImpact {
-        workspace_handle: workspace_handle.to_string(),
+        workspace_handle,
         workspace_revision: request
             .context
             .workspace_revision
@@ -1607,7 +1774,7 @@ mod tests {
                 side_effects: SideEffectClass::ExternalWrite,
                 required_capabilities: vec!["workspace.write".to_string()],
                 approval_expectation: Some(ApprovalExpectation::Required),
-                supports_planning: true,
+                supports_planning: false,
                 supports_pagination: false,
                 supports_artifacts: false,
                 precondition_model: Some(oberon4_core::PreconditionModel::WorkspaceRevision),
@@ -1838,11 +2005,7 @@ mod tests {
             })
             .unwrap();
         assert!(plan.approval_required);
-        assert!(
-            plan.blocking_issues
-                .iter()
-                .any(|issue| issue.contains("WP3 does not support required capabilities"))
-        );
+        assert!(plan.blocking_issues.is_empty());
         assert_eq!(plan.resource_limits.unwrap().time_ms, Some(4_000));
 
         let inspect = host
@@ -1920,7 +2083,7 @@ mod tests {
     }
 
     #[test]
-    fn invoke_fails_closed_for_wp2_unsupported_capabilities() {
+    fn invoke_fails_closed_for_invalid_component_after_wp4_support() {
         let root = temp_dir("invoke");
         let manifest = sample_manifest();
         write_manifest(&root, &manifest);
@@ -1941,7 +2104,7 @@ mod tests {
             .unwrap();
         assert!(response.result.is_none());
         let error = response.error.expect("error should be present");
-        assert_eq!(error.code, "NOT_YET_SUPPORTED_IN_WP2");
+        assert_eq!(error.code, "RUNTIME_COMPONENT_LOAD_FAILED");
         assert!(!error.retryable);
 
         let _ = fs::remove_dir_all(root);
