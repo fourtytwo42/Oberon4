@@ -21,7 +21,13 @@ fn debug_binary(name: &str) -> PathBuf {
     debug_dir.join(name)
 }
 
-fn run_cli(cli: &Path, daemon: &Path, data_dir: &Path, socket_path: &Path, args: &[&str]) -> String {
+fn run_cli(
+    cli: &Path,
+    daemon: &Path,
+    data_dir: &Path,
+    socket_path: &Path,
+    args: &[&str],
+) -> String {
     let output = Command::new(cli)
         .args(args)
         .env("OBERON4_DAEMON_BIN", daemon)
@@ -58,7 +64,13 @@ fn daemon_start_restarts_existing_daemon() {
 
     let first = run_cli(&cli, &daemon, &data_dir, &socket_path, &["daemon", "start"]);
     let second = run_cli(&cli, &daemon, &data_dir, &socket_path, &["daemon", "start"]);
-    let status = run_cli(&cli, &daemon, &data_dir, &socket_path, &["daemon", "status"]);
+    let status = run_cli(
+        &cli,
+        &daemon,
+        &data_dir,
+        &socket_path,
+        &["daemon", "status"],
+    );
     let stop = run_cli(&cli, &daemon, &data_dir, &socket_path, &["daemon", "stop"]);
 
     assert!(first.contains("running=true"));

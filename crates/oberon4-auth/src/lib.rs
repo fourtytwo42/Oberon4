@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use oberon4_core::{
-    AccountState, OAuthCallbackPayload, OAuthProvider, OAuthProviderKind, OAuthStart,
-    OberonError, PendingOAuthFlow, SecretStore, StoredAccount, TokenBundle,
+    AccountState, OAuthCallbackPayload, OAuthProvider, OAuthProviderKind, OAuthStart, OberonError,
+    PendingOAuthFlow, SecretStore, StoredAccount, TokenBundle,
 };
 
 pub const OPENAI_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -700,10 +700,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(start.provider, OAuthProviderKind::OpenAi);
-        assert!(start.authorization_url.contains(&format!(
-            "client_id={}",
-            super::OPENAI_CLIENT_ID
-        )));
+        assert!(
+            start
+                .authorization_url
+                .contains(&format!("client_id={}", super::OPENAI_CLIENT_ID))
+        );
         assert!(start.authorization_url.contains("code_challenge="));
         assert!(start.authorization_url.contains("state="));
         assert!(
@@ -753,11 +754,7 @@ mod tests {
         assert_eq!(anthropic.provider_kind(), OAuthProviderKind::Anthropic);
         let (openai_start, _) = openai.start_connect_flow().unwrap();
         let (anthropic_start, _) = anthropic.start_connect_flow().unwrap();
-        assert!(
-            openai_start
-                .authorization_url
-                .contains("auth.openai.com")
-        );
+        assert!(openai_start.authorization_url.contains("auth.openai.com"));
         assert!(
             anthropic_start
                 .authorization_url
@@ -1035,10 +1032,7 @@ mod tests {
             let request = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
             assert!(request.starts_with("POST /token HTTP/1.1"));
             assert!(request.contains("grant_type=authorization_code"));
-            assert!(request.contains(&format!(
-                "client_id={}",
-                super::OPENAI_CLIENT_ID
-            )));
+            assert!(request.contains(&format!("client_id={}", super::OPENAI_CLIENT_ID)));
             assert!(request.contains("code=code-123"));
             assert!(request.contains("code_verifier=verifier-123"));
 

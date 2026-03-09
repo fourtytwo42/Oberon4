@@ -783,9 +783,11 @@ impl DaemonBackedTuiApp {
     }
 
     pub fn delete_session(&self, session_id: &str) -> Result<String, OberonError> {
-        match self.client.send(&oberon4_core::DaemonCommand::DeleteSession {
-            session_id: session_id.to_string(),
-        })? {
+        match self
+            .client
+            .send(&oberon4_core::DaemonCommand::DeleteSession {
+                session_id: session_id.to_string(),
+            })? {
             oberon4_core::DaemonEvent::Ack { message } => Ok(message),
             event => Err(protocol_error_inner(event)),
         }
@@ -1580,15 +1582,17 @@ impl TuiShellState {
             })
             .collect::<Vec<_>>();
         scored.sort_by(|(left_score, left_item), (right_score, right_item)| {
-            left_score
-                .cmp(right_score)
-                .then_with(|| self.session_picker_label(*left_item).cmp(&self.session_picker_label(*right_item)))
+            left_score.cmp(right_score).then_with(|| {
+                self.session_picker_label(*left_item)
+                    .cmp(&self.session_picker_label(*right_item))
+            })
         });
         self.session_picker.filtered_items = scored.into_iter().map(|(_, item)| item).collect();
         if self.session_picker.filtered_items.is_empty() {
             self.session_picker.selected = 0;
         } else if self.session_picker.selected >= self.session_picker.filtered_items.len() {
-            self.session_picker.selected = self.session_picker.filtered_items.len().saturating_sub(1);
+            self.session_picker.selected =
+                self.session_picker.filtered_items.len().saturating_sub(1);
         }
     }
 
@@ -1612,7 +1616,9 @@ impl TuiShellState {
     #[allow(dead_code)]
     fn session_picker_label(&self, item: SessionSidebarItem) -> String {
         match item {
-            SessionSidebarItem::CurrentChat => format!("{} (current)", self.current_chat_sidebar_title()),
+            SessionSidebarItem::CurrentChat => {
+                format!("{} (current)", self.current_chat_sidebar_title())
+            }
             SessionSidebarItem::Saved(index) => self
                 .sessions
                 .get(index)
@@ -1716,14 +1722,13 @@ impl TuiShellState {
         self.scroll_transcript_to_bottom();
     }
 
-    fn preview_selected_session(
-        &mut self,
-        app: &DaemonBackedTuiApp,
-    ) -> Result<(), OberonError> {
+    fn preview_selected_session(&mut self, app: &DaemonBackedTuiApp) -> Result<(), OberonError> {
         let selected_item = if matches!(self.workspace, Workspace::Sessions) {
             self.selected_session_picker_item()
         } else {
-            self.session_sidebar_items().get(self.session_index).copied()
+            self.session_sidebar_items()
+                .get(self.session_index)
+                .copied()
         };
         let Some(item) = selected_item else {
             return Ok(());
@@ -2024,7 +2029,8 @@ impl TuiShellState {
                         SessionSidebarItem::Saved(index) => {
                             if let Some(session) = self.sessions.get(index) {
                                 let name = session.id.as_str().to_string();
-                                let response = app.handle_command(TuiCommand::Load(name.clone()))?;
+                                let response =
+                                    app.handle_command(TuiCommand::Load(name.clone()))?;
                                 self.set_activity(ActivityState::Idle, response.output);
                                 self.sync_loaded_session_from_id(&name);
                                 self.transcript = Self::ui_lines_from_messages(app.transcript());
@@ -2119,7 +2125,11 @@ impl TuiShellState {
             return Ok(false);
         }
 
-        let Some(item) = self.session_sidebar_items().get(self.session_index).copied() else {
+        let Some(item) = self
+            .session_sidebar_items()
+            .get(self.session_index)
+            .copied()
+        else {
             return Ok(false);
         };
 
@@ -2300,14 +2310,17 @@ fn session_match_score(query: &str, haystack: &str) -> Option<SessionMatchScore>
 }
 
 fn find_word_boundary_match(haystack: &str, query: &str) -> Option<usize> {
-    haystack.match_indices(query).map(|(idx, _)| idx).find(|&idx| {
-        idx == 0
-            || !haystack[..idx]
-                .chars()
-                .last()
-                .map(|ch| ch.is_ascii_alphanumeric())
-                .unwrap_or(false)
-    })
+    haystack
+        .match_indices(query)
+        .map(|(idx, _)| idx)
+        .find(|&idx| {
+            idx == 0
+                || !haystack[..idx]
+                    .chars()
+                    .last()
+                    .map(|ch| ch.is_ascii_alphanumeric())
+                    .unwrap_or(false)
+        })
 }
 
 fn fuzzy_match_positions(haystack: &str, query: &str) -> Option<usize> {
@@ -2366,7 +2379,9 @@ impl FullscreenTerminalGuard {
     }
 
     fn terminal_mut(&mut self) -> &mut Terminal<CrosstermBackend<io::Stdout>> {
-        self.terminal.as_mut().expect("terminal guard must hold terminal")
+        self.terminal
+            .as_mut()
+            .expect("terminal guard must hold terminal")
     }
 }
 
@@ -2384,11 +2399,15 @@ struct InlineTerminalGuard {
 
 impl InlineTerminalGuard {
     fn new(stdout: io::Stdout) -> Self {
-        Self { stdout: Some(stdout) }
+        Self {
+            stdout: Some(stdout),
+        }
     }
 
     fn stdout_mut(&mut self) -> &mut io::Stdout {
-        self.stdout.as_mut().expect("inline terminal guard must hold stdout")
+        self.stdout
+            .as_mut()
+            .expect("inline terminal guard must hold stdout")
     }
 }
 
@@ -2527,7 +2546,9 @@ fn run_inline_terminal_loop(
                 }
                 FocusTarget::List => {
                     match shell.current_route() {
-                        ScreenRoute::SessionsRoot if matches!(shell.workspace, Workspace::Sessions) => {
+                        ScreenRoute::SessionsRoot
+                            if matches!(shell.workspace, Workspace::Sessions) =>
+                        {
                             shell.move_session_picker_selection(-1);
                             shell.preview_selected_session(app)?;
                         }
@@ -2552,7 +2573,9 @@ fn run_inline_terminal_loop(
                 }
                 FocusTarget::List => {
                     match shell.current_route() {
-                        ScreenRoute::SessionsRoot if matches!(shell.workspace, Workspace::Sessions) => {
+                        ScreenRoute::SessionsRoot
+                            if matches!(shell.workspace, Workspace::Sessions) =>
+                        {
                             shell.move_session_picker_selection(1);
                             shell.preview_selected_session(app)?;
                         }
@@ -2572,7 +2595,9 @@ fn run_inline_terminal_loop(
             },
             KeyCode::Enter => {
                 if matches!(shell.focus, FocusTarget::Menu) {
-                    if let MenuAction::StartOAuth(pending) = shell.activate_current_menu_item(app)? {
+                    if let MenuAction::StartOAuth(pending) =
+                        shell.activate_current_menu_item(app)?
+                    {
                         pending_oauth = Some(pending);
                     }
                     rerender_workspace = !matches!(shell.workspace, Workspace::Chat);
@@ -2745,7 +2770,9 @@ fn run_terminal_loop(
                         FocusTarget::Menu => shell.move_menu_selection(-1),
                         FocusTarget::List => match shell.current_route() {
                             ScreenRoute::AccountList { .. } => shell.move_account_selection(-1),
-                            ScreenRoute::SessionsRoot if matches!(shell.workspace, Workspace::Sessions) => {
+                            ScreenRoute::SessionsRoot
+                                if matches!(shell.workspace, Workspace::Sessions) =>
+                            {
                                 shell.move_session_picker_selection(-1);
                                 shell.preview_selected_session(app)?;
                             }
@@ -2764,7 +2791,9 @@ fn run_terminal_loop(
                         FocusTarget::Menu => shell.move_menu_selection(1),
                         FocusTarget::List => match shell.current_route() {
                             ScreenRoute::AccountList { .. } => shell.move_account_selection(1),
-                            ScreenRoute::SessionsRoot if matches!(shell.workspace, Workspace::Sessions) => {
+                            ScreenRoute::SessionsRoot
+                                if matches!(shell.workspace, Workspace::Sessions) =>
+                            {
                                 shell.move_session_picker_selection(1);
                                 shell.preview_selected_session(app)?;
                             }
@@ -3746,7 +3775,8 @@ fn render_sessions_overlay(frame: &mut Frame, area: Rect, shell: &TuiShellState)
     let items = if shell.session_picker.filtered_items.is_empty() {
         vec![ListItem::new("No sessions match")]
     } else {
-        shell.session_picker
+        shell
+            .session_picker
             .filtered_items
             .iter()
             .enumerate()
@@ -3761,11 +3791,7 @@ fn render_sessions_overlay(frame: &mut Frame, area: Rect, shell: &TuiShellState)
             .collect::<Vec<_>>()
     };
     frame.render_widget(
-        List::new(items).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Sessions"),
-        ),
+        List::new(items).block(Block::default().borders(Borders::ALL).title("Sessions")),
         list_area,
     );
 }
@@ -3906,7 +3932,9 @@ fn render_help_workspace(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
     frame.render_widget(
         Paragraph::new(Text::from(vec![
             Line::raw(EXTENDED_HELP),
-            Line::raw("Up/Down recall prompt history in composer; navigate menus and lists elsewhere."),
+            Line::raw(
+                "Up/Down recall prompt history in composer; navigate menus and lists elsewhere.",
+            ),
             Line::raw("Enter opens or activates."),
             Line::raw("Esc always backs out one level before clearing/quitting."),
             Line::raw(format!("current status: {}", shell.status())),
@@ -4506,7 +4534,9 @@ pub fn parse_tui_command(input: &str) -> Result<TuiCommand, OberonError> {
         "/save" => require_argument(rest, "/save").map(TuiCommand::Save),
         "/load" => require_argument(rest, "/load").map(TuiCommand::Load),
         "/fork" => require_argument(rest, "/fork").map(TuiCommand::Fork),
-        _ => Err(OberonError::Validation(unsupported_command_message(command))),
+        _ => Err(OberonError::Validation(unsupported_command_message(
+            command,
+        ))),
     }
 }
 
@@ -4520,9 +4550,7 @@ fn canonical_tui_command(command: &str) -> &str {
         "/sessions" | "/session" | "/sessoins" | "/sessons" => "/sessions",
         "/settings" | "/setting" | "/setings" | "/settigns" | "/setteings" => "/settings",
         "/accounts" | "/account" | "/acounts" | "/accouts" => "/accounts",
-        "/diagnostics" | "/diagnostic" | "/diag" | "/diags" | "/diagnositcs" => {
-            "/diagnostics"
-        }
+        "/diagnostics" | "/diagnostic" | "/diag" | "/diags" | "/diagnositcs" => "/diagnostics",
         "/more" | "/menu" => "/more",
         "/config" | "/cfg" | "/configuration" => "/config",
         "/model" | "/models" => "/model",
@@ -4553,10 +4581,7 @@ fn suggest_tui_command(command: &str) -> Option<&'static str> {
     let mut best: Option<(&'static str, usize)> = None;
     for (candidate, _) in COMMAND_CATALOG {
         let distance = edit_distance(&normalized, candidate);
-        let threshold = normalized
-            .len()
-            .max(candidate.len())
-            .clamp(2, 4);
+        let threshold = normalized.len().max(candidate.len()).clamp(2, 4);
         let shared_prefix = normalized
             .chars()
             .zip(candidate.chars())
@@ -4827,7 +4852,8 @@ fn start_async_oauth_connect(
     thread::spawn(move || {
         let client = DaemonIpcClient::new(&socket_path);
         let result = (|| -> Result<String, OberonError> {
-            let start = match client.send(&oberon4_core::DaemonCommand::ConnectAccount { provider }) {
+            let start = match client.send(&oberon4_core::DaemonCommand::ConnectAccount { provider })
+            {
                 Ok(oberon4_core::DaemonEvent::OAuthStarted {
                     provider: _,
                     flow_id,
@@ -4906,13 +4932,15 @@ fn wait_for_oauth_callback(
     };
     let listener = TcpListener::bind((bind_host.as_str(), port))
         .map_err(|err| OberonError::Storage(format!("oauth callback listener failed: {err}")))?;
-    listener
-        .set_nonblocking(true)
-        .map_err(|err| OberonError::Storage(format!("oauth callback nonblocking setup failed: {err}")))?;
+    listener.set_nonblocking(true).map_err(|err| {
+        OberonError::Storage(format!("oauth callback nonblocking setup failed: {err}"))
+    })?;
     let started_at = Instant::now();
     let (mut stream, _) = loop {
         if cancel_flag.load(Ordering::Relaxed) {
-            return Err(OberonError::Validation("oauth callback canceled".to_string()));
+            return Err(OberonError::Validation(
+                "oauth callback canceled".to_string(),
+            ));
         }
         if started_at.elapsed() >= timeout {
             return Err(OberonError::Storage(
@@ -5129,14 +5157,11 @@ mod tests {
     use super::{
         AsyncUiEvent, BinaryLaunchTarget, CODE_BLOCK_BG, DaemonBackedTuiApp, FocusTarget,
         PendingSubmission, ScreenRoute, SessionMatchScore, TuiApp, TuiCommand, TuiShellState,
-        UiLine, Workspace,
-        build_transcript_rows, build_transcript_viewport, finalize_streamed_assistant,
-        cancel_pending_submission,
-        format_assistant_markdown, session_match_score,
-        handle_async_ui_event, handle_pending_local_command,
-        handle_pending_timeout, parse_callback_request, parse_tui_command,
-        resolve_binary_launch_target, start_async_submit, status_line,
-        wait_for_oauth_callback,
+        UiLine, Workspace, build_transcript_rows, build_transcript_viewport,
+        cancel_pending_submission, finalize_streamed_assistant, format_assistant_markdown,
+        handle_async_ui_event, handle_pending_local_command, handle_pending_timeout,
+        parse_callback_request, parse_tui_command, resolve_binary_launch_target,
+        session_match_score, start_async_submit, status_line, wait_for_oauth_callback,
     };
     use oberon4_auth::{AccountRegistry, InMemoryAccountMetadataStore};
     use oberon4_core::{
@@ -5144,7 +5169,10 @@ mod tests {
         OAuthProviderKind, SessionId, SessionSummary,
     };
     use oberon4_daemon::{DaemonApp, DaemonIpcClient, DaemonRuntime, serve_unix_socket};
-    use ratatui::{layout::Rect, style::{Color, Modifier}};
+    use ratatui::{
+        layout::Rect,
+        style::{Color, Modifier},
+    };
 
     #[test]
     fn status_line_includes_endpoint_and_model() {
@@ -5182,10 +5210,7 @@ mod tests {
             parse_tui_command("/diagnositcs").unwrap(),
             TuiCommand::Diagnostics
         );
-        assert_eq!(
-            parse_tui_command("/account").unwrap(),
-            TuiCommand::Accounts
-        );
+        assert_eq!(parse_tui_command("/account").unwrap(), TuiCommand::Accounts);
         assert_eq!(
             parse_tui_command("/model o4-mini").unwrap(),
             TuiCommand::Model("o4-mini".to_string())
@@ -5624,18 +5649,19 @@ mod tests {
             "## Example\nUse `sqrt` here.\n```python\n    print('hi')\n```",
         );
 
-        assert!(lines[0]
-            .spans
-            .iter()
-            .any(|span| span.style.add_modifier.contains(Modifier::BOLD)));
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .any(|span| span.style.add_modifier.contains(Modifier::BOLD))
+        );
         assert!(lines
             .iter()
             .flat_map(|line| line.spans.iter())
             .any(|span| span.content.contains("sqrt") && span.style.bg == Some(Color::DarkGray)));
-        assert!(lines
-            .iter()
-            .flat_map(|line| line.spans.iter())
-            .any(|span| span.content.contains("print('hi')") && span.style.bg == Some(CODE_BLOCK_BG)));
+        assert!(lines.iter().flat_map(|line| line.spans.iter()).any(|span| {
+            span.content.contains("print('hi')") && span.style.bg == Some(CODE_BLOCK_BG)
+        }));
     }
 
     #[test]
@@ -5648,11 +5674,13 @@ mod tests {
             .collect();
 
         assert!(!flattened.contains("**"));
-        assert!(lines
-            .iter()
-            .flat_map(|line| line.spans.iter())
-            .any(|span| span.content.contains("Word Association")
-                && span.style.add_modifier.contains(Modifier::BOLD)));
+        assert!(
+            lines
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .any(|span| span.content.contains("Word Association")
+                    && span.style.add_modifier.contains(Modifier::BOLD))
+        );
     }
 
     #[test]
@@ -5668,11 +5696,13 @@ mod tests {
 
         assert!(!flattened.contains("**"));
         assert!(flattened.contains("• "));
-        assert!(lines
-            .iter()
-            .flat_map(|line| line.spans.iter())
-            .any(|span| span.content.contains("Word Association")
-                && span.style.add_modifier.contains(Modifier::BOLD)));
+        assert!(
+            lines
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .any(|span| span.content.contains("Word Association")
+                    && span.style.add_modifier.contains(Modifier::BOLD))
+        );
     }
 
     #[test]
@@ -5685,14 +5715,17 @@ mod tests {
 
         let rows = build_transcript_rows(&shell, 40);
 
-        assert!(rows[0]
-            .spans
-            .iter()
-            .any(|span| span.content.contains("[assistant]")));
-        assert!(rows
-            .iter()
-            .flat_map(|line| line.spans.iter())
-            .any(|span| span.content.contains("• ")));
+        assert!(
+            rows[0]
+                .spans
+                .iter()
+                .any(|span| span.content.contains("[assistant]"))
+        );
+        assert!(
+            rows.iter()
+                .flat_map(|line| line.spans.iter())
+                .any(|span| span.content.contains("• "))
+        );
     }
 
     #[test]
@@ -5940,7 +5973,8 @@ mod tests {
         }
 
         let mut app = DaemonBackedTuiApp::new(DaemonIpcClient::new(&socket_path));
-        app.handle_command(TuiCommand::Save("demo".to_string())).unwrap();
+        app.handle_command(TuiCommand::Save("demo".to_string()))
+            .unwrap();
 
         let mut shell = TuiShellState::default();
         shell.refresh_runtime_data(&app);
@@ -6046,7 +6080,6 @@ mod tests {
         );
         assert_eq!(session_match_score("zzz", "alpha beta"), None);
     }
-
 
     #[test]
     fn async_submit_completes_and_updates_shell() {
