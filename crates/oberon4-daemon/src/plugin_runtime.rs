@@ -24,6 +24,7 @@ use crate::plugin_runtime_broker::{
 };
 use crate::plugin_runtime_data::{PluginRuntimeArtifactBroker, PluginRuntimeWorkspaceBroker};
 use crate::plugin_runtime_exec::ExecutionEngine;
+use crate::plugin_runtime_versioned::PluginRuntimeVersionedPackage;
 
 pub const HOST_RUNTIME_API_VERSION: &str = "1.0";
 
@@ -76,6 +77,7 @@ pub struct RegisteredPlugin {
     pub manifest_path: PathBuf,
     pub wasm_path: PathBuf,
     pub manifest: PluginManifest,
+    pub tool_tier: ToolTier,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +85,7 @@ struct IndexedCommand {
     tool: String,
     command: String,
     summary: String,
+    tool_tier: ToolTier,
     tags: Vec<String>,
     side_effects: SideEffectClass,
     capabilities_required: Vec<String>,
@@ -104,6 +107,16 @@ impl FilePluginRegistry {
         let mut plugins = BTreeMap::new();
         let mut index = Vec::new();
 
+        for registered in PluginRuntimeVersionedPackage::registered_plugins() {
+            insert_registered_plugin(
+                &mut plugins,
+                &mut index,
+                registered,
+                runtime_api_version,
+                false,
+            )?;
+        }
+
         for root in plugin_roots {
             let manifest_paths = discover_manifest_paths(root)?;
             for manifest_path in manifest_paths {
@@ -115,47 +128,18 @@ impl FilePluginRegistry {
                         manifest_path.display()
                     )));
                 }
-                let validation = validate_manifest(&manifest, runtime_api_version);
-                if !validation.valid {
-                    let issues = validation
-                        .issues
-                        .into_iter()
-                        .map(|issue| issue.message)
-                        .collect::<Vec<_>>()
-                        .join("; ");
-                    return Err(OberonError::ManifestValidation(format!(
-                        "{}: {}",
-                        manifest_path.display(),
-                        issues
-                    )));
-                }
-
-                let plugin_id = manifest.id.clone();
-                if plugins.contains_key(&plugin_id) {
-                    return Err(OberonError::ManifestValidation(format!(
-                        "duplicate plugin id '{}'",
-                        plugin_id
-                    )));
-                }
-
-                index.extend(manifest.commands.iter().map(|command| IndexedCommand {
-                    tool: plugin_id.clone(),
-                    command: command.name.clone(),
-                    summary: command.description.clone(),
-                    tags: command.tags.clone(),
-                    side_effects: command.side_effects.clone(),
-                    capabilities_required: command.required_capabilities.clone(),
-                    approval_expectation: command.approval_expectation.clone(),
-                }));
-
-                plugins.insert(
-                    plugin_id,
+                insert_registered_plugin(
+                    &mut plugins,
+                    &mut index,
                     RegisteredPlugin {
                         manifest_path,
                         wasm_path,
                         manifest,
+                        tool_tier: ToolTier::OrdinaryPlugin,
                     },
-                );
+                    runtime_api_version,
+                    true,
+                )?;
             }
         }
 
@@ -211,7 +195,7 @@ impl PluginRegistry for FilePluginRegistry {
                     tool: entry.tool.clone(),
                     command: entry.command.clone(),
                     summary: entry.summary.clone(),
-                    tool_tier: ToolTier::OrdinaryPlugin,
+                    tool_tier: entry.tool_tier.clone(),
                     side_effects: entry.side_effects.clone(),
                     approval_required: approval_required_for(
                         &entry.side_effects,
@@ -406,6 +390,7 @@ pub struct PluginRuntimeHost<R, P> {
     redactor: Arc<dyn RedactionPipeline + Send + Sync>,
     workspace_broker: Arc<PluginRuntimeWorkspaceBroker>,
     artifact_broker: Arc<PluginRuntimeArtifactBroker>,
+    versioned_package: Arc<PluginRuntimeVersionedPackage>,
 }
 
 impl<R, P> PluginRuntimeHost<R, P> {
@@ -482,6 +467,15 @@ impl<R, P> PluginRuntimeHost<R, P> {
         artifact_broker: Arc<PluginRuntimeArtifactBroker>,
     ) -> Result<Self, OberonError> {
         let execution = ExecutionEngine::new(broker_foundations.clone())?;
+        let versioned_package = Arc::new(PluginRuntimeVersionedPackage::new(
+            oberon4_core::default_data_dir()
+                .join("plugin-runtime")
+                .join("versioned-state"),
+            workspace_broker.clone(),
+            artifact_broker.clone(),
+            service_broker.clone(),
+            broker_foundations.artifact.inline_output_threshold_bytes,
+        )?);
         Ok(Self {
             registry,
             policy,
@@ -492,6 +486,7 @@ impl<R, P> PluginRuntimeHost<R, P> {
             redactor,
             workspace_broker,
             artifact_broker,
+            versioned_package,
         })
     }
 
@@ -505,6 +500,10 @@ where
     R: PluginRegistry,
     P: PolicyResolver,
 {
+    fn is_builtin_tool(tool: &str) -> bool {
+        PluginRuntimeVersionedPackage::is_builtin_tool(tool)
+    }
+
     fn service_handle_from_input(input: &serde_json::Value) -> Option<String> {
         input
             .get("serviceHandle")
@@ -536,6 +535,14 @@ where
             .any(|capability| matches!(capability.as_str(), "workspace.read" | "workspace.write"))
     }
 
+    fn command_requires_existing_workspace_handle(
+        tool: &str,
+        command: &PluginCommandManifest,
+    ) -> bool {
+        !(tool == "github" && command.name == "clone_to_workspace")
+            && Self::command_uses_workspace(command)
+    }
+
     fn command_uses_artifacts(command: &PluginCommandManifest) -> bool {
         command
             .required_capabilities
@@ -549,7 +556,7 @@ where
         command: &PluginCommandManifest,
         context: &oberon4_core::InvocationContext,
     ) -> Result<Option<oberon4_core::WorkspaceMetadata>, OberonError> {
-        if !Self::command_uses_workspace(command) {
+        if !Self::command_requires_existing_workspace_handle(&context.plugin_id, command) {
             return Ok(None);
         }
         let workspace = Self::workspace_handle_from_context(context).ok_or_else(|| {
@@ -857,6 +864,27 @@ where
             });
         }
 
+        if Self::is_builtin_tool(&request.context.plugin_id) {
+            let builtin = self.versioned_package.plan(
+                &request.context.plugin_id,
+                &command,
+                &effective_request,
+            )?;
+            blocking_issues.extend(builtin.blocking_issues);
+            return Ok(PlanResult {
+                status: PlanStatus::Ok,
+                side_effects: command.side_effects.clone(),
+                approval_required: resolution.approval_required,
+                capabilities_required: command.required_capabilities.clone(),
+                estimated_cost: estimate_cost(&command.side_effects),
+                estimated_steps: builtin.estimated_steps,
+                preconditions: preconditions_for(&command),
+                blocking_issues,
+                resource_limits: Some(resolution.resource_limits),
+                approval_preview: builtin.approval_preview.or(approval_preview),
+            });
+        }
+
         if brokered_service_kind(&command).is_some() {
             return Ok(PlanResult {
                 status: PlanStatus::Ok,
@@ -1010,6 +1038,62 @@ where
                 result: None,
                 error: Some(error),
             });
+        }
+
+        if Self::is_builtin_tool(&request.context.plugin_id) {
+            let profile = self.redaction_profile_for_input(&request.input)?;
+            return match self.versioned_package.invoke(
+                &request.context.plugin_id,
+                &command,
+                &effective_request,
+            ) {
+                Ok(result) => match result.result {
+                    Some(tool_result) => {
+                        let (summary, data) = match self.redact_tool_result(
+                            &tool_result.summary,
+                            &tool_result.data,
+                            &profile,
+                        ) {
+                            Ok(result) => result,
+                            Err(_) => {
+                                return Ok(ToolInvokeResponseEnvelope {
+                                    result: None,
+                                    error: Some(ToolError {
+                                        status: ErrorStatus::Error,
+                                        code: "REDACTION_BLOCKED_OUTPUT".to_string(),
+                                        message: "runtime output was blocked because it could not be safely redacted".to_string(),
+                                        retryable: false,
+                                        request_id: request.context.request_id.clone(),
+                                        plugin_id: request.context.plugin_id.clone(),
+                                        plugin_version: request.context.plugin_version.clone(),
+                                        command: request.command.clone(),
+                                        next_suggested_action: Some("tool_policy_inspect".to_string()),
+                                    }),
+                                });
+                            }
+                        };
+                        Ok(ToolInvokeResponseEnvelope {
+                            result: Some(oberon4_core::ToolResult {
+                                summary,
+                                data,
+                                ..tool_result
+                            }),
+                            error: None,
+                        })
+                    }
+                    None => Ok(ToolInvokeResponseEnvelope {
+                        result: None,
+                        error: result
+                            .error
+                            .map(|error| self.redact_tool_error(error, &profile))
+                            .transpose()?,
+                    }),
+                },
+                Err(error) => Ok(ToolInvokeResponseEnvelope {
+                    result: None,
+                    error: Some(self.redact_tool_error(error, &profile)?),
+                }),
+            };
         }
 
         if brokered_service_kind(&command).is_some() {
@@ -1300,6 +1384,64 @@ fn load_manifest(path: &Path) -> Result<PluginManifest, OberonError> {
         .map_err(|err| OberonError::Storage(format!("manifest read failed: {err}")))?;
     serde_json::from_str(&raw)
         .map_err(|err| OberonError::ManifestValidation(format!("invalid plugin.json: {err}")))
+}
+
+fn insert_registered_plugin(
+    plugins: &mut BTreeMap<String, RegisteredPlugin>,
+    index: &mut Vec<IndexedCommand>,
+    registered: RegisteredPlugin,
+    runtime_api_version: &str,
+    require_executable: bool,
+) -> Result<(), OberonError> {
+    let validation = validate_manifest(&registered.manifest, runtime_api_version);
+    if !validation.valid {
+        let issues = validation
+            .issues
+            .into_iter()
+            .map(|issue| issue.message)
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(OberonError::ManifestValidation(format!(
+            "{}: {}",
+            registered.manifest_path.display(),
+            issues
+        )));
+    }
+
+    if require_executable && !registered.wasm_path.is_file() {
+        return Err(OberonError::ManifestValidation(format!(
+            "{}: missing plugin.wasm adjacent to plugin.json",
+            registered.manifest_path.display()
+        )));
+    }
+
+    let plugin_id = registered.manifest.id.clone();
+    if plugins.contains_key(&plugin_id) {
+        return Err(OberonError::ManifestValidation(format!(
+            "duplicate plugin id '{}'",
+            plugin_id
+        )));
+    }
+
+    index.extend(
+        registered
+            .manifest
+            .commands
+            .iter()
+            .map(|command| IndexedCommand {
+                tool: plugin_id.clone(),
+                command: command.name.clone(),
+                summary: command.description.clone(),
+                tool_tier: registered.tool_tier.clone(),
+                tags: command.tags.clone(),
+                side_effects: command.side_effects.clone(),
+                capabilities_required: command.required_capabilities.clone(),
+                approval_expectation: command.approval_expectation.clone(),
+            }),
+    );
+
+    plugins.insert(plugin_id, registered);
+    Ok(())
 }
 
 fn declared_capabilities(capabilities: &CapabilityManifest) -> BTreeSet<String> {
@@ -1896,8 +2038,10 @@ mod tests {
         let registry =
             FilePluginRegistry::load_from_roots(&[root.clone()], HOST_RUNTIME_API_VERSION).unwrap();
         let plugins = registry.list_plugins();
-        assert_eq!(plugins.len(), 1);
-        assert_eq!(plugins[0].id, "workspace-git");
+        assert!(plugins.iter().any(|plugin| plugin.id == "workspace-git"));
+        assert!(plugins.iter().any(|plugin| plugin.id == "workspace"));
+        assert!(plugins.iter().any(|plugin| plugin.id == "git"));
+        assert!(plugins.iter().any(|plugin| plugin.id == "github"));
 
         let results = registry
             .search(&SearchRequest {
@@ -1906,9 +2050,9 @@ mod tests {
                 session_id: None,
             })
             .unwrap();
-        assert_eq!(results.matches.len(), 1);
-        assert_eq!(results.matches[0].tool, "workspace-git");
-        assert_eq!(results.matches[0].command, "write_file_atomic");
+        assert!(results.matches.iter().any(|entry| {
+            entry.tool == "workspace-git" && entry.command == "write_file_atomic"
+        }));
 
         let _ = fs::remove_dir_all(root);
     }

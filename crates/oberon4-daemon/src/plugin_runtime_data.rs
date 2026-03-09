@@ -57,6 +57,13 @@ impl PluginRuntimeWorkspaceBroker {
         Ok(path)
     }
 
+    pub(crate) fn workspace_root_path(
+        &self,
+        workspace: &WorkspaceHandle,
+    ) -> Result<PathBuf, OberonError> {
+        self.root_for_handle(workspace)
+    }
+
     fn ensure_record(&self, workspace: &WorkspaceHandle) -> Result<WorkspaceRecord, OberonError> {
         let now = SystemTime::now();
         let _ = self.root_for_handle(workspace)?;
@@ -660,7 +667,7 @@ fn timestamp_string(value: SystemTime) -> String {
         .unwrap_or_else(|_| "0".to_string())
 }
 
-fn hex_name(value: &str) -> String {
+pub(crate) fn hex_name(value: &str) -> String {
     value
         .as_bytes()
         .iter()

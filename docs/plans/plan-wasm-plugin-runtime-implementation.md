@@ -213,18 +213,18 @@ Evidence:
 - `env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p oberon4-daemon`
 
 ### Phase 5: Versioned Workspace Package
-- [ ] `WP5.1` Implement `workspace.*` commands:
+- [x] `WP5.1` Implement `workspace.*` commands:
   - `read_file`
   - `list_dir`
   - `stat_path`
   - `write_file_atomic`
   - `apply_patch`
-- [ ] `WP5.2` Implement `git.*` commands against the brokered workspace.
-- [ ] `WP5.3` Implement GitHub-backed brokered commands:
+- [x] `WP5.2` Implement `git.*` commands against the brokered workspace.
+- [x] `WP5.3` Implement GitHub-backed brokered commands:
   - `auth_status`
   - `clone_to_workspace`
   - `repo_info`
-- [ ] `WP5.4` Ensure the initial package can run in install-and-go mode with prebuilt artifacts and no local compile step for users.
+- [x] `WP5.4` Ensure the initial package can run in install-and-go mode with prebuilt artifacts and no local compile step for users.
 
 Dependencies:
 - depends on `EG-WP4`
@@ -235,6 +235,12 @@ Verification gate `EG-WP5`:
 - GitHub broker command contract tests pass
 - workspace edit -> diff -> commit integration test passes
 - commit -> push integration test passes with brokered auth
+Evidence:
+- `cargo fmt --check`
+- `cargo test -p oberon4-core`
+- `env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p oberon4-daemon`
+- `env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy --workspace --all-targets -- -D warnings`
+- `env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test --workspace`
 
 ### Phase 6: Provider and Agent Integration
 - [ ] `WP6.1` Integrate tool runtime with provider adapters using canonical tool contracts.

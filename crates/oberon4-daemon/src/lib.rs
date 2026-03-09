@@ -2,6 +2,7 @@ pub mod plugin_runtime;
 pub mod plugin_runtime_broker;
 pub mod plugin_runtime_data;
 pub mod plugin_runtime_exec;
+pub mod plugin_runtime_versioned;
 
 use std::{
     collections::BTreeMap,
@@ -34,6 +35,7 @@ pub use plugin_runtime_broker::{
 };
 pub use plugin_runtime_data::{PluginRuntimeArtifactBroker, PluginRuntimeWorkspaceBroker};
 pub use plugin_runtime_exec::ExecutionEngine;
+pub use plugin_runtime_versioned::PluginRuntimeVersionedPackage;
 
 pub fn daemon_status(config: &AppConfig) -> ServiceEnvelope<String> {
     ServiceEnvelope::success(format!(
