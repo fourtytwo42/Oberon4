@@ -45,6 +45,21 @@
       "type": "string",
       "enum": ["dev", "production"]
     },
-    "reasonCodes": { "type": "array", "items": { "type": "string" } }
+    "reasonCodes": { "type": "array", "items": { "type": "string" } },
+    "serviceHandlesUsed": { "type": "array", "items": { "type": "string" } },
+    "secretClassesInvolved": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["api_credential", "oauth_credential", "ssh_key", "wallet_key"]
+      }
+    },
+    "securityLevels": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["hardware-backed", "os-protected", "encrypted-local"]
+      }
+    }
   }
 }

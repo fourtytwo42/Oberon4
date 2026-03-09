@@ -2,19 +2,23 @@ use std::{
     collections::BTreeSet,
     fs,
     path::Path,
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use oberon4_core::{
     ApprovalExpectation, ArtifactCapabilityManifest, BuildMetadata, CapabilityGrant,
-    CapabilityGrantKind, CapabilityManifest, HandleOperation, HostToolRuntime, InvocationContext,
-    InvokeRequest, LifecycleActions, LifecycleHooks, NetworkPolicy, OperatingMode, PlanRequest,
-    PluginCommandManifest, PluginExample, PluginManifest, PromptingManifest, ProvenanceManifest,
-    RequestId, ResourceBudgetRequest, ResourceLimits, SideEffectClass, SignatureMetadata,
-    StorageCapabilityManifest, WorkspaceCapabilityManifest,
+    CapabilityGrantKind, CapabilityManifest, HandleOperation, HostToolRuntime, InMemorySecretStore,
+    InvocationContext, InvokeRequest, LifecycleActions, LifecycleHooks, NetworkPolicy,
+    OperatingMode, PlanRequest, PluginCommandManifest, PluginExample, PluginManifest,
+    PromptingManifest, ProvenanceManifest, RequestId, ResourceBudgetRequest, ResourceLimits,
+    SecretStore, SideEffectClass, SignatureMetadata, StorageCapabilityManifest,
+    WorkspaceCapabilityManifest,
 };
 use oberon4_daemon::{
-    FilePluginRegistry, HOST_RUNTIME_API_VERSION, PluginRuntimeHost, StaticPolicyResolver,
+    EncryptedLocalSecretBackend, FilePluginRegistry, HOST_RUNTIME_API_VERSION,
+    InMemoryServiceTransport, PluginRuntimeHost, PluginRuntimeRedactor, PluginRuntimeSecretBroker,
+    PluginRuntimeServiceBroker, SecretBinding, ServiceBinding, StaticPolicyResolver,
 };
 
 const VALID_WASM: &[u8] = include_bytes!("fixtures/plugin-runtime/valid/plugin.wasm");
@@ -285,6 +289,73 @@ fn policy_with_limits(
     StaticPolicyResolver::new(OperatingMode::Production, limits, blocked_capabilities)
 }
 
+fn host_with_github_service(
+    registry: FilePluginRegistry,
+) -> PluginRuntimeHost<FilePluginRegistry, StaticPolicyResolver> {
+    let mut store = InMemorySecretStore::default();
+    store
+        .set_secret("oauth.github.main", "gh-secret-token")
+        .unwrap();
+    let secret_broker = Arc::new(PluginRuntimeSecretBroker::new(
+        EncryptedLocalSecretBackend::new(store),
+        vec![SecretBinding {
+            secret_handle: "sec_github".to_string(),
+            store_key: "oauth.github.main".to_string(),
+            secret_class: oberon4_core::SecretClass::OauthCredential,
+            allowed_operations: vec![HandleOperation::Invoke],
+        }],
+    ));
+    let service_broker = Arc::new(PluginRuntimeServiceBroker::new(
+        PluginRuntimeSecretBroker::new(
+            EncryptedLocalSecretBackend::new({
+                let mut store = InMemorySecretStore::default();
+                store
+                    .set_secret("oauth.github.main", "gh-secret-token")
+                    .unwrap();
+                store
+            }),
+            vec![SecretBinding {
+                secret_handle: "sec_github".to_string(),
+                store_key: "oauth.github.main".to_string(),
+                secret_class: oberon4_core::SecretClass::OauthCredential,
+                allowed_operations: vec![HandleOperation::Invoke],
+            }],
+        ),
+        vec![ServiceBinding {
+            service_handle: "svc_github".to_string(),
+            service_name: "github.request".to_string(),
+            secret_handle: "sec_github".to_string(),
+            base_url: "https://api.github.test".to_string(),
+            allowed_operations: vec![HandleOperation::Invoke],
+        }],
+        InMemoryServiceTransport::default().with_response(
+            "github.request",
+            "GET",
+            "/repos/oberon4/status",
+            oberon4_daemon::plugin_runtime_broker::StubbedServiceResponse {
+                status_code: 200,
+                headers: vec![oberon4_core::HttpHeader {
+                    name: "authorization".to_string(),
+                    value: "Bearer gh-secret-token".to_string(),
+                }],
+                body: serde_json::json!({
+                    "ok": true,
+                    "tokenEcho": "gh-secret-token",
+                }),
+            },
+        ),
+    ));
+    PluginRuntimeHost::with_runtime_services(
+        registry,
+        StaticPolicyResolver::default(),
+        oberon4_daemon::RuntimeBrokerFoundations::default(),
+        secret_broker,
+        service_broker,
+        Arc::new(PluginRuntimeRedactor),
+    )
+    .unwrap()
+}
+
 #[test]
 fn valid_component_can_be_planned_and_invoked() {
     let root = temp_dir("valid-plan-invoke");
@@ -429,7 +500,7 @@ fn denied_capability_is_blocked_before_invocation() {
 }
 
 #[test]
-fn unsupported_handle_capability_is_blocked_before_invocation() {
+fn brokered_service_without_service_handle_is_denied_before_invocation() {
     let root = temp_dir("unsupported-capability");
     let manifest = fixture_manifest("wp2-unsupported");
     write_bundle(&root, &manifest, VALID_WASM, true);
@@ -449,8 +520,67 @@ fn unsupported_handle_capability_is_blocked_before_invocation() {
     assert!(response.result.is_none());
     assert_eq!(
         response.error.expect("error expected").code,
-        "NOT_YET_SUPPORTED_IN_WP2"
+        "SERVICE_ACCESS_DENIED"
     );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn brokered_github_request_succeeds_without_exposing_secret() {
+    let root = temp_dir("github-broker");
+    let manifest = fixture_manifest("wp3-broker");
+    write_bundle(&root, &manifest, VALID_WASM, true);
+
+    let registry =
+        FilePluginRegistry::load_from_roots(&[root.clone()], HOST_RUNTIME_API_VERSION).unwrap();
+    let host = host_with_github_service(registry);
+
+    let response = host
+        .tool_invoke(&InvokeRequest {
+            command: "needs_service".to_string(),
+            input: serde_json::json!({
+                "serviceHandle": "svc_github",
+                "method": "GET",
+                "path": "/repos/oberon4/status"
+            }),
+            context: context("wp3-broker", "needs_service"),
+        })
+        .unwrap();
+
+    let result = response.result.expect("result expected");
+    assert_eq!(result.data["statusCode"], 200);
+    assert_eq!(result.data["body"]["ok"], true);
+    let encoded = serde_json::to_string(&result).unwrap();
+    assert!(!encoded.contains("gh-secret-token"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn brokered_service_output_is_redacted_before_agent_visibility() {
+    let root = temp_dir("github-redaction");
+    let manifest = fixture_manifest("wp3-redaction");
+    write_bundle(&root, &manifest, VALID_WASM, true);
+
+    let registry =
+        FilePluginRegistry::load_from_roots(&[root.clone()], HOST_RUNTIME_API_VERSION).unwrap();
+    let host = host_with_github_service(registry);
+
+    let response = host
+        .tool_invoke(&InvokeRequest {
+            command: "needs_service".to_string(),
+            input: serde_json::json!({
+                "serviceHandle": "svc_github",
+                "method": "GET",
+                "path": "/repos/oberon4/status"
+            }),
+            context: context("wp3-redaction", "needs_service"),
+        })
+        .unwrap();
+
+    let result = response.result.expect("result expected");
+    assert_eq!(result.data["body"]["tokenEcho"], "<redacted>");
 
     let _ = fs::remove_dir_all(root);
 }

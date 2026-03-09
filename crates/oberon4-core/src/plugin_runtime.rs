@@ -490,6 +490,12 @@ pub struct PolicyInspectResponse {
     pub operating_mode: OperatingMode,
     #[serde(default, rename = "reasonCodes")]
     pub reason_codes: Vec<String>,
+    #[serde(default, rename = "serviceHandlesUsed")]
+    pub service_handles_used: Vec<String>,
+    #[serde(default, rename = "secretClassesInvolved")]
+    pub secret_classes_involved: Vec<SecretClass>,
+    #[serde(default, rename = "securityLevels")]
+    pub security_levels: Vec<SecurityLevel>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -688,6 +694,154 @@ pub struct PolicyResolution {
     pub blocking_issues: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecretMetadata {
+    #[serde(rename = "secretHandle")]
+    pub secret_handle: String,
+    #[serde(rename = "secretClass")]
+    pub secret_class: SecretClass,
+    #[serde(rename = "securityLevel")]
+    pub security_level: SecurityLevel,
+    #[serde(default, rename = "allowedOperations")]
+    pub allowed_operations: Vec<HandleOperation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecretUseGrant {
+    #[serde(rename = "secretUseHandle")]
+    pub secret_use_handle: String,
+    #[serde(rename = "secretHandle")]
+    pub secret_handle: String,
+    #[serde(rename = "secretClass")]
+    pub secret_class: SecretClass,
+    #[serde(rename = "securityLevel")]
+    pub security_level: SecurityLevel,
+    #[serde(default, rename = "allowedOperations")]
+    pub allowed_operations: Vec<HandleOperation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceMetadata {
+    #[serde(rename = "serviceHandle")]
+    pub service_handle: String,
+    #[serde(rename = "serviceName")]
+    pub service_name: String,
+    #[serde(default, rename = "secretClass")]
+    pub secret_class: Option<SecretClass>,
+    #[serde(default, rename = "securityLevel")]
+    pub security_level: Option<SecurityLevel>,
+    #[serde(default, rename = "allowedOperations")]
+    pub allowed_operations: Vec<HandleOperation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HttpHeader {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubRequest {
+    #[serde(rename = "serviceHandle")]
+    pub service_handle: String,
+    pub method: String,
+    pub path: String,
+    #[serde(default)]
+    pub headers: Vec<HttpHeader>,
+    #[serde(default, rename = "bodyJson")]
+    pub body_json: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubResponse {
+    #[serde(rename = "statusCode")]
+    pub status_code: u16,
+    #[serde(default)]
+    pub headers: Vec<HttpHeader>,
+    pub body: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OauthRequest {
+    #[serde(rename = "serviceHandle")]
+    pub service_handle: String,
+    pub method: String,
+    pub path: String,
+    #[serde(default)]
+    pub headers: Vec<HttpHeader>,
+    #[serde(default, rename = "bodyJson")]
+    pub body_json: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OauthResponse {
+    #[serde(rename = "statusCode")]
+    pub status_code: u16,
+    #[serde(default)]
+    pub headers: Vec<HttpHeader>,
+    pub body: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SshSignRequest {
+    #[serde(rename = "serviceHandle")]
+    pub service_handle: String,
+    pub payload: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletSignTxRequest {
+    #[serde(rename = "serviceHandle")]
+    pub service_handle: String,
+    pub tx: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletSignMessageRequest {
+    #[serde(rename = "serviceHandle")]
+    pub service_handle: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrokeredServiceResult {
+    pub summary: String,
+    pub data: serde_json::Value,
+    #[serde(default, rename = "nextSuggestedAction")]
+    pub next_suggested_action: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RedactionTargetKind {
+    ToolResult,
+    ErrorPayload,
+    Stdout,
+    Stderr,
+    Log,
+    Trace,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RedactionProfile {
+    #[serde(default, rename = "exactValues")]
+    pub exact_values: Vec<String>,
+    #[serde(default, rename = "failClosed")]
+    pub fail_closed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RedactionResult {
+    #[serde(rename = "redactedText")]
+    pub redacted_text: String,
+    #[serde(default)]
+    pub applied: bool,
+    #[serde(default)]
+    pub blocked: bool,
+    #[serde(default)]
+    pub markers: Vec<String>,
+}
+
 pub trait PluginRegistry {
     fn list_plugins(&self) -> Vec<PluginDescription>;
     fn search(&self, request: &SearchRequest) -> Result<SearchResponse, crate::OberonError>;
@@ -710,6 +864,52 @@ pub trait PolicyResolver {
         command: &PluginCommandManifest,
         manifest: &PluginManifest,
     ) -> Result<PolicyResolution, crate::OberonError>;
+}
+
+pub trait SecretBroker {
+    fn resolve_secret(&self, secret_handle: &str) -> Result<SecretMetadata, crate::OberonError>;
+    fn grant_secret_use(
+        &self,
+        secret_handle: &str,
+        operation: HandleOperation,
+    ) -> Result<SecretUseGrant, crate::OberonError>;
+}
+
+pub trait ServiceBroker {
+    fn resolve_service(&self, service_handle: &str) -> Result<ServiceMetadata, crate::OberonError>;
+    fn redaction_values_for_service(
+        &self,
+        service_handle: &str,
+    ) -> Result<Vec<String>, crate::OberonError>;
+    fn execute_github_request(
+        &self,
+        request: &GithubRequest,
+    ) -> Result<GithubResponse, crate::OberonError>;
+    fn execute_oauth_request(
+        &self,
+        request: &OauthRequest,
+    ) -> Result<OauthResponse, crate::OberonError>;
+    fn sign_ssh(&self, request: &SshSignRequest) -> Result<String, crate::OberonError>;
+    fn sign_wallet_tx(&self, request: &WalletSignTxRequest) -> Result<String, crate::OberonError>;
+    fn sign_wallet_message(
+        &self,
+        request: &WalletSignMessageRequest,
+    ) -> Result<String, crate::OberonError>;
+}
+
+pub trait RedactionPipeline {
+    fn redact_text(
+        &self,
+        target: RedactionTargetKind,
+        text: &str,
+        profile: &RedactionProfile,
+    ) -> Result<RedactionResult, crate::OberonError>;
+    fn redact_json(
+        &self,
+        target: RedactionTargetKind,
+        value: &serde_json::Value,
+        profile: &RedactionProfile,
+    ) -> Result<(serde_json::Value, RedactionResult), crate::OberonError>;
 }
 
 pub trait HostToolRuntime {
@@ -896,7 +1096,7 @@ mod tests {
         PlanRequest, PlanResult, PlanStatus, PluginCommandManifest, PluginDescription,
         PluginExample, PluginManifest, PolicyInspectResponse, PolicyResolution, PreconditionModel,
         PromptingManifest, ProvenanceManifest, RemoteImpact, ResourceBudgetRequest, ResourceLimits,
-        SearchMatch, SearchRequest, SearchResponse, SecretClass, SideEffectClass,
+        SearchMatch, SearchRequest, SearchResponse, SecretClass, SecurityLevel, SideEffectClass,
         SignatureMetadata, ToolDescribeRequest, ToolDescribeRequestEnvelope, ToolDescribeResponse,
         ToolDescribeResponseEnvelope, ToolError, ToolGuidance, ToolInvokeRequestEnvelope,
         ToolInvokeResponseEnvelope, ToolPlanRequestEnvelope, ToolPlanResponseEnvelope, ToolResult,
@@ -1164,6 +1364,9 @@ mod tests {
             },
             operating_mode: OperatingMode::Production,
             reason_codes: Vec::new(),
+            service_handles_used: vec!["svc_github_main".to_string()],
+            secret_classes_involved: vec![SecretClass::OauthCredential],
+            security_levels: vec![SecurityLevel::OsProtected],
         };
         let encoded_policy = serde_json::to_string(&policy).unwrap();
         let decoded_policy: PolicyInspectResponse = serde_json::from_str(&encoded_policy).unwrap();

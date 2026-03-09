@@ -155,20 +155,20 @@ Evidence:
 - `PATH="$HOME/.cargo/bin:$PATH" bash scripts/oberon4-security-gate.sh`
 
 ### Phase 3: Secret and Service Brokers
-- [ ] `WP3.1` Implement host secret broker contract with:
+- [x] `WP3.1` Implement host secret broker contract with:
   - `secret_handle`
   - `secret_use_handle`
   - `service_handle`
-- [ ] `WP3.2` Implement platform adapter abstraction for:
+- [x] `WP3.2` Implement platform adapter abstraction for:
   - macOS secure storage
   - Windows secure storage
   - Linux secure storage
   - encrypted local fallback
-- [ ] `WP3.3` Implement brokered service execution for:
+- [x] `WP3.3` Implement brokered service execution for:
   - GitHub request path
   - OAuth-backed request path
   - future SSH or wallet signing scaffolding
-- [ ] `WP3.4` Implement redaction at:
+- [x] `WP3.4` Implement redaction at:
   - logs
   - traces
   - stdout/stderr capture
@@ -183,6 +183,9 @@ Verification gate `EG-WP3`:
 - redaction tests pass
 - secret-class policy tests pass
 - cross-platform adapter abstraction tests pass
+Evidence:
+- `cargo test -p oberon4-core`
+- `env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p oberon4-daemon`
 
 ### Phase 4: Workspace and Artifact Brokers
 - [ ] `WP4.1` Implement logical workspace broker with:

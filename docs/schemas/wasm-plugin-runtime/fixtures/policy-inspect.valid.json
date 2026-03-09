@@ -15,5 +15,8 @@
     "networkPolicy": "brokered-only"
   },
   "operatingMode": "production",
-  "reasonCodes": []
+  "reasonCodes": [],
+  "serviceHandlesUsed": ["svc_github_main"],
+  "secretClassesInvolved": ["oauth_credential"],
+  "securityLevels": ["os-protected"]
 }

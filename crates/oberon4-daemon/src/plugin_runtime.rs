@@ -2,19 +2,26 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use oberon4_core::{
-    ApprovalExpectation, ApprovalRequestPayload, ApprovalResourceLimits, CapabilityManifest,
-    EffectiveCapabilities, ErrorStatus, HostToolRuntime, ManifestValidationIssue,
-    ManifestValidationResult, NetworkPolicy, OberonError, OperatingMode, PlanRequest, PlanResult,
-    PlanStatus, PluginCommandManifest, PluginDescription, PluginManifest, PluginRegistry,
-    PolicyInspectRequest, PolicyInspectResponse, PolicyResolution, PolicyResolver,
-    PreconditionModel, ResourceLimits, SearchMatch, SearchRequest, SearchResponse, SecretClass,
-    SideEffectClass, ToolDescribeRequest, ToolDescribeResponse, ToolError, ToolGuidance,
-    ToolInvokeResponseEnvelope, ToolTier, WorkspaceImpact,
+    ApprovalExpectation, ApprovalRequestPayload, ApprovalResourceLimits, BrokeredServiceResult,
+    CapabilityManifest, EffectiveCapabilities, ErrorStatus, GithubRequest, HostToolRuntime,
+    InvokeStatus, ManifestValidationIssue, ManifestValidationResult, NetworkPolicy, OauthRequest,
+    OberonError, OperatingMode, PlanRequest, PlanResult, PlanStatus, PluginCommandManifest,
+    PluginDescription, PluginManifest, PluginRegistry, PolicyInspectRequest, PolicyInspectResponse,
+    PolicyResolution, PolicyResolver, PreconditionModel, RedactionPipeline, RedactionProfile,
+    RedactionTargetKind, RequestId, ResourceLimits, SearchMatch, SearchRequest, SearchResponse,
+    SecretBroker, SecretClass, SecurityLevel, ServiceBroker, SideEffectClass, ToolDescribeRequest,
+    ToolDescribeResponse, ToolError, ToolGuidance, ToolInvokeResponseEnvelope, ToolTier,
+    WorkspaceImpact,
 };
 
+use crate::plugin_runtime_broker::{
+    InMemoryServiceTransport, NativeSecretBackendUnavailable, PluginRuntimeRedactor,
+    PluginRuntimeSecretBroker, PluginRuntimeServiceBroker,
+};
 use crate::plugin_runtime_exec::ExecutionEngine;
 
 pub const HOST_RUNTIME_API_VERSION: &str = "1.0";
@@ -60,6 +67,8 @@ pub struct RuntimeBrokerFoundations {
     pub artifact: ArtifactBrokerFoundation,
     pub storage: StorageBrokerFoundation,
 }
+
+type ServicePolicyMetadata = (Vec<String>, Vec<SecretClass>, Vec<SecurityLevel>);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegisteredPlugin {
@@ -391,6 +400,9 @@ pub struct PluginRuntimeHost<R, P> {
     policy: P,
     broker_foundations: RuntimeBrokerFoundations,
     execution: ExecutionEngine,
+    _secret_broker: Arc<dyn SecretBroker + Send + Sync>,
+    service_broker: Arc<dyn ServiceBroker + Send + Sync>,
+    redactor: Arc<dyn RedactionPipeline + Send + Sync>,
 }
 
 impl<R, P> PluginRuntimeHost<R, P> {
@@ -403,12 +415,42 @@ impl<R, P> PluginRuntimeHost<R, P> {
         policy: P,
         broker_foundations: RuntimeBrokerFoundations,
     ) -> Result<Self, OberonError> {
+        let secret_broker = Arc::new(PluginRuntimeSecretBroker::new(
+            NativeSecretBackendUnavailable,
+            Vec::new(),
+        ));
+        let service_broker = Arc::new(PluginRuntimeServiceBroker::new(
+            PluginRuntimeSecretBroker::new(NativeSecretBackendUnavailable, Vec::new()),
+            Vec::new(),
+            InMemoryServiceTransport::default(),
+        ));
+        Self::with_runtime_services(
+            registry,
+            policy,
+            broker_foundations,
+            secret_broker,
+            service_broker,
+            Arc::new(PluginRuntimeRedactor),
+        )
+    }
+
+    pub fn with_runtime_services(
+        registry: R,
+        policy: P,
+        broker_foundations: RuntimeBrokerFoundations,
+        secret_broker: Arc<dyn SecretBroker + Send + Sync>,
+        service_broker: Arc<dyn ServiceBroker + Send + Sync>,
+        redactor: Arc<dyn RedactionPipeline + Send + Sync>,
+    ) -> Result<Self, OberonError> {
         let execution = ExecutionEngine::new(broker_foundations.clone())?;
         Ok(Self {
             registry,
             policy,
             broker_foundations,
             execution,
+            _secret_broker: secret_broker,
+            service_broker,
+            redactor,
         })
     }
 
@@ -422,6 +464,167 @@ where
     R: PluginRegistry,
     P: PolicyResolver,
 {
+    fn service_handle_from_input(input: &serde_json::Value) -> Option<String> {
+        input
+            .get("serviceHandle")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+    }
+
+    fn service_metadata_from_request(
+        &self,
+        command: &PluginCommandManifest,
+        input: &serde_json::Value,
+    ) -> Result<ServicePolicyMetadata, OberonError> {
+        let Some(service_handle) = Self::service_handle_from_input(input) else {
+            return Ok((Vec::new(), inferred_secret_classes(command), Vec::new()));
+        };
+        let metadata = self.service_broker.resolve_service(&service_handle)?;
+        Ok((
+            vec![metadata.service_handle],
+            metadata.secret_class.into_iter().collect(),
+            metadata.security_level.into_iter().collect(),
+        ))
+    }
+
+    fn redaction_profile_for_input(
+        &self,
+        input: &serde_json::Value,
+    ) -> Result<RedactionProfile, OberonError> {
+        let mut exact_values = Vec::new();
+        if let Some(service_handle) = Self::service_handle_from_input(input) {
+            if let Ok(values) = self
+                .service_broker
+                .redaction_values_for_service(&service_handle)
+            {
+                exact_values.extend(values);
+            }
+        }
+        Ok(RedactionProfile {
+            exact_values,
+            fail_closed: true,
+        })
+    }
+
+    fn redact_tool_error(
+        &self,
+        mut error: ToolError,
+        profile: &RedactionProfile,
+    ) -> Result<ToolError, OberonError> {
+        let redacted = self.redactor.redact_text(
+            RedactionTargetKind::ErrorPayload,
+            &error.message,
+            profile,
+        )?;
+        if redacted.blocked {
+            error.code = "REDACTION_BLOCKED_OUTPUT".to_string();
+            error.message =
+                "runtime output was blocked because it could not be safely redacted".to_string();
+            error.retryable = false;
+        } else {
+            error.message = redacted.redacted_text;
+        }
+        Ok(error)
+    }
+
+    fn redact_tool_result(
+        &self,
+        summary: &str,
+        data: &serde_json::Value,
+        profile: &RedactionProfile,
+    ) -> Result<(String, serde_json::Value), OberonError> {
+        let summary_result =
+            self.redactor
+                .redact_text(RedactionTargetKind::ToolResult, summary, profile)?;
+        let (data_value, data_result) =
+            self.redactor
+                .redact_json(RedactionTargetKind::ToolResult, data, profile)?;
+        if summary_result.blocked || data_result.blocked {
+            return Err(OberonError::PolicyDenied(
+                "runtime output was blocked because it could not be safely redacted".to_string(),
+            ));
+        }
+        Ok((summary_result.redacted_text, data_value))
+    }
+
+    fn brokered_service_result(
+        &self,
+        command: &PluginCommandManifest,
+        input: &serde_json::Value,
+    ) -> Result<Option<BrokeredServiceResult>, OberonError> {
+        let Some(service_name) = brokered_service_kind(command) else {
+            return Ok(None);
+        };
+        let service_handle = Self::service_handle_from_input(input).ok_or_else(|| {
+            OberonError::PolicyDenied(
+                "brokered service commands require serviceHandle input".to_string(),
+            )
+        })?;
+        match service_name {
+            "github.request" => self
+                .service_broker
+                .execute_github_request(&GithubRequest {
+                    service_handle,
+                    method: input
+                        .get("method")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("GET")
+                        .to_string(),
+                    path: input
+                        .get("path")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("/")
+                        .to_string(),
+                    headers: headers_from_input(input),
+                    body_json: input.get("bodyJson").cloned(),
+                })
+                .map(|response| BrokeredServiceResult {
+                    summary: format!("github.request {}", response.status_code),
+                    data: serde_json::json!({
+                        "statusCode": response.status_code,
+                        "headers": response.headers,
+                        "body": response.body,
+                    }),
+                    next_suggested_action: None,
+                })
+                .map(Some),
+            "oauth.request" => self
+                .service_broker
+                .execute_oauth_request(&OauthRequest {
+                    service_handle,
+                    method: input
+                        .get("method")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("GET")
+                        .to_string(),
+                    path: input
+                        .get("path")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("/")
+                        .to_string(),
+                    headers: headers_from_input(input),
+                    body_json: input.get("bodyJson").cloned(),
+                })
+                .map(|response| BrokeredServiceResult {
+                    summary: format!("oauth.request {}", response.status_code),
+                    data: serde_json::json!({
+                        "statusCode": response.status_code,
+                        "headers": response.headers,
+                        "body": response.body,
+                    }),
+                    next_suggested_action: None,
+                })
+                .map(Some),
+            "ssh.sign" => Err(OberonError::PolicyDenied(
+                "ssh signing is not configured in WP3".to_string(),
+            )),
+            "wallet.sign" => Err(OberonError::PolicyDenied(
+                "wallet signing is not configured in WP3".to_string(),
+            )),
+            _ => Ok(None),
+        }
+    }
+
     pub fn approval_payload_for_plan(
         &self,
         request: &PlanRequest,
@@ -438,6 +641,9 @@ where
             return Ok(None);
         }
 
+        let (service_handles_used, secret_classes_involved, _) =
+            self.service_metadata_from_request(&command, &request.input)?;
+
         Ok(Some(ApprovalRequestPayload {
             approval_id: format!(
                 "appr_{}_{}",
@@ -451,21 +657,8 @@ where
             workspace_impact: workspace_impact_from_plan(request),
             remote_impact: None,
             artifacts: Vec::new(),
-            service_handles_used: command
-                .required_capabilities
-                .iter()
-                .filter(|capability| capability.contains('.'))
-                .cloned()
-                .collect(),
-            secret_classes_involved: if command
-                .required_capabilities
-                .iter()
-                .any(|capability| capability.contains("github"))
-            {
-                vec![SecretClass::OauthCredential]
-            } else {
-                Vec::new()
-            },
+            service_handles_used,
+            secret_classes_involved,
             resource_limits: ApprovalResourceLimits {
                 time_ms: resolution.resource_limits.time_ms,
                 memory_bytes: resolution.resource_limits.memory_bytes,
@@ -512,7 +705,7 @@ where
             input: request.input.clone(),
             context: apply_policy_to_context(&request.context, &resolution.resource_limits),
         };
-        let unsupported = unsupported_wp2_capabilities(&command);
+        let unsupported = unsupported_capabilities_after_wp3(&command);
         let approval_preview = self
             .approval_payload_for_plan(&effective_request)?
             .map(|payload| oberon4_core::CommandPlanPreview {
@@ -529,9 +722,15 @@ where
         blocking_issues.extend(resolution.blocking_issues);
         if !unsupported.is_empty() {
             blocking_issues.push(format!(
-                "WP2 does not support required capabilities: {}",
+                "WP3 does not support required capabilities: {}",
                 unsupported.join(", ")
             ));
+        }
+        if brokered_service_kind(&command).is_some()
+            && Self::service_handle_from_input(&request.input).is_none()
+        {
+            blocking_issues
+                .push("brokered service commands require serviceHandle input".to_string());
         }
 
         if !resolution.capabilities.blocked.is_empty() || !unsupported.is_empty() {
@@ -542,6 +741,21 @@ where
                 capabilities_required: command.required_capabilities.clone(),
                 estimated_cost: estimate_cost(&command.side_effects),
                 estimated_steps: 0,
+                preconditions: preconditions_for(&command),
+                blocking_issues,
+                resource_limits: Some(resolution.resource_limits),
+                approval_preview,
+            });
+        }
+
+        if brokered_service_kind(&command).is_some() {
+            return Ok(PlanResult {
+                status: PlanStatus::Ok,
+                side_effects: command.side_effects.clone(),
+                approval_required: resolution.approval_required,
+                capabilities_required: command.required_capabilities.clone(),
+                estimated_cost: estimate_cost(&command.side_effects),
+                estimated_steps: 1,
                 preconditions: preconditions_for(&command),
                 blocking_issues,
                 resource_limits: Some(resolution.resource_limits),
@@ -614,12 +828,11 @@ where
             input: request.input.clone(),
             context: apply_policy_to_context(&request.context, &resolution.resource_limits),
         };
-        let unsupported = unsupported_wp2_capabilities(&command);
+        let unsupported = unsupported_capabilities_after_wp3(&command);
 
         if !resolution.capabilities.blocked.is_empty() {
-            return Ok(ToolInvokeResponseEnvelope {
-                result: None,
-                error: Some(ToolError {
+            let error = self.redact_tool_error(
+                ToolError {
                     status: ErrorStatus::Error,
                     code: "CAPABILITY_DENIED".to_string(),
                     message: format!(
@@ -632,17 +845,21 @@ where
                     plugin_version: request.context.plugin_version.clone(),
                     command: request.command.clone(),
                     next_suggested_action: Some("tool_policy_inspect".to_string()),
-                }),
+                },
+                &self.redaction_profile_for_input(&request.input)?,
+            )?;
+            return Ok(ToolInvokeResponseEnvelope {
+                result: None,
+                error: Some(error),
             });
         }
         if !unsupported.is_empty() {
-            return Ok(ToolInvokeResponseEnvelope {
-                result: None,
-                error: Some(ToolError {
+            let error = self.redact_tool_error(
+                ToolError {
                     status: ErrorStatus::Error,
                     code: "NOT_YET_SUPPORTED_IN_WP2".to_string(),
                     message: format!(
-                        "WP2 does not support required capabilities: {}",
+                        "WP3 does not support required capabilities: {}",
                         unsupported.join(", ")
                     ),
                     retryable: false,
@@ -651,7 +868,86 @@ where
                     plugin_version: request.context.plugin_version.clone(),
                     command: request.command.clone(),
                     next_suggested_action: Some("tool_policy_inspect".to_string()),
+                },
+                &self.redaction_profile_for_input(&request.input)?,
+            )?;
+            return Ok(ToolInvokeResponseEnvelope {
+                result: None,
+                error: Some(error),
+            });
+        }
+
+        if brokered_service_kind(&command).is_some() {
+            let profile = self.redaction_profile_for_input(&request.input)?;
+            let invoke_result = match self.brokered_service_result(&command, &request.input) {
+                Ok(Some(result)) => result,
+                Ok(None) => {
+                    return Ok(ToolInvokeResponseEnvelope {
+                        result: None,
+                        error: Some(self.redact_tool_error(
+                            ToolError {
+                                status: ErrorStatus::Error,
+                                code: "SERVICE_REQUEST_FAILED".to_string(),
+                                message: "brokered service resolution failed".to_string(),
+                                retryable: false,
+                                request_id: request.context.request_id.clone(),
+                                plugin_id: request.context.plugin_id.clone(),
+                                plugin_version: request.context.plugin_version.clone(),
+                                command: request.command.clone(),
+                                next_suggested_action: Some("tool_policy_inspect".to_string()),
+                            },
+                            &profile,
+                        )?),
+                    });
+                }
+                Err(error) => {
+                    let mut error = broker_error_from_oberon_error(error, &command);
+                    error.request_id = request.context.request_id.clone();
+                    error.plugin_id = request.context.plugin_id.clone();
+                    error.plugin_version = request.context.plugin_version.clone();
+                    return Ok(ToolInvokeResponseEnvelope {
+                        result: None,
+                        error: Some(self.redact_tool_error(error, &profile)?),
+                    });
+                }
+            };
+            let (summary, data) = match self.redact_tool_result(
+                &invoke_result.summary,
+                &invoke_result.data,
+                &profile,
+            ) {
+                Ok(result) => result,
+                Err(_) => {
+                    return Ok(ToolInvokeResponseEnvelope {
+                        result: None,
+                        error: Some(ToolError {
+                            status: ErrorStatus::Error,
+                            code: "REDACTION_BLOCKED_OUTPUT".to_string(),
+                            message:
+                                "runtime output was blocked because it could not be safely redacted"
+                                    .to_string(),
+                            retryable: false,
+                            request_id: request.context.request_id.clone(),
+                            plugin_id: request.context.plugin_id.clone(),
+                            plugin_version: request.context.plugin_version.clone(),
+                            command: request.command.clone(),
+                            next_suggested_action: Some("tool_policy_inspect".to_string()),
+                        }),
+                    });
+                }
+            };
+            return Ok(ToolInvokeResponseEnvelope {
+                result: Some(oberon4_core::ToolResult {
+                    status: InvokeStatus::Ok,
+                    tool: request.context.plugin_id.clone(),
+                    command: request.command.clone(),
+                    summary,
+                    data,
+                    artifacts: Vec::new(),
+                    truncated: false,
+                    next_suggested_action: invoke_result.next_suggested_action,
                 }),
+                error: None,
             });
         }
 
@@ -664,20 +960,45 @@ where
         {
             Ok(result) => result,
             Err(error) => {
+                let profile = self.redaction_profile_for_input(&request.input)?;
                 return Ok(ToolInvokeResponseEnvelope {
                     result: None,
-                    error: Some(error),
+                    error: Some(self.redact_tool_error(error, &profile)?),
                 });
             }
         };
+
+        let profile = self.redaction_profile_for_input(&request.input)?;
+        let (summary, data) =
+            match self.redact_tool_result(&invoke_result.summary, &invoke_result.data, &profile) {
+                Ok(result) => result,
+                Err(_) => {
+                    return Ok(ToolInvokeResponseEnvelope {
+                        result: None,
+                        error: Some(ToolError {
+                            status: ErrorStatus::Error,
+                            code: "REDACTION_BLOCKED_OUTPUT".to_string(),
+                            message:
+                                "runtime output was blocked because it could not be safely redacted"
+                                    .to_string(),
+                            retryable: false,
+                            request_id: request.context.request_id.clone(),
+                            plugin_id: request.context.plugin_id.clone(),
+                            plugin_version: request.context.plugin_version.clone(),
+                            command: request.command.clone(),
+                            next_suggested_action: Some("tool_policy_inspect".to_string()),
+                        }),
+                    });
+                }
+            };
 
         Ok(ToolInvokeResponseEnvelope {
             result: Some(oberon4_core::ToolResult {
                 status: invoke_result.status,
                 tool: request.context.plugin_id.clone(),
                 command: request.command.clone(),
-                summary: invoke_result.summary,
-                data: invoke_result.data,
+                summary,
+                data,
                 artifacts: invoke_result.artifacts,
                 truncated: false,
                 next_suggested_action: invoke_result.next_suggested_action,
@@ -695,6 +1016,10 @@ where
             .registry
             .command_manifest(&request.tool, &request.command)?;
         let resolution = self.policy.resolve(&request.tool, &command, &manifest)?;
+        let service_handles_used = service_capabilities(&command)
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>();
         Ok(PolicyInspectResponse {
             status: PlanStatus::Ok,
             tool: request.tool.clone(),
@@ -704,6 +1029,9 @@ where
             resource_limits: resolution.resource_limits,
             operating_mode: resolution.operating_mode,
             reason_codes: resolution.reason_codes,
+            service_handles_used,
+            secret_classes_involved: inferred_secret_classes(&command),
+            security_levels: Vec::new(),
         })
     }
 }
@@ -1007,8 +1335,14 @@ fn validate_plugin_plan_contract(
 fn map_tool_error_to_oberon_error(error: ToolError) -> OberonError {
     match error.code.as_str() {
         "CAPABILITY_DENIED" => OberonError::PolicyDenied(error.message),
+        "SERVICE_ACCESS_DENIED" | "SECRET_ACCESS_DENIED" => {
+            OberonError::PolicyDenied(error.message)
+        }
         "RUNTIME_CONTRACT_MISMATCH" => OberonError::ContractMismatch(error.message),
         "NOT_YET_SUPPORTED_IN_WP2" => OberonError::Validation(error.message),
+        "SERVICE_REQUEST_FAILED" | "REDACTION_BLOCKED_OUTPUT" => {
+            OberonError::Storage(error.message)
+        }
         "RUNTIME_COMPONENT_LOAD_FAILED"
         | "RESOURCE_LIMIT_TIMEOUT"
         | "RESOURCE_LIMIT_MEMORY"
@@ -1043,18 +1377,134 @@ fn apply_policy_to_context(
     }
 }
 
-fn unsupported_wp2_capabilities(command: &PluginCommandManifest) -> Vec<String> {
+fn unsupported_capabilities_after_wp3(command: &PluginCommandManifest) -> Vec<String> {
     command
         .required_capabilities
         .iter()
         .filter(|capability| {
             !matches!(
                 capability.as_str(),
-                "storage.private" | "storage.session" | "storage.cache"
+                "storage.private"
+                    | "storage.session"
+                    | "storage.cache"
+                    | "github.request"
+                    | "service.github.request"
+                    | "oauth.request"
+                    | "service.oauth.request"
+                    | "ssh.sign"
+                    | "service.ssh.sign"
+                    | "wallet.sign_tx"
+                    | "service.wallet.sign_tx"
+                    | "wallet.sign_message"
+                    | "service.wallet.sign_message"
             )
         })
         .cloned()
         .collect()
+}
+
+fn brokered_service_kind(command: &PluginCommandManifest) -> Option<&'static str> {
+    if command.required_capabilities.iter().any(|capability| {
+        matches!(
+            capability.as_str(),
+            "github.request" | "service.github.request"
+        )
+    }) {
+        Some("github.request")
+    } else if command.required_capabilities.iter().any(|capability| {
+        matches!(
+            capability.as_str(),
+            "oauth.request" | "service.oauth.request"
+        )
+    }) {
+        Some("oauth.request")
+    } else if command
+        .required_capabilities
+        .iter()
+        .any(|capability| matches!(capability.as_str(), "ssh.sign" | "service.ssh.sign"))
+    {
+        Some("ssh.sign")
+    } else if command.required_capabilities.iter().any(|capability| {
+        matches!(
+            capability.as_str(),
+            "wallet.sign_tx"
+                | "service.wallet.sign_tx"
+                | "wallet.sign_message"
+                | "service.wallet.sign_message"
+        )
+    }) {
+        Some("wallet.sign")
+    } else {
+        None
+    }
+}
+
+fn service_capabilities(command: &PluginCommandManifest) -> Vec<&str> {
+    command
+        .required_capabilities
+        .iter()
+        .filter_map(|capability| {
+            matches!(
+                capability.as_str(),
+                "github.request"
+                    | "service.github.request"
+                    | "oauth.request"
+                    | "service.oauth.request"
+                    | "ssh.sign"
+                    | "service.ssh.sign"
+                    | "wallet.sign_tx"
+                    | "service.wallet.sign_tx"
+                    | "wallet.sign_message"
+                    | "service.wallet.sign_message"
+            )
+            .then_some(capability.as_str())
+        })
+        .collect()
+}
+
+fn inferred_secret_classes(command: &PluginCommandManifest) -> Vec<SecretClass> {
+    if brokered_service_kind(command).is_some() {
+        vec![SecretClass::OauthCredential]
+    } else {
+        Vec::new()
+    }
+}
+
+fn headers_from_input(input: &serde_json::Value) -> Vec<oberon4_core::HttpHeader> {
+    input
+        .get("headers")
+        .and_then(|value| value.as_object())
+        .map(|headers| {
+            headers
+                .iter()
+                .filter_map(|(name, value)| {
+                    value.as_str().map(|value| oberon4_core::HttpHeader {
+                        name: name.clone(),
+                        value: value.to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn broker_error_from_oberon_error(err: OberonError, command: &PluginCommandManifest) -> ToolError {
+    let (code, retryable) = match err {
+        OberonError::PolicyDenied(_) => ("SERVICE_ACCESS_DENIED", false),
+        OberonError::NotFound(_) => ("SERVICE_ACCESS_DENIED", false),
+        _ => ("SERVICE_REQUEST_FAILED", true),
+    };
+    ToolError {
+        status: ErrorStatus::Error,
+        code: code.to_string(),
+        message: err.to_string(),
+        retryable,
+        request_id: RequestId::new(),
+        plugin_id: String::new(),
+        plugin_version: String::new(),
+        command: command.name.clone(),
+        next_suggested_action: Some("tool_policy_inspect".to_string()),
+    }
 }
 
 fn workspace_impact_from_plan(request: &PlanRequest) -> Option<WorkspaceImpact> {
@@ -1391,7 +1841,7 @@ mod tests {
         assert!(
             plan.blocking_issues
                 .iter()
-                .any(|issue| issue.contains("WP2 does not support required capabilities"))
+                .any(|issue| issue.contains("WP3 does not support required capabilities"))
         );
         assert_eq!(plan.resource_limits.unwrap().time_ms, Some(4_000));
 

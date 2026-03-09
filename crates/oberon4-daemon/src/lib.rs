@@ -1,4 +1,5 @@
 pub mod plugin_runtime;
+pub mod plugin_runtime_broker;
 pub mod plugin_runtime_exec;
 
 use std::{
@@ -23,6 +24,12 @@ pub use plugin_runtime::{
     ArtifactBrokerFoundation, FilePluginRegistry, HOST_RUNTIME_API_VERSION, PluginRuntimeHost,
     RegisteredPlugin, RuntimeBrokerFoundations, StaticPolicyResolver, StorageBrokerFoundation,
     validate_manifest,
+};
+pub use plugin_runtime_broker::{
+    EncryptedLocalSecretBackend, InMemoryServiceTransport, LinuxSecretBackend, MacOsSecretBackend,
+    NativeSecretBackendUnavailable, PluginRuntimeRedactor, PluginRuntimeSecretBroker,
+    PluginRuntimeServiceBroker, SecretBackend, SecretBinding, ServiceBinding, ServiceTransport,
+    WindowsSecretBackend,
 };
 pub use plugin_runtime_exec::ExecutionEngine;
 
