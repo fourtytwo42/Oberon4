@@ -21,6 +21,15 @@ Configured by:
    - generate `plugin-config/<id>.toml` if missing
    - load the plugin or package if enabled and policy-admitted
 
+CLI path:
+
+```bash
+oberon4-cli plugin load /path/to/example.obplg.zip
+```
+
+TUI path:
+- `/plugin-load /path/to/example.obplg.zip`
+
 ## Disable
 Edit the generated config:
 
@@ -29,6 +38,15 @@ enabled = false
 ```
 
 Restart the daemon.
+
+CLI path:
+
+```bash
+oberon4-cli plugin disable <id>
+```
+
+TUI path:
+- `/plugin-disable <id>`
 
 ## Re-enable
 Edit the generated config:
@@ -39,10 +57,38 @@ enabled = true
 
 Restart the daemon.
 
+CLI path:
+
+```bash
+oberon4-cli plugin enable <id>
+```
+
+TUI path:
+- `/plugin-enable <id>`
+
 ## Remove
 1. Delete the `.obplg.zip` or `.obpkg.zip`.
 2. Restart the daemon.
 3. Oberon will keep the generated config but mark the archive as missing-installed and remove the tool surface from discovery and invocation.
+
+CLI path:
+
+```bash
+oberon4-cli plugin unload <id>
+```
+
+TUI path:
+- `/plugin-unload <id>`
+
+## List Installed Plugins
+CLI path:
+
+```bash
+oberon4-cli plugin list
+```
+
+TUI path:
+- `/plugins`
 
 ## Diagnostics
 Policy and registry diagnostics should expose:

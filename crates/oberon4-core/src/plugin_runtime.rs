@@ -477,6 +477,36 @@ pub struct PolicyInspectRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InstalledPluginKind {
+    OrdinaryPlugin,
+    FirstPartyPackage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstalledPluginStatus {
+    pub id: String,
+    pub version: String,
+    pub kind: InstalledPluginKind,
+    #[serde(rename = "hostTrusted")]
+    pub host_trusted: bool,
+    pub installed: bool,
+    pub enabled: bool,
+    #[serde(default, rename = "archivePath")]
+    pub archive_path: Option<String>,
+    #[serde(default, rename = "archiveChecksum")]
+    pub archive_checksum: Option<String>,
+    #[serde(default, rename = "configPath")]
+    pub config_path: Option<String>,
+    #[serde(default, rename = "loadStatus")]
+    pub load_status: Option<String>,
+    #[serde(default, rename = "lastError")]
+    pub last_error: Option<String>,
+    #[serde(default, rename = "reasonCodes")]
+    pub reason_codes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolicyInspectResponse {
     pub status: PlanStatus,
     pub tool: String,

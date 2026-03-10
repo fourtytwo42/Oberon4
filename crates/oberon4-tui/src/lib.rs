@@ -58,6 +58,7 @@ pub enum TuiCommand {
     Diagnostics,
     More,
     Config,
+    Plugins,
     Model(String),
     Endpoint(String),
     System(String),
@@ -65,6 +66,10 @@ pub enum TuiCommand {
     Save(String),
     Load(String),
     Fork(String),
+    PluginLoad(String),
+    PluginUnload(String),
+    PluginEnable(String),
+    PluginDisable(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -237,7 +242,7 @@ impl Default for TuiLaunchOptions {
 const FOOTER_HEIGHT: u16 = 5;
 const CODE_BLOCK_BG: Color = Color::Rgb(28, 32, 40);
 const CODE_BLOCK_FG: Color = Color::Rgb(185, 220, 255);
-const COMMAND_CATALOG: [(&str, bool); 18] = [
+const COMMAND_CATALOG: [(&str, bool); 23] = [
     ("/help", false),
     ("/quit", false),
     ("/stop", false),
@@ -249,6 +254,7 @@ const COMMAND_CATALOG: [(&str, bool); 18] = [
     ("/diagnostics", false),
     ("/more", false),
     ("/config", false),
+    ("/plugins", false),
     ("/model", true),
     ("/endpoint", true),
     ("/system", true),
@@ -256,8 +262,12 @@ const COMMAND_CATALOG: [(&str, bool); 18] = [
     ("/save", true),
     ("/load", true),
     ("/fork", true),
+    ("/plugin-load", true),
+    ("/plugin-unload", true),
+    ("/plugin-enable", true),
+    ("/plugin-disable", true),
 ];
-const EXTENDED_HELP: &str = "/help /quit /stop /new /status /sessions /settings /accounts /diagnostics /more /config /model <name> /endpoint <url> /system <text> /clear /save <name> /load <name> /fork <name>";
+const EXTENDED_HELP: &str = "/help /quit /stop /new /status /sessions /settings /accounts /diagnostics /more /config /plugins /model <name> /endpoint <url> /system <text> /clear /save <name> /load <name> /fork <name> /plugin-load <archive> /plugin-unload <id> /plugin-enable <id> /plugin-disable <id>";
 const SESSION_SIDEBAR_WIDTH: u16 = 18;
 const SESSION_VISIBLE_WIDTH: usize = 12;
 
@@ -450,6 +460,14 @@ impl TuiApp {
             }
             TuiCommand::Config => Ok(TuiResponse {
                 output: redacted_config_json(&self.runtime.load_config()?)?,
+                should_quit: false,
+            }),
+            TuiCommand::Plugins
+            | TuiCommand::PluginLoad(_)
+            | TuiCommand::PluginUnload(_)
+            | TuiCommand::PluginEnable(_)
+            | TuiCommand::PluginDisable(_) => Ok(TuiResponse {
+                output: "plugin management requires daemon-backed TUI".to_string(),
                 should_quit: false,
             }),
             TuiCommand::Model(model) => {
@@ -677,6 +695,20 @@ impl DaemonBackedTuiApp {
                     event => protocol_error(event),
                 }
             }
+            TuiCommand::Plugins => {
+                match self
+                    .client
+                    .send(&oberon4_core::DaemonCommand::ListPlugins)?
+                {
+                    oberon4_core::DaemonEvent::PluginsListed { plugins } => Ok(TuiResponse {
+                        output: serde_json::to_string_pretty(&plugins).map_err(|err| {
+                            OberonError::Storage(format!("plugin list encode failed: {err}"))
+                        })?,
+                        should_quit: false,
+                    }),
+                    event => protocol_error(event),
+                }
+            }
             TuiCommand::Model(model) => {
                 let mut config = self.load_config()?;
                 config.endpoint.model = model.clone();
@@ -764,6 +796,99 @@ impl DaemonBackedTuiApp {
                         output: format!("forked session {name}"),
                         should_quit: false,
                     }),
+                    event => protocol_error(event),
+                }
+            }
+            TuiCommand::PluginLoad(path) => {
+                match self
+                    .client
+                    .send(&oberon4_core::DaemonCommand::LoadPluginArchive {
+                        archive_path: path.clone(),
+                    })? {
+                    oberon4_core::DaemonEvent::PluginUpdated { message, plugin } => {
+                        Ok(TuiResponse {
+                            output: format!(
+                                "{}\n{}",
+                                message,
+                                serde_json::to_string_pretty(&plugin).map_err(|err| {
+                                    OberonError::Storage(format!(
+                                        "plugin status encode failed: {err}"
+                                    ))
+                                })?
+                            ),
+                            should_quit: false,
+                        })
+                    }
+                    event => protocol_error(event),
+                }
+            }
+            TuiCommand::PluginUnload(id) => {
+                match self
+                    .client
+                    .send(&oberon4_core::DaemonCommand::UnloadPlugin { id: id.clone() })?
+                {
+                    oberon4_core::DaemonEvent::PluginUpdated { message, plugin } => {
+                        Ok(TuiResponse {
+                            output: format!(
+                                "{}\n{}",
+                                message,
+                                serde_json::to_string_pretty(&plugin).map_err(|err| {
+                                    OberonError::Storage(format!(
+                                        "plugin status encode failed: {err}"
+                                    ))
+                                })?
+                            ),
+                            should_quit: false,
+                        })
+                    }
+                    event => protocol_error(event),
+                }
+            }
+            TuiCommand::PluginEnable(id) => {
+                match self
+                    .client
+                    .send(&oberon4_core::DaemonCommand::SetPluginEnabled {
+                        id: id.clone(),
+                        enabled: true,
+                    })? {
+                    oberon4_core::DaemonEvent::PluginUpdated { message, plugin } => {
+                        Ok(TuiResponse {
+                            output: format!(
+                                "{}\n{}",
+                                message,
+                                serde_json::to_string_pretty(&plugin).map_err(|err| {
+                                    OberonError::Storage(format!(
+                                        "plugin status encode failed: {err}"
+                                    ))
+                                })?
+                            ),
+                            should_quit: false,
+                        })
+                    }
+                    event => protocol_error(event),
+                }
+            }
+            TuiCommand::PluginDisable(id) => {
+                match self
+                    .client
+                    .send(&oberon4_core::DaemonCommand::SetPluginEnabled {
+                        id: id.clone(),
+                        enabled: false,
+                    })? {
+                    oberon4_core::DaemonEvent::PluginUpdated { message, plugin } => {
+                        Ok(TuiResponse {
+                            output: format!(
+                                "{}\n{}",
+                                message,
+                                serde_json::to_string_pretty(&plugin).map_err(|err| {
+                                    OberonError::Storage(format!(
+                                        "plugin status encode failed: {err}"
+                                    ))
+                                })?
+                            ),
+                            should_quit: false,
+                        })
+                    }
                     event => protocol_error(event),
                 }
             }
@@ -971,25 +1096,14 @@ impl DaemonBackedTuiApp {
     }
 
     fn ensure_daemon_running(&self) -> Result<(), OberonError> {
-        if self
-            .client
-            .send(&oberon4_core::DaemonCommand::GetStatus)
-            .is_ok()
-        {
+        if daemon_is_reachable(&self.client) {
             return Ok(());
         }
 
         spawn_daemon_process(self.client.socket_path().to_path_buf())?;
 
-        for _ in 0..40 {
-            if self
-                .client
-                .send(&oberon4_core::DaemonCommand::GetStatus)
-                .is_ok()
-            {
-                return Ok(());
-            }
-            thread::sleep(Duration::from_millis(50));
+        if wait_for_daemon_reachability(&self.client, true, DAEMON_READY_PROBE_ATTEMPTS) {
+            return Ok(());
         }
 
         Err(OberonError::Storage(
@@ -2950,6 +3064,10 @@ fn handle_pending_local_command(shell: &mut TuiShellState) -> Result<bool, Obero
             output: "settings workspace opened".to_string(),
             should_quit: false,
         },
+        TuiCommand::Plugins => TuiResponse {
+            output: "plugin list requested".to_string(),
+            should_quit: false,
+        },
         TuiCommand::Accounts => TuiResponse {
             output: "accounts workspace opened".to_string(),
             should_quit: false,
@@ -4106,6 +4224,7 @@ fn render_help_workspace(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
             Line::raw("/status      show status"),
             Line::raw("/accounts    manage accounts"),
             Line::raw("/diagnostics show diagnostics"),
+            Line::raw("/plugins     list installed plugins"),
             Line::raw("/more        extra tools"),
         ]))
         .block(Block::default().borders(Borders::ALL).title("Navigation"))
@@ -4290,7 +4409,7 @@ fn render_footer(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
         );
     } else {
         let hint = if matches!(shell.focus, FocusTarget::Composer | FocusTarget::Form) {
-            "/new /stop /help /sessions /settings /status /accounts /diagnostics /more /quit | Up/Down history"
+            "/new /stop /help /sessions /settings /status /accounts /diagnostics /plugins /more /quit | Up/Down history"
         } else if matches!(shell.workspace, Workspace::Sessions) {
             "Type to filter | Up/Down preview | Enter open | Esc clear/back"
         } else {
@@ -4714,6 +4833,7 @@ pub fn parse_tui_command(input: &str) -> Result<TuiCommand, OberonError> {
         "/diagnostics" => Ok(TuiCommand::Diagnostics),
         "/more" => Ok(TuiCommand::More),
         "/config" => Ok(TuiCommand::Config),
+        "/plugins" => Ok(TuiCommand::Plugins),
         "/model" => require_argument(rest, "/model").map(TuiCommand::Model),
         "/endpoint" => require_argument(rest, "/endpoint").map(TuiCommand::Endpoint),
         "/system" => require_argument(rest, "/system").map(TuiCommand::System),
@@ -4721,6 +4841,12 @@ pub fn parse_tui_command(input: &str) -> Result<TuiCommand, OberonError> {
         "/save" => require_argument(rest, "/save").map(TuiCommand::Save),
         "/load" => require_argument(rest, "/load").map(TuiCommand::Load),
         "/fork" => require_argument(rest, "/fork").map(TuiCommand::Fork),
+        "/plugin-load" => require_argument(rest, "/plugin-load").map(TuiCommand::PluginLoad),
+        "/plugin-unload" => require_argument(rest, "/plugin-unload").map(TuiCommand::PluginUnload),
+        "/plugin-enable" => require_argument(rest, "/plugin-enable").map(TuiCommand::PluginEnable),
+        "/plugin-disable" => {
+            require_argument(rest, "/plugin-disable").map(TuiCommand::PluginDisable)
+        }
         _ => Err(OberonError::Validation(unsupported_command_message(
             command,
         ))),
@@ -4740,6 +4866,7 @@ fn canonical_tui_command(command: &str) -> &str {
         "/diagnostics" | "/diagnostic" | "/diag" | "/diags" | "/diagnositcs" => "/diagnostics",
         "/more" | "/menu" => "/more",
         "/config" | "/cfg" | "/configuration" => "/config",
+        "/plugins" | "/plugin" => "/plugins",
         "/model" | "/models" => "/model",
         "/endpoint" | "/endpiont" | "/url" => "/endpoint",
         "/system" | "/prompt" | "/sytem" => "/system",
@@ -4747,6 +4874,10 @@ fn canonical_tui_command(command: &str) -> &str {
         "/save" | "/store" => "/save",
         "/load" | "/open" => "/load",
         "/fork" | "/copy" => "/fork",
+        "/plugin-load" | "/load-plugin" => "/plugin-load",
+        "/plugin-unload" | "/unload-plugin" => "/plugin-unload",
+        "/plugin-enable" | "/enable-plugin" => "/plugin-enable",
+        "/plugin-disable" | "/disable-plugin" => "/plugin-disable",
         _ => command,
     }
 }
@@ -5180,17 +5311,42 @@ fn spawn_daemon_process(socket_path: PathBuf) -> Result<(), OberonError> {
     Ok(())
 }
 
+const DAEMON_PROBE_DELAY: Duration = Duration::from_millis(50);
+const DAEMON_SHUTDOWN_PROBE_ATTEMPTS: usize = 100;
+const DAEMON_READY_PROBE_ATTEMPTS: usize = 240;
+
+fn daemon_is_reachable(client: &DaemonIpcClient) -> bool {
+    client.send(&oberon4_core::DaemonCommand::GetStatus).is_ok()
+}
+
+fn wait_for_daemon_reachability(
+    client: &DaemonIpcClient,
+    reachable: bool,
+    attempts: usize,
+) -> bool {
+    for _ in 0..attempts {
+        if daemon_is_reachable(client) == reachable {
+            return true;
+        }
+        thread::sleep(DAEMON_PROBE_DELAY);
+    }
+    daemon_is_reachable(client) == reachable
+}
+
 fn restart_daemon_process(socket_path: PathBuf) -> Result<(), OberonError> {
     let client = DaemonIpcClient::new(&socket_path);
-    let _ = client.send(&oberon4_core::DaemonCommand::Shutdown);
-    thread::sleep(Duration::from_millis(100));
+    if daemon_is_reachable(&client) {
+        let _ = client.send(&oberon4_core::DaemonCommand::Shutdown);
+        if !wait_for_daemon_reachability(&client, false, DAEMON_SHUTDOWN_PROBE_ATTEMPTS) {
+            return Err(OberonError::Storage(
+                "daemon failed to stop before restart".to_string(),
+            ));
+        }
+    }
     spawn_daemon_process(socket_path.clone())?;
 
-    for _ in 0..40 {
-        if client.send(&oberon4_core::DaemonCommand::GetStatus).is_ok() {
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(50));
+    if wait_for_daemon_reachability(&client, true, DAEMON_READY_PROBE_ATTEMPTS) {
+        return Ok(());
     }
 
     Err(OberonError::Storage(
@@ -5426,6 +5582,15 @@ mod tests {
         assert_eq!(
             parse_tui_command("/fork demo-copy").unwrap(),
             TuiCommand::Fork("demo-copy".to_string())
+        );
+        assert_eq!(parse_tui_command("/plugins").unwrap(), TuiCommand::Plugins);
+        assert_eq!(
+            parse_tui_command("/plugin-load /tmp/example.obplg.zip").unwrap(),
+            TuiCommand::PluginLoad("/tmp/example.obplg.zip".to_string())
+        );
+        assert_eq!(
+            parse_tui_command("/plugin-disable demo").unwrap(),
+            TuiCommand::PluginDisable("demo".to_string())
         );
     }
 

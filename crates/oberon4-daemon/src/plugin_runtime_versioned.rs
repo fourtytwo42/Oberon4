@@ -207,23 +207,15 @@ impl PluginRuntimeVersionedPackage {
 
     pub fn ensure_default_package_archive_installed(
         archive_root: &Path,
+        config_root: &Path,
     ) -> Result<(), OberonError> {
-        let bootstrap_marker = oberon4_core::default_data_dir()
-            .join("plugin-runtime")
-            .join("first-party-package-archive-bootstrap.marker");
-        if bootstrap_marker.exists() {
+        let archive_path = archive_root.join(format!("{}.obpkg.zip", Self::package_id()));
+        let config_path = config_root.join(format!("{}.toml", Self::package_id()));
+        if archive_path.exists() || config_path.exists() {
             return Ok(());
         }
 
         Self::materialize_package_archive(archive_root)?;
-
-        if let Some(parent) = bootstrap_marker.parent() {
-            fs::create_dir_all(parent).map_err(|err| {
-                OberonError::Storage(format!("bootstrap marker dir create failed: {err}"))
-            })?;
-        }
-        fs::write(&bootstrap_marker, b"versioned-workspace-archive-seeded")
-            .map_err(|err| OberonError::Storage(format!("bootstrap marker write failed: {err}")))?;
         Ok(())
     }
 

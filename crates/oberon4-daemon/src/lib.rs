@@ -28,6 +28,7 @@ use serde_json::json;
 pub use plugin_runtime::{
     ArtifactBrokerFoundation, FilePluginRegistry, HOST_RUNTIME_API_VERSION, PluginRuntimeHost,
     RegisteredPlugin, RuntimeBrokerFoundations, StaticPolicyResolver, StorageBrokerFoundation,
+    install_plugin_archive, list_installed_plugins, set_plugin_enabled, unload_plugin_archive,
     validate_manifest,
 };
 pub use plugin_runtime_broker::{
@@ -422,7 +423,10 @@ where
             .map(PathBuf::from)
             .collect::<Vec<_>>();
         for root in &plugin_archive_roots {
-            PluginRuntimeVersionedPackage::ensure_default_package_archive_installed(root)?;
+            PluginRuntimeVersionedPackage::ensure_default_package_archive_installed(
+                root,
+                &plugin_config_root,
+            )?;
         }
         let registry = FilePluginRegistry::load_from_runtime_sources(
             &plugin_archive_roots,
@@ -758,6 +762,75 @@ where
                 Ok(CommandOutcome {
                     event: DaemonEvent::Ack {
                         message: format!("disconnected {} {}", provider_name(provider), account_id),
+                    },
+                    should_shutdown: false,
+                })
+            }
+            DaemonCommand::ListPlugins => {
+                let config = self.runtime.load_config()?;
+                for root in config
+                    .runtime
+                    .plugin_archive_roots
+                    .iter()
+                    .map(PathBuf::from)
+                    .collect::<Vec<_>>()
+                {
+                    PluginRuntimeVersionedPackage::ensure_default_package_archive_installed(
+                        &root,
+                        Path::new(&config.runtime.plugin_config_root),
+                    )?;
+                }
+                Ok(CommandOutcome {
+                    event: DaemonEvent::PluginsListed {
+                        plugins: list_installed_plugins(&config)?,
+                    },
+                    should_shutdown: false,
+                })
+            }
+            DaemonCommand::LoadPluginArchive { archive_path } => {
+                let config = self.runtime.load_config()?;
+                for root in config
+                    .runtime
+                    .plugin_archive_roots
+                    .iter()
+                    .map(PathBuf::from)
+                    .collect::<Vec<_>>()
+                {
+                    PluginRuntimeVersionedPackage::ensure_default_package_archive_installed(
+                        &root,
+                        Path::new(&config.runtime.plugin_config_root),
+                    )?;
+                }
+                let plugin = install_plugin_archive(&config, Path::new(&archive_path))?;
+                Ok(CommandOutcome {
+                    event: DaemonEvent::PluginUpdated {
+                        message: format!("loaded plugin archive {}", plugin.id),
+                        plugin,
+                    },
+                    should_shutdown: false,
+                })
+            }
+            DaemonCommand::UnloadPlugin { id } => {
+                let config = self.runtime.load_config()?;
+                let plugin = unload_plugin_archive(&config, &id)?;
+                Ok(CommandOutcome {
+                    event: DaemonEvent::PluginUpdated {
+                        message: format!("unloaded plugin {}", plugin.id),
+                        plugin,
+                    },
+                    should_shutdown: false,
+                })
+            }
+            DaemonCommand::SetPluginEnabled { id, enabled } => {
+                let mut config = self.runtime.load_config()?;
+                crate::plugin_runtime::normalize_plugin_enablement(&mut config, &id, enabled)?;
+                self.runtime.save_config(&config)?;
+                let plugin = set_plugin_enabled(&config, &id, enabled)?;
+                let action = if enabled { "enabled" } else { "disabled" };
+                Ok(CommandOutcome {
+                    event: DaemonEvent::PluginUpdated {
+                        message: format!("{action} plugin {}", plugin.id),
+                        plugin,
                     },
                     should_shutdown: false,
                 })

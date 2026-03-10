@@ -12,17 +12,18 @@ use sha2::{Digest, Sha256};
 use zip::ZipArchive;
 
 use oberon4_core::{
-    AllowlistStatus, ApprovalExpectation, ApprovalRequestPayload, ApprovalResourceLimits,
-    ArtifactRetentionPolicy, BrokeredServiceResult, CapabilityManifest, ConformanceStatus,
-    EffectiveCapabilities, ErrorStatus, GithubRequest, HostToolRuntime, InvokeStatus,
-    ManifestValidationIssue, ManifestValidationResult, NetworkPolicy, OauthRequest, OberonError,
-    OperatingMode, PlanRequest, PlanResult, PlanStatus, PluginAdmissionStatus,
-    PluginCommandManifest, PluginDescription, PluginManifest, PluginRegistry, PolicyInspectRequest,
-    PolicyInspectResponse, PolicyResolution, PolicyResolver, PreconditionModel, RedactionPipeline,
-    RedactionProfile, RedactionTargetKind, RequestId, ResourceLimits, SearchMatch, SearchRequest,
-    SearchResponse, SecretBroker, SecretClass, SecurityLevel, ServiceBroker, SideEffectClass,
-    ToolDescribeRequest, ToolDescribeResponse, ToolError, ToolGuidance, ToolInvokeResponseEnvelope,
-    ToolTier, WorkspaceBroker, WorkspaceHandle, WorkspaceImpact,
+    AllowlistStatus, AppConfig, ApprovalExpectation, ApprovalRequestPayload,
+    ApprovalResourceLimits, ArtifactRetentionPolicy, BrokeredServiceResult, CapabilityManifest,
+    ConformanceStatus, EffectiveCapabilities, ErrorStatus, GithubRequest, HostToolRuntime,
+    InstalledPluginKind, InstalledPluginStatus, InvokeStatus, ManifestValidationIssue,
+    ManifestValidationResult, NetworkPolicy, OauthRequest, OberonError, OperatingMode, PlanRequest,
+    PlanResult, PlanStatus, PluginAdmissionStatus, PluginCommandManifest, PluginDescription,
+    PluginManifest, PluginRegistry, PolicyInspectRequest, PolicyInspectResponse, PolicyResolution,
+    PolicyResolver, PreconditionModel, RedactionPipeline, RedactionProfile, RedactionTargetKind,
+    RequestId, ResourceLimits, SearchMatch, SearchRequest, SearchResponse, SecretBroker,
+    SecretClass, SecurityLevel, ServiceBroker, SideEffectClass, ToolDescribeRequest,
+    ToolDescribeResponse, ToolError, ToolGuidance, ToolInvokeResponseEnvelope, ToolTier,
+    WorkspaceBroker, WorkspaceHandle, WorkspaceImpact,
 };
 
 use crate::plugin_runtime_broker::{
@@ -272,6 +273,9 @@ struct DiscoveredArchive {
     sha256: String,
     manifest: ArchiveManifest,
 }
+
+type SyncedArchiveConfigs = BTreeMap<String, (PathBuf, InstalledArchiveConfig)>;
+type SyncedArchiveState = (BTreeMap<String, DiscoveredArchive>, SyncedArchiveConfigs);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilePluginRegistry {
@@ -838,6 +842,390 @@ fn load_or_create_archive_config(
 
     write_installed_archive_config(&config_path, &config)?;
     Ok((config_path, config))
+}
+
+fn archive_roots_from_config(config: &AppConfig) -> Vec<PathBuf> {
+    config
+        .runtime
+        .plugin_archive_roots
+        .iter()
+        .map(PathBuf::from)
+        .collect()
+}
+
+fn archive_config_root_from_config(config: &AppConfig) -> PathBuf {
+    PathBuf::from(&config.runtime.plugin_config_root)
+}
+
+pub(crate) fn normalize_plugin_enablement(
+    config: &mut AppConfig,
+    id: &str,
+    enabled: bool,
+) -> Result<(), OberonError> {
+    config.runtime.enabled_plugins.retain(|entry| entry != id);
+    config.runtime.disabled_plugins.retain(|entry| entry != id);
+
+    if enabled {
+        if !config.runtime.enabled_plugins.is_empty() {
+            config.runtime.enabled_plugins.push(id.to_string());
+            config.runtime.enabled_plugins.sort();
+            config.runtime.enabled_plugins.dedup();
+        }
+    } else {
+        config.runtime.disabled_plugins.push(id.to_string());
+        config.runtime.disabled_plugins.sort();
+        config.runtime.disabled_plugins.dedup();
+    }
+
+    Ok(())
+}
+
+fn discovered_archive_to_status(
+    archive: &DiscoveredArchive,
+    config_path: Option<&Path>,
+    config: Option<&InstalledArchiveConfig>,
+    enabled_plugins: &BTreeSet<String>,
+    disabled_plugins: &BTreeSet<String>,
+) -> InstalledPluginStatus {
+    let enabled_by_generated_config = config.map(|entry| entry.enabled).unwrap_or(true);
+    let explicitly_enabled =
+        enabled_plugins.is_empty() || enabled_plugins.contains(archive.manifest.id.as_str());
+    let enabled = enabled_by_generated_config
+        && explicitly_enabled
+        && !disabled_plugins.contains(archive.manifest.id.as_str());
+
+    let mut reason_codes = Vec::new();
+    if !enabled_by_generated_config || disabled_plugins.contains(archive.manifest.id.as_str()) {
+        reason_codes.push("blocked_by_disable".to_string());
+    }
+    if !explicitly_enabled {
+        reason_codes.push("blocked_by_disable".to_string());
+    }
+
+    InstalledPluginStatus {
+        id: archive.manifest.id.clone(),
+        version: archive.manifest.version.clone(),
+        kind: match archive.manifest.kind {
+            ArchiveKind::OrdinaryPlugin => InstalledPluginKind::OrdinaryPlugin,
+            ArchiveKind::FirstPartyPackage => InstalledPluginKind::FirstPartyPackage,
+        },
+        host_trusted: matches!(archive.manifest.kind, ArchiveKind::FirstPartyPackage),
+        installed: true,
+        enabled,
+        archive_path: Some(archive.path.display().to_string()),
+        archive_checksum: Some(archive.sha256.clone()),
+        config_path: config_path.map(|path| path.display().to_string()),
+        load_status: config.map(|entry| entry.load_status.clone()),
+        last_error: config.and_then(|entry| entry.last_error.clone()),
+        reason_codes,
+    }
+}
+
+fn missing_archive_status(
+    config_path: &Path,
+    config: &InstalledArchiveConfig,
+    enabled_plugins: &BTreeSet<String>,
+    disabled_plugins: &BTreeSet<String>,
+) -> InstalledPluginStatus {
+    let enabled_by_generated_config = config.enabled;
+    let explicitly_enabled =
+        enabled_plugins.is_empty() || enabled_plugins.contains(config.id.as_str());
+    let enabled = enabled_by_generated_config
+        && explicitly_enabled
+        && !disabled_plugins.contains(config.id.as_str());
+
+    let mut reason_codes = vec!["blocked_by_missing_archive".to_string()];
+    if !enabled_by_generated_config || disabled_plugins.contains(config.id.as_str()) {
+        reason_codes.push("blocked_by_disable".to_string());
+    }
+    if !explicitly_enabled {
+        reason_codes.push("blocked_by_disable".to_string());
+    }
+
+    InstalledPluginStatus {
+        id: config.id.clone(),
+        version: config.version.clone(),
+        kind: match config.kind.as_str() {
+            "first-party-package" => InstalledPluginKind::FirstPartyPackage,
+            _ => InstalledPluginKind::OrdinaryPlugin,
+        },
+        host_trusted: config.kind == "first-party-package",
+        installed: false,
+        enabled,
+        archive_path: Some(config.archive_path.clone()),
+        archive_checksum: Some(config.archive_sha256.clone()),
+        config_path: Some(config_path.display().to_string()),
+        load_status: Some(config.load_status.clone()),
+        last_error: config.last_error.clone(),
+        reason_codes,
+    }
+}
+
+fn sync_archive_configs_for_roots(
+    archive_roots: &[PathBuf],
+    config_root: &Path,
+) -> Result<SyncedArchiveState, OberonError> {
+    let existing_configs = load_installed_archive_configs(config_root)?;
+    let mut synced_configs = BTreeMap::new();
+    let mut discovered_archives = BTreeMap::new();
+
+    for root in archive_roots {
+        for archive_path in discover_archive_paths(root)? {
+            let archive = load_archive_manifest(&archive_path)?;
+            let existing = existing_configs.get(&archive.manifest.id);
+            let (config_path, config) =
+                load_or_create_archive_config(config_root, &archive, existing)?;
+            synced_configs.insert(archive.manifest.id.clone(), (config_path, config));
+            discovered_archives.insert(archive.manifest.id.clone(), archive);
+        }
+    }
+
+    for (id, value) in existing_configs {
+        synced_configs.entry(id).or_insert(value);
+    }
+
+    Ok((discovered_archives, synced_configs))
+}
+
+pub fn list_installed_plugins(
+    config: &AppConfig,
+) -> Result<Vec<InstalledPluginStatus>, OberonError> {
+    let archive_roots = archive_roots_from_config(config);
+    let config_root = archive_config_root_from_config(config);
+    let enabled_plugins = config
+        .runtime
+        .enabled_plugins
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let disabled_plugins = config
+        .runtime
+        .disabled_plugins
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+
+    let (discovered, configs) = sync_archive_configs_for_roots(&archive_roots, &config_root)?;
+    let mut statuses = Vec::new();
+
+    for (id, archive) in &discovered {
+        let (config_path, config) = configs
+            .get(id)
+            .ok_or_else(|| OberonError::NotFound(format!("plugin-config:{id}")))?;
+        statuses.push(discovered_archive_to_status(
+            archive,
+            Some(config_path.as_path()),
+            Some(config),
+            &enabled_plugins,
+            &disabled_plugins,
+        ));
+    }
+
+    for (id, (config_path, installed_config)) in &configs {
+        if discovered.contains_key(id) {
+            continue;
+        }
+        statuses.push(missing_archive_status(
+            config_path,
+            installed_config,
+            &enabled_plugins,
+            &disabled_plugins,
+        ));
+    }
+
+    statuses.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(statuses)
+}
+
+pub fn install_plugin_archive(
+    config: &AppConfig,
+    archive_path: &Path,
+) -> Result<InstalledPluginStatus, OberonError> {
+    let archive_roots = archive_roots_from_config(config);
+    let config_root = archive_config_root_from_config(config);
+    let target_root = archive_roots.first().cloned().ok_or_else(|| {
+        OberonError::Validation(
+            "runtime.plugin_archive_roots must contain at least one path".to_string(),
+        )
+    })?;
+    fs::create_dir_all(&target_root)
+        .map_err(|err| OberonError::Storage(format!("archive root create failed: {err}")))?;
+
+    let source_archive = load_archive_manifest(archive_path)?;
+    let extension = source_archive.manifest.kind.extension();
+    if archive_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .is_none_or(|name| !name.ends_with(extension))
+    {
+        return Err(OberonError::Validation(format!(
+            "archive extension does not match manifest kind; expected {extension}"
+        )));
+    }
+
+    for root in &archive_roots {
+        for existing_archive_path in discover_archive_paths(root)? {
+            let existing_archive = load_archive_manifest(&existing_archive_path)?;
+            if existing_archive.manifest.id == source_archive.manifest.id {
+                let _ = fs::remove_file(existing_archive_path);
+            }
+        }
+    }
+
+    let destination_path = target_root.join(format!(
+        "{}-{}{}",
+        source_archive.manifest.id, source_archive.manifest.version, extension
+    ));
+    if archive_path != destination_path {
+        fs::copy(archive_path, &destination_path)
+            .map_err(|err| OberonError::Storage(format!("archive copy failed: {err}")))?;
+    }
+
+    let installed_archive = load_archive_manifest(&destination_path)?;
+    let existing_configs = load_installed_archive_configs(&config_root)?;
+    let existing = existing_configs.get(&installed_archive.manifest.id);
+    let (config_path, config_file) =
+        load_or_create_archive_config(&config_root, &installed_archive, existing)?;
+
+    Ok(discovered_archive_to_status(
+        &installed_archive,
+        Some(config_path.as_path()),
+        Some(&config_file),
+        &config
+            .runtime
+            .enabled_plugins
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        &config
+            .runtime
+            .disabled_plugins
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+    ))
+}
+
+pub fn set_plugin_enabled(
+    config: &AppConfig,
+    id: &str,
+    enabled: bool,
+) -> Result<InstalledPluginStatus, OberonError> {
+    let archive_roots = archive_roots_from_config(config);
+    let config_root = archive_config_root_from_config(config);
+    let discovered = sync_archive_configs_for_roots(&archive_roots, &config_root)?.0;
+    let existing_configs = load_installed_archive_configs(&config_root)?;
+
+    let (config_path, mut installed_config) = existing_configs
+        .get(id)
+        .cloned()
+        .ok_or_else(|| OberonError::NotFound(format!("plugin:{id}")))?;
+    installed_config.enabled = enabled;
+    installed_config.disabled_reason = if enabled {
+        None
+    } else {
+        Some("operator_disabled".to_string())
+    };
+    installed_config.last_error = None;
+    write_installed_archive_config(&config_path, &installed_config)?;
+
+    let mut effective_config = config.clone();
+    normalize_plugin_enablement(&mut effective_config, id, enabled)?;
+    let enabled_plugins = effective_config
+        .runtime
+        .enabled_plugins
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let disabled_plugins = effective_config
+        .runtime
+        .disabled_plugins
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+
+    Ok(match discovered.get(id) {
+        Some(archive) => discovered_archive_to_status(
+            archive,
+            Some(config_path.as_path()),
+            Some(&installed_config),
+            &enabled_plugins,
+            &disabled_plugins,
+        ),
+        None => missing_archive_status(
+            config_path.as_path(),
+            &installed_config,
+            &enabled_plugins,
+            &disabled_plugins,
+        ),
+    })
+}
+
+pub fn unload_plugin_archive(
+    config: &AppConfig,
+    id: &str,
+) -> Result<InstalledPluginStatus, OberonError> {
+    let archive_roots = archive_roots_from_config(config);
+    let config_root = archive_config_root_from_config(config);
+    let existing_configs = load_installed_archive_configs(&config_root)?;
+    let mut removed = false;
+
+    for root in &archive_roots {
+        for archive_path in discover_archive_paths(root)? {
+            let archive = load_archive_manifest(&archive_path)?;
+            if archive.manifest.id == id {
+                fs::remove_file(&archive_path)
+                    .map_err(|err| OberonError::Storage(format!("archive remove failed: {err}")))?;
+                removed = true;
+            }
+        }
+    }
+
+    let (config_path, mut installed_config) = existing_configs
+        .get(id)
+        .cloned()
+        .ok_or_else(|| OberonError::NotFound(format!("plugin:{id}")))?;
+    installed_config.installed = false;
+    installed_config.load_status = "missing-archive".to_string();
+    installed_config.last_error = Some("archive removed by operator".to_string());
+    installed_config.last_seen_at = now_timestamp()?;
+    write_installed_archive_config(&config_path, &installed_config)?;
+
+    if !removed {
+        return Ok(missing_archive_status(
+            config_path.as_path(),
+            &installed_config,
+            &config
+                .runtime
+                .enabled_plugins
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            &config
+                .runtime
+                .disabled_plugins
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+        ));
+    }
+
+    Ok(missing_archive_status(
+        config_path.as_path(),
+        &installed_config,
+        &config
+            .runtime
+            .enabled_plugins
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        &config
+            .runtime
+            .disabled_plugins
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3702,16 +4090,17 @@ mod tests {
 
     use super::{
         FilePluginRegistry, HOST_RUNTIME_API_VERSION, PluginRuntimeHost, RegisteredPlugin,
-        RuntimeBrokerFoundations, StaticPolicyResolver, validate_manifest,
+        RuntimeBrokerFoundations, StaticPolicyResolver, install_plugin_archive,
+        list_installed_plugins, set_plugin_enabled, unload_plugin_archive, validate_manifest,
     };
     use oberon4_core::{
-        AllowlistStatus, ApprovalExpectation, ArtifactCapabilityManifest, CapabilityManifest,
-        ConformanceStatus, HostToolRuntime, InvocationContext, InvokeRequest, LifecycleActions,
-        LifecycleHooks, NetworkPolicy, OperatingMode, PlanRequest, PluginAdmissionStatus,
-        PluginCommandManifest, PluginExample, PluginManifest, PolicyInspectRequest,
-        PromptingManifest, ProvenanceManifest, ResourceBudgetRequest, ResourceLimits,
-        SearchRequest, SignatureMetadata, StorageCapabilityManifest, ToolDescribeRequest,
-        WorkspaceCapabilityManifest,
+        AllowlistStatus, AppConfig, ApprovalExpectation, ArtifactCapabilityManifest,
+        CapabilityManifest, ConformanceStatus, HostToolRuntime, InstalledPluginKind,
+        InvocationContext, InvokeRequest, LifecycleActions, LifecycleHooks, NetworkPolicy,
+        OperatingMode, PlanRequest, PluginAdmissionStatus, PluginCommandManifest, PluginExample,
+        PluginManifest, PolicyInspectRequest, PromptingManifest, ProvenanceManifest,
+        ResourceBudgetRequest, ResourceLimits, SearchRequest, SignatureMetadata,
+        StorageCapabilityManifest, ToolDescribeRequest, WorkspaceCapabilityManifest,
     };
     use oberon4_core::{BuildMetadata, CapabilityGrant, CapabilityGrantKind, HandleOperation};
     use oberon4_core::{ManifestValidationResult, PluginRegistry, SideEffectClass};
@@ -4145,6 +4534,81 @@ mod tests {
         assert_eq!(persisted["settings"]["mode"].as_str(), Some("turbo"));
 
         let _ = fs::remove_dir_all(archive_root);
+        let _ = fs::remove_dir_all(config_root);
+    }
+
+    #[test]
+    fn archive_admin_helpers_install_disable_and_unload_plugin() {
+        let source_root = temp_dir("archive-admin-source");
+        let install_root = temp_dir("archive-admin-install");
+        let config_root = temp_dir("archive-admin-config");
+        let manifest = sample_manifest();
+        let source_archive = write_archive_plugin(&source_root, &manifest, VALID_WASM);
+
+        let mut config = AppConfig::default();
+        config.runtime.plugin_archive_roots = vec![install_root.display().to_string()];
+        config.runtime.plugin_config_root = config_root.display().to_string();
+        config.runtime.enabled_plugins = Vec::new();
+        config.runtime.disabled_plugins = Vec::new();
+
+        let installed = install_plugin_archive(&config, &source_archive).unwrap();
+        assert_eq!(installed.id, "workspace-git");
+        assert_eq!(installed.kind, InstalledPluginKind::OrdinaryPlugin);
+        assert!(installed.installed);
+        assert!(installed.enabled);
+
+        let listed = list_installed_plugins(&config).unwrap();
+        assert!(listed.iter().any(|entry| entry.id == "workspace-git"));
+
+        let disabled = set_plugin_enabled(&config, "workspace-git", false).unwrap();
+        assert!(!disabled.enabled);
+        assert!(
+            disabled
+                .reason_codes
+                .contains(&"blocked_by_disable".to_string())
+        );
+
+        let unloaded = unload_plugin_archive(&config, "workspace-git").unwrap();
+        assert!(!unloaded.installed);
+        assert!(
+            unloaded
+                .reason_codes
+                .contains(&"blocked_by_missing_archive".to_string())
+        );
+
+        let _ = fs::remove_dir_all(source_root);
+        let _ = fs::remove_dir_all(install_root);
+        let _ = fs::remove_dir_all(config_root);
+    }
+
+    #[test]
+    fn first_party_package_archive_can_be_installed_with_archive_admin_helpers() {
+        let source_root = temp_dir("archive-admin-package-source");
+        let install_root = temp_dir("archive-admin-package-install");
+        let config_root = temp_dir("archive-admin-package-config");
+        PluginRuntimeVersionedPackage::materialize_package_archive(&source_root).unwrap();
+        let source_archive = source_root.join("versioned-workspace.obpkg.zip");
+
+        let mut config = AppConfig::default();
+        config.runtime.plugin_archive_roots = vec![install_root.display().to_string()];
+        config.runtime.plugin_config_root = config_root.display().to_string();
+        config.runtime.enabled_plugins = Vec::new();
+        config.runtime.disabled_plugins = Vec::new();
+
+        let installed = install_plugin_archive(&config, &source_archive).unwrap();
+        assert_eq!(installed.id, "versioned-workspace");
+        assert_eq!(installed.kind, InstalledPluginKind::FirstPartyPackage);
+        assert!(installed.host_trusted);
+        assert!(installed.installed);
+
+        let listed = list_installed_plugins(&config).unwrap();
+        assert!(listed.iter().any(|entry| {
+            entry.id == "versioned-workspace"
+                && entry.kind == InstalledPluginKind::FirstPartyPackage
+        }));
+
+        let _ = fs::remove_dir_all(source_root);
+        let _ = fs::remove_dir_all(install_root);
         let _ = fs::remove_dir_all(config_root);
     }
 

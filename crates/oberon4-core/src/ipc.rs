@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     AppConfig, ChatMessage, ChatToolCallDelta, DaemonStatus, OAuthCallbackPayload,
     OAuthProviderKind, SavedSession, StoredAccount, ToolError, ToolResult,
+    plugin_runtime::InstalledPluginStatus,
 };
 
 #[allow(clippy::large_enum_variant)]
@@ -50,6 +51,17 @@ pub enum DaemonCommand {
         provider: OAuthProviderKind,
         account_id: String,
     },
+    ListPlugins,
+    LoadPluginArchive {
+        archive_path: String,
+    },
+    UnloadPlugin {
+        id: String,
+    },
+    SetPluginEnabled {
+        id: String,
+        enabled: bool,
+    },
     ResolveApproval {
         approval_id: String,
         decision: String,
@@ -96,6 +108,13 @@ pub enum DaemonEvent {
     AccountsListed {
         accounts: Vec<StoredAccount>,
     },
+    PluginsListed {
+        plugins: Vec<InstalledPluginStatus>,
+    },
+    PluginUpdated {
+        plugin: InstalledPluginStatus,
+        message: String,
+    },
     OAuthStarted {
         provider: OAuthProviderKind,
         flow_id: String,
@@ -114,8 +133,8 @@ pub enum DaemonEvent {
 mod tests {
     use crate::{
         AppConfig, ChatMessage, ChatProviderKind, ChatRole, ChatToolCallDelta, DaemonCommand,
-        DaemonEvent, DaemonStatus, OAuthCallbackPayload, OAuthProviderKind, SavedSession,
-        SessionId, SessionSummary,
+        DaemonEvent, DaemonStatus, InstalledPluginKind, InstalledPluginStatus,
+        OAuthCallbackPayload, OAuthProviderKind, SavedSession, SessionId, SessionSummary,
     };
 
     #[test]
@@ -248,6 +267,38 @@ mod tests {
             },
         };
 
+        let encoded = serde_json::to_string(&event).unwrap();
+        let decoded: DaemonEvent = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, event);
+    }
+
+    #[test]
+    fn plugin_admin_commands_and_events_round_trip() {
+        let command = DaemonCommand::SetPluginEnabled {
+            id: "versioned-workspace".to_string(),
+            enabled: false,
+        };
+        let encoded = serde_json::to_string(&command).unwrap();
+        let decoded: DaemonCommand = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, command);
+
+        let event = DaemonEvent::PluginUpdated {
+            plugin: InstalledPluginStatus {
+                id: "versioned-workspace".to_string(),
+                version: "0.1.0".to_string(),
+                kind: InstalledPluginKind::FirstPartyPackage,
+                host_trusted: true,
+                installed: true,
+                enabled: false,
+                archive_path: Some("/tmp/versioned-workspace.obpkg.zip".to_string()),
+                archive_checksum: Some("sha256:abc123".to_string()),
+                config_path: Some("/tmp/versioned-workspace.toml".to_string()),
+                load_status: Some("ready".to_string()),
+                last_error: None,
+                reason_codes: vec!["blocked_by_disable".to_string()],
+            },
+            message: "disabled plugin versioned-workspace".to_string(),
+        };
         let encoded = serde_json::to_string(&event).unwrap();
         let decoded: DaemonEvent = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, event);

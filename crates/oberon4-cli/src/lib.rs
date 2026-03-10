@@ -40,6 +40,19 @@ pub enum CliCommand {
     Doctor {
         json: bool,
     },
+    PluginList,
+    PluginLoad {
+        archive_path: String,
+    },
+    PluginUnload {
+        id: String,
+    },
+    PluginEnable {
+        id: String,
+    },
+    PluginDisable {
+        id: String,
+    },
     AccountConnect {
         provider: OAuthProviderKind,
     },
@@ -337,6 +350,79 @@ impl CliApp {
                         })
                     }
                     Err(err) => Err(err),
+                }
+            }
+            CliCommand::PluginList => {
+                ensure_daemon_running()?;
+                match daemon_client()?.send(&oberon4_core::DaemonCommand::ListPlugins)? {
+                    oberon4_core::DaemonEvent::PluginsListed { plugins } => {
+                        let plugins = serde_json::to_string_pretty(&plugins)
+                            .map_err(|err| OberonError::Storage(err.to_string()))?;
+                        Ok(CliOutput::success(plugins))
+                    }
+                    event => daemon_protocol_error(event),
+                }
+            }
+            CliCommand::PluginLoad { archive_path } => {
+                ensure_daemon_running()?;
+                match daemon_client()?
+                    .send(&oberon4_core::DaemonCommand::LoadPluginArchive { archive_path })?
+                {
+                    oberon4_core::DaemonEvent::PluginUpdated { message, plugin } => {
+                        Ok(CliOutput::success(format!(
+                            "{}\n{}",
+                            message,
+                            serde_json::to_string_pretty(&plugin)
+                                .map_err(|err| OberonError::Storage(err.to_string()))?
+                        )))
+                    }
+                    event => daemon_protocol_error(event),
+                }
+            }
+            CliCommand::PluginUnload { id } => {
+                ensure_daemon_running()?;
+                match daemon_client()?.send(&oberon4_core::DaemonCommand::UnloadPlugin { id })? {
+                    oberon4_core::DaemonEvent::PluginUpdated { message, plugin } => {
+                        Ok(CliOutput::success(format!(
+                            "{}\n{}",
+                            message,
+                            serde_json::to_string_pretty(&plugin)
+                                .map_err(|err| OberonError::Storage(err.to_string()))?
+                        )))
+                    }
+                    event => daemon_protocol_error(event),
+                }
+            }
+            CliCommand::PluginEnable { id } => {
+                ensure_daemon_running()?;
+                match daemon_client()?
+                    .send(&oberon4_core::DaemonCommand::SetPluginEnabled { id, enabled: true })?
+                {
+                    oberon4_core::DaemonEvent::PluginUpdated { message, plugin } => {
+                        Ok(CliOutput::success(format!(
+                            "{}\n{}",
+                            message,
+                            serde_json::to_string_pretty(&plugin)
+                                .map_err(|err| OberonError::Storage(err.to_string()))?
+                        )))
+                    }
+                    event => daemon_protocol_error(event),
+                }
+            }
+            CliCommand::PluginDisable { id } => {
+                ensure_daemon_running()?;
+                match daemon_client()?
+                    .send(&oberon4_core::DaemonCommand::SetPluginEnabled { id, enabled: false })?
+                {
+                    oberon4_core::DaemonEvent::PluginUpdated { message, plugin } => {
+                        Ok(CliOutput::success(format!(
+                            "{}\n{}",
+                            message,
+                            serde_json::to_string_pretty(&plugin)
+                                .map_err(|err| OberonError::Storage(err.to_string()))?
+                        )))
+                    }
+                    event => daemon_protocol_error(event),
                 }
             }
             CliCommand::AccountConnect { provider } => {
@@ -714,6 +800,79 @@ fn execute_via_daemon(command: CliCommand) -> Result<CliOutput, OberonError> {
                 }
             }
         }
+        CliCommand::PluginList => {
+            ensure_daemon_running()?;
+            match daemon_client()?.send(&oberon4_core::DaemonCommand::ListPlugins)? {
+                oberon4_core::DaemonEvent::PluginsListed { plugins } => {
+                    let plugins = serde_json::to_string_pretty(&plugins)
+                        .map_err(|err| OberonError::Storage(err.to_string()))?;
+                    Ok(CliOutput::success(plugins))
+                }
+                event => daemon_protocol_error(event),
+            }
+        }
+        CliCommand::PluginLoad { archive_path } => {
+            ensure_daemon_running()?;
+            match daemon_client()?
+                .send(&oberon4_core::DaemonCommand::LoadPluginArchive { archive_path })?
+            {
+                oberon4_core::DaemonEvent::PluginUpdated { message, plugin } => {
+                    Ok(CliOutput::success(format!(
+                        "{}\n{}",
+                        message,
+                        serde_json::to_string_pretty(&plugin)
+                            .map_err(|err| OberonError::Storage(err.to_string()))?
+                    )))
+                }
+                event => daemon_protocol_error(event),
+            }
+        }
+        CliCommand::PluginUnload { id } => {
+            ensure_daemon_running()?;
+            match daemon_client()?.send(&oberon4_core::DaemonCommand::UnloadPlugin { id })? {
+                oberon4_core::DaemonEvent::PluginUpdated { message, plugin } => {
+                    Ok(CliOutput::success(format!(
+                        "{}\n{}",
+                        message,
+                        serde_json::to_string_pretty(&plugin)
+                            .map_err(|err| OberonError::Storage(err.to_string()))?
+                    )))
+                }
+                event => daemon_protocol_error(event),
+            }
+        }
+        CliCommand::PluginEnable { id } => {
+            ensure_daemon_running()?;
+            match daemon_client()?
+                .send(&oberon4_core::DaemonCommand::SetPluginEnabled { id, enabled: true })?
+            {
+                oberon4_core::DaemonEvent::PluginUpdated { message, plugin } => {
+                    Ok(CliOutput::success(format!(
+                        "{}\n{}",
+                        message,
+                        serde_json::to_string_pretty(&plugin)
+                            .map_err(|err| OberonError::Storage(err.to_string()))?
+                    )))
+                }
+                event => daemon_protocol_error(event),
+            }
+        }
+        CliCommand::PluginDisable { id } => {
+            ensure_daemon_running()?;
+            match daemon_client()?
+                .send(&oberon4_core::DaemonCommand::SetPluginEnabled { id, enabled: false })?
+            {
+                oberon4_core::DaemonEvent::PluginUpdated { message, plugin } => {
+                    Ok(CliOutput::success(format!(
+                        "{}\n{}",
+                        message,
+                        serde_json::to_string_pretty(&plugin)
+                            .map_err(|err| OberonError::Storage(err.to_string()))?
+                    )))
+                }
+                event => daemon_protocol_error(event),
+            }
+        }
         CliCommand::AccountConnect { provider } => {
             ensure_daemon_running()?;
             match daemon_client()?
@@ -825,19 +984,38 @@ fn daemon_client() -> Result<DaemonIpcClient, OberonError> {
     Ok(DaemonIpcClient::new(oberon4_daemon::default_socket_path()))
 }
 
+const DAEMON_PROBE_DELAY: Duration = Duration::from_millis(50);
+const DAEMON_SHUTDOWN_PROBE_ATTEMPTS: usize = 100;
+const DAEMON_READY_PROBE_ATTEMPTS: usize = 240;
+
+fn daemon_is_reachable(client: &DaemonIpcClient) -> bool {
+    client.send(&oberon4_core::DaemonCommand::GetStatus).is_ok()
+}
+
+fn wait_for_daemon_reachability(
+    client: &DaemonIpcClient,
+    reachable: bool,
+    attempts: usize,
+) -> bool {
+    for _ in 0..attempts {
+        if daemon_is_reachable(client) == reachable {
+            return true;
+        }
+        thread::sleep(DAEMON_PROBE_DELAY);
+    }
+    daemon_is_reachable(client) == reachable
+}
+
 fn ensure_daemon_running() -> Result<(), OberonError> {
     let client = daemon_client()?;
-    if client.send(&oberon4_core::DaemonCommand::GetStatus).is_ok() {
+    if daemon_is_reachable(&client) {
         return Ok(());
     }
 
     spawn_daemon_process(client.socket_path().to_path_buf())?;
 
-    for _ in 0..40 {
-        if client.send(&oberon4_core::DaemonCommand::GetStatus).is_ok() {
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(50));
+    if wait_for_daemon_reachability(&client, true, DAEMON_READY_PROBE_ATTEMPTS) {
+        return Ok(());
     }
 
     Err(OberonError::Storage(
@@ -847,18 +1025,19 @@ fn ensure_daemon_running() -> Result<(), OberonError> {
 
 fn restart_daemon() -> Result<(), OberonError> {
     let client = daemon_client()?;
-    if client.send(&oberon4_core::DaemonCommand::GetStatus).is_ok() {
+    if daemon_is_reachable(&client) {
         let _ = client.send(&oberon4_core::DaemonCommand::Shutdown);
-        thread::sleep(Duration::from_millis(150));
+        if !wait_for_daemon_reachability(&client, false, DAEMON_SHUTDOWN_PROBE_ATTEMPTS) {
+            return Err(OberonError::Storage(
+                "daemon failed to stop before restart".to_string(),
+            ));
+        }
     }
 
     spawn_daemon_process(client.socket_path().to_path_buf())?;
 
-    for _ in 0..40 {
-        if client.send(&oberon4_core::DaemonCommand::GetStatus).is_ok() {
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(50));
+    if wait_for_daemon_reachability(&client, true, DAEMON_READY_PROBE_ATTEMPTS) {
+        return Ok(());
     }
 
     Err(OberonError::Storage(
@@ -1518,6 +1697,38 @@ pub fn parse_command(args: &[String]) -> Result<CliCommand, OberonError> {
                 "expected doctor [--json]".to_string(),
             )),
         },
+        "plugin" => match parts.next() {
+            Some("list") => Ok(CliCommand::PluginList),
+            Some("load") => {
+                let archive_path = parts.next().ok_or_else(|| {
+                    OberonError::Validation("missing plugin archive path".to_string())
+                })?;
+                Ok(CliCommand::PluginLoad {
+                    archive_path: archive_path.to_string(),
+                })
+            }
+            Some("unload") => {
+                let id = parts
+                    .next()
+                    .ok_or_else(|| OberonError::Validation("missing plugin id".to_string()))?;
+                Ok(CliCommand::PluginUnload { id: id.to_string() })
+            }
+            Some("enable") => {
+                let id = parts
+                    .next()
+                    .ok_or_else(|| OberonError::Validation("missing plugin id".to_string()))?;
+                Ok(CliCommand::PluginEnable { id: id.to_string() })
+            }
+            Some("disable") => {
+                let id = parts
+                    .next()
+                    .ok_or_else(|| OberonError::Validation("missing plugin id".to_string()))?;
+                Ok(CliCommand::PluginDisable { id: id.to_string() })
+            }
+            _ => Err(OberonError::Validation(
+                "expected plugin list|load|unload|enable|disable".to_string(),
+            )),
+        },
         "account" => match parts.next() {
             Some("connect") => Ok(CliCommand::AccountConnect {
                 provider: parse_provider_flag(parts.collect())?,
@@ -1840,6 +2051,33 @@ mod tests {
     fn parses_tui_fullscreen_command() {
         let command = parse_command(&["tui".into(), "--fullscreen".into()]).unwrap();
         assert_eq!(command, CliCommand::Tui { fullscreen: true });
+    }
+
+    #[test]
+    fn parses_plugin_management_commands() {
+        let list = parse_command(&["plugin".into(), "list".into()]).unwrap();
+        assert_eq!(list, CliCommand::PluginList);
+
+        let load = parse_command(&[
+            "plugin".into(),
+            "load".into(),
+            "/tmp/example.obplg.zip".into(),
+        ])
+        .unwrap();
+        assert_eq!(
+            load,
+            CliCommand::PluginLoad {
+                archive_path: "/tmp/example.obplg.zip".to_string(),
+            }
+        );
+
+        let unload = parse_command(&["plugin".into(), "unload".into(), "demo".into()]).unwrap();
+        assert_eq!(
+            unload,
+            CliCommand::PluginUnload {
+                id: "demo".to_string(),
+            }
+        );
     }
 
     #[test]
