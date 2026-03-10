@@ -311,6 +311,7 @@ enum AsyncUiEvent {
 
 #[derive(Debug)]
 enum OAuthUiEvent {
+    Started(String),
     Complete(String),
     Failed(OberonError),
 }
@@ -2638,6 +2639,9 @@ fn run_inline_terminal_loop(
 
         if let Some(pending) = pending_oauth.as_ref() {
             match pending.receiver.try_recv() {
+                Ok(OAuthUiEvent::Started(message)) => {
+                    shell.set_activity(ActivityState::Loading, message);
+                }
                 Ok(OAuthUiEvent::Complete(message)) => {
                     pending_oauth = None;
                     shell.refresh_runtime_data(app);
@@ -2864,6 +2868,9 @@ fn run_terminal_loop(
 
         if let Some(pending) = pending_oauth.as_ref() {
             match pending.receiver.try_recv() {
+                Ok(OAuthUiEvent::Started(message)) => {
+                    shell.set_activity(ActivityState::Loading, message);
+                }
                 Ok(OAuthUiEvent::Complete(message)) => {
                     pending_oauth = None;
                     shell.refresh_runtime_data(app);
@@ -5268,7 +5275,18 @@ fn start_async_oauth_connect(
                 Err(err) => return Err(err),
             };
 
-            open_browser(&start.url)?;
+            let browser_message = match open_browser(&start.url) {
+                Ok(()) => format!(
+                    "opening browser for {} login...",
+                    provider_name_for_oauth(provider)
+                ),
+                Err(_) => format!(
+                    "open this URL manually to continue {} login: {}",
+                    provider_name_for_oauth(provider),
+                    start.url
+                ),
+            };
+            let _ = sender.send(OAuthUiEvent::Started(browser_message));
             let callback = wait_for_oauth_callback(
                 &start.redirect_uri,
                 Duration::from_secs(300),
