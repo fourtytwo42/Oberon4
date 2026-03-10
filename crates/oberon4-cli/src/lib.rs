@@ -1,13 +1,16 @@
 use std::{
     collections::BTreeMap,
-    io::{self, Write},
+    io::{self, BufReader, Read, Write},
+    net::TcpListener,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
     time::Duration,
 };
 
-use oberon4_auth::{AccountRegistry, AnthropicOAuthAdapter, OpenAiOAuthAdapter};
+use oberon4_auth::{
+    AccountRegistry, AnthropicOAuthAdapter, GithubOAuthAdapter, OpenAiOAuthAdapter,
+};
 use oberon4_core::{
     AppConfig, ChatMessage, ChatProvider, ChatProviderKind, ChatRole, ChatToolCallDelta,
     DaemonCommand, DaemonEvent, FileSecretStore, InMemoryConfigStore, InMemorySecretStore,
@@ -107,6 +110,7 @@ pub struct CliApp {
     provider_client: OpenAiCompatibleClient<FakeTransport>,
     openai_oauth: OpenAiOAuthAdapter,
     anthropic_oauth: AnthropicOAuthAdapter,
+    github_oauth: Option<GithubOAuthAdapter>,
     accounts: AccountRegistry,
     secrets: InMemorySecretStore,
 }
@@ -180,6 +184,7 @@ impl Default for CliApp {
             provider_client: default_provider_client(),
             openai_oauth: OpenAiOAuthAdapter::default(),
             anthropic_oauth: AnthropicOAuthAdapter::default(),
+            github_oauth: Some(GithubOAuthAdapter::new()),
             accounts: AccountRegistry::default(),
             secrets: InMemorySecretStore::default(),
         }
@@ -446,6 +451,22 @@ impl CliApp {
                             expires_at_unix: 600,
                             account_id: "acct-local-cli".to_string(),
                             label: "Anthropic Local CLI".to_string(),
+                        };
+                        (start, bundle)
+                    }
+                    OAuthProviderKind::Github => {
+                        let adapter = self.github_oauth.as_ref().ok_or_else(|| {
+                            OberonError::Validation(
+                                "github oauth requires OBERON4_GITHUB_CLIENT_ID".to_string(),
+                            )
+                        })?;
+                        let (start, _) = adapter.start_connect_flow()?;
+                        let bundle = TokenBundle {
+                            access_token: "access-github-local-cli".to_string(),
+                            refresh_token: Some("refresh-github-local-cli".to_string()),
+                            expires_at_unix: 600,
+                            account_id: "acct-local-cli".to_string(),
+                            label: "GitHub Local CLI".to_string(),
                         };
                         (start, bundle)
                     }
@@ -878,7 +899,24 @@ fn execute_via_daemon(command: CliCommand) -> Result<CliOutput, OberonError> {
             match daemon_client()?
                 .send(&oberon4_core::DaemonCommand::ConnectAccount { provider })?
             {
-                oberon4_core::DaemonEvent::OAuthStarted { url, .. } => Ok(CliOutput::success(url)),
+                oberon4_core::DaemonEvent::OAuthStarted {
+                    flow_id,
+                    url,
+                    redirect_uri,
+                    ..
+                } => {
+                    open_browser(&url)?;
+                    let callback =
+                        wait_for_oauth_callback(&redirect_uri, Duration::from_secs(300))?;
+                    match daemon_client()?.send(
+                        &oberon4_core::DaemonCommand::CompleteOAuthConnect { flow_id, callback },
+                    )? {
+                        oberon4_core::DaemonEvent::Ack { message } => {
+                            Ok(CliOutput::success(message))
+                        }
+                        event => daemon_protocol_error(event),
+                    }
+                }
                 event => daemon_protocol_error(event),
             }
         }
@@ -1800,6 +1838,7 @@ fn parse_provider(value: &str) -> Result<OAuthProviderKind, OberonError> {
     match value {
         "openai" => Ok(OAuthProviderKind::OpenAi),
         "anthropic" => Ok(OAuthProviderKind::Anthropic),
+        "github" => Ok(OAuthProviderKind::Github),
         _ => Err(OberonError::Validation("unsupported provider".to_string())),
     }
 }
@@ -1808,6 +1847,176 @@ fn provider_name(provider: OAuthProviderKind) -> &'static str {
     match provider {
         OAuthProviderKind::OpenAi => "openai",
         OAuthProviderKind::Anthropic => "anthropic",
+        OAuthProviderKind::Github => "github",
+    }
+}
+
+fn open_browser(url: &str) -> Result<(), OberonError> {
+    let commands: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
+        &[("open", &[])]
+    } else if cfg!(target_os = "windows") {
+        &[("cmd", &["/C", "start"])]
+    } else {
+        &[("xdg-open", &[]), ("gio", &["open"])]
+    };
+
+    for (program, args) in commands {
+        let mut command = Command::new(program);
+        command.args(*args).arg(url);
+        if command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .is_ok()
+        {
+            return Ok(());
+        }
+    }
+
+    Err(OberonError::Storage(format!(
+        "failed to open browser automatically; open this URL manually: {url}"
+    )))
+}
+
+fn parse_redirect_uri(redirect_uri: &str) -> Result<(String, u16, String), OberonError> {
+    let without_scheme = redirect_uri
+        .strip_prefix("http://")
+        .or_else(|| redirect_uri.strip_prefix("https://"))
+        .ok_or_else(|| OberonError::Validation("oauth redirect_uri must be http(s)".to_string()))?;
+    let mut parts = without_scheme.splitn(2, '/');
+    let host_port = parts.next().unwrap_or_default();
+    let path = format!("/{}", parts.next().unwrap_or_default());
+    let mut host_port_parts = host_port.splitn(2, ':');
+    let host = host_port_parts.next().unwrap_or_default().to_string();
+    let port = host_port_parts
+        .next()
+        .unwrap_or("80")
+        .parse::<u16>()
+        .map_err(|err| OberonError::Validation(format!("invalid oauth callback port: {err}")))?;
+    Ok((host, port, path))
+}
+
+fn decode_query_component(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'+' => {
+                decoded.push(b' ');
+                index += 1;
+            }
+            b'%' if index + 2 < bytes.len() => {
+                let hex = &value[index + 1..index + 3];
+                if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                    decoded.push(byte);
+                    index += 3;
+                } else {
+                    decoded.push(bytes[index]);
+                    index += 1;
+                }
+            }
+            byte => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&decoded).to_string()
+}
+
+fn parse_callback_request(
+    request: &str,
+    expected_path: &str,
+) -> Result<oberon4_core::OAuthCallbackPayload, OberonError> {
+    let mut lines = request.lines();
+    let request_line = lines.next().ok_or_else(|| {
+        OberonError::Validation("oauth callback missing request line".to_string())
+    })?;
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or_default();
+    let target = parts.next().unwrap_or_default();
+    if method != "GET" {
+        return Err(OberonError::Validation(
+            "oauth callback must use GET".to_string(),
+        ));
+    }
+    let mut target_parts = target.splitn(2, '?');
+    let path = target_parts.next().unwrap_or_default();
+    if path != expected_path {
+        return Err(OberonError::Validation(format!(
+            "oauth callback path mismatch: expected {expected_path}, got {path}"
+        )));
+    }
+
+    let mut state = None;
+    let mut code = None;
+    let mut return_to = None;
+    if let Some(query) = target_parts.next() {
+        for pair in query.split('&') {
+            let mut kv = pair.splitn(2, '=');
+            let key = kv.next().unwrap_or_default();
+            let value = decode_query_component(kv.next().unwrap_or_default());
+            match key {
+                "state" => state = Some(value),
+                "code" => code = Some(value),
+                "return_to" => return_to = Some(value),
+                _ => {}
+            }
+        }
+    }
+
+    Ok(oberon4_core::OAuthCallbackPayload {
+        state: state.unwrap_or_default(),
+        code: code.unwrap_or_default(),
+        return_to,
+    })
+}
+
+fn wait_for_oauth_callback(
+    redirect_uri: &str,
+    timeout: Duration,
+) -> Result<oberon4_core::OAuthCallbackPayload, OberonError> {
+    let (host, port, expected_path) = parse_redirect_uri(redirect_uri)?;
+    let listener = TcpListener::bind((host.as_str(), port))
+        .map_err(|err| OberonError::Storage(format!("oauth callback listener failed: {err}")))?;
+    listener.set_nonblocking(true).map_err(|err| {
+        OberonError::Storage(format!("oauth callback nonblocking setup failed: {err}"))
+    })?;
+
+    let started = std::time::Instant::now();
+    loop {
+        if started.elapsed() > timeout {
+            return Err(OberonError::Validation(
+                "oauth callback timed out waiting for browser redirect".to_string(),
+            ));
+        }
+
+        match listener.accept() {
+            Ok((mut stream, _)) => {
+                let mut reader = BufReader::new(stream.try_clone().map_err(|err| {
+                    OberonError::Storage(format!("oauth callback clone failed: {err}"))
+                })?);
+                let mut request = String::new();
+                reader.read_to_string(&mut request).map_err(|err| {
+                    OberonError::Storage(format!("oauth callback read failed: {err}"))
+                })?;
+                let callback = parse_callback_request(&request, &expected_path)?;
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 40\r\n\r\nOAuth complete. You can return to Oberon4.")
+                    .map_err(|err| OberonError::Storage(format!("oauth callback response failed: {err}")))?;
+                return Ok(callback);
+            }
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(err) => {
+                return Err(OberonError::Storage(format!(
+                    "oauth callback accept failed: {err}"
+                )));
+            }
+        }
     }
 }
 
@@ -2306,6 +2515,7 @@ mod tests {
                 FakeChatProvider::default(),
                 FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
                 FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+                FakeOAuthProvider::new(OAuthProviderKind::Github),
                 AccountRegistry::default(),
                 InMemorySecretStore::default(),
                 InMemoryAccountMetadataStore::default(),
@@ -2475,6 +2685,7 @@ mod tests {
                 FakeChatProvider::default(),
                 FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
                 FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+                FakeOAuthProvider::new(OAuthProviderKind::Github),
                 AccountRegistry::default(),
                 InMemorySecretStore::default(),
                 InMemoryAccountMetadataStore::default(),

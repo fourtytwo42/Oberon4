@@ -79,6 +79,7 @@ fn end_to_end_cli_chat_and_tui_chat_path() {
             FakeChatProvider::default(),
             FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
             FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+            FakeOAuthProvider::new(OAuthProviderKind::Github),
             AccountRegistry::default(),
             InMemorySecretStore::default(),
             InMemoryAccountMetadataStore::default(),

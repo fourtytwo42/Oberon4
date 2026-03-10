@@ -60,6 +60,7 @@ pub enum TuiCommand {
     More,
     Config,
     Plugins,
+    GithubLogin,
     Model(String),
     Endpoint(String),
     System(String),
@@ -162,6 +163,7 @@ enum ScreenRoute {
     SettingsProvider,
     SettingsOpenAiOAuth,
     SettingsAnthropicOAuth,
+    SettingsGithubOAuth,
     SettingsModelForm,
     SettingsEndpointForm,
     SettingsSystemPromptForm,
@@ -243,7 +245,7 @@ impl Default for TuiLaunchOptions {
 const FOOTER_HEIGHT: u16 = 5;
 const CODE_BLOCK_BG: Color = Color::Rgb(28, 32, 40);
 const CODE_BLOCK_FG: Color = Color::Rgb(185, 220, 255);
-const COMMAND_CATALOG: [(&str, bool); 23] = [
+const COMMAND_CATALOG: [(&str, bool); 24] = [
     ("/help", false),
     ("/quit", false),
     ("/stop", false),
@@ -256,6 +258,7 @@ const COMMAND_CATALOG: [(&str, bool); 23] = [
     ("/more", false),
     ("/config", false),
     ("/plugins", false),
+    ("/github-login", false),
     ("/model", true),
     ("/endpoint", true),
     ("/system", true),
@@ -268,7 +271,7 @@ const COMMAND_CATALOG: [(&str, bool); 23] = [
     ("/plugin-enable", true),
     ("/plugin-disable", true),
 ];
-const EXTENDED_HELP: &str = "/help /quit /stop /new /status /sessions /settings /accounts /diagnostics /more /config /plugins /model <name> /endpoint <url> /system <text> /clear /save <name> /load <name> /fork <name> /plugin-load <archive> /plugin-unload <id> /plugin-enable <id> /plugin-disable <id>";
+const EXTENDED_HELP: &str = "/help /quit /stop /new /status /sessions /settings /accounts /diagnostics /more /config /plugins /github-login /model <name> /endpoint <url> /system <text> /clear /save <name> /load <name> /fork <name> /plugin-load <archive> /plugin-unload <id> /plugin-enable <id> /plugin-disable <id>";
 const SESSION_SIDEBAR_WIDTH: u16 = 18;
 const SESSION_VISIBLE_WIDTH: usize = 12;
 
@@ -469,6 +472,10 @@ impl TuiApp {
             | TuiCommand::PluginEnable(_)
             | TuiCommand::PluginDisable(_) => Ok(TuiResponse {
                 output: "plugin management requires daemon-backed TUI".to_string(),
+                should_quit: false,
+            }),
+            TuiCommand::GithubLogin => Ok(TuiResponse {
+                output: "github login requires daemon-backed TUI".to_string(),
                 should_quit: false,
             }),
             TuiCommand::Model(model) => {
@@ -707,6 +714,13 @@ impl DaemonBackedTuiApp {
                     }),
                     event => protocol_error(event),
                 }
+            }
+            TuiCommand::GithubLogin => {
+                let start = self.connect_account(OAuthProviderKind::Github)?;
+                Ok(TuiResponse {
+                    output: format!("open this URL to continue GitHub login:\n{}", start.url),
+                    should_quit: false,
+                })
             }
             TuiCommand::Model(model) => {
                 let mut config = self.load_config()?;
@@ -1589,6 +1603,7 @@ impl TuiShellState {
                 "Provider",
                 "OpenAI OAuth",
                 "Anthropic OAuth",
+                "GitHub OAuth",
                 "Model",
                 "Endpoint",
                 "System Prompt",
@@ -1596,7 +1611,9 @@ impl TuiShellState {
                 "Back to Chat",
             ],
             ScreenRoute::SettingsProvider => vec!["OpenAI-compatible", "Back"],
-            ScreenRoute::SettingsOpenAiOAuth | ScreenRoute::SettingsAnthropicOAuth => vec![
+            ScreenRoute::SettingsOpenAiOAuth
+            | ScreenRoute::SettingsAnthropicOAuth
+            | ScreenRoute::SettingsGithubOAuth => vec![
                 "Connect",
                 "List Accounts",
                 "Activate Account",
@@ -1607,7 +1624,14 @@ impl TuiShellState {
             ScreenRoute::SettingsRuntime => {
                 vec!["Request Timeout", "Max Retries", "Toggle Streaming", "Back"]
             }
-            ScreenRoute::AccountsRoot => vec!["OpenAI Accounts", "Anthropic Accounts", "Back"],
+            ScreenRoute::AccountsRoot => {
+                vec![
+                    "OpenAI Accounts",
+                    "Anthropic Accounts",
+                    "GitHub Accounts",
+                    "Back",
+                ]
+            }
             ScreenRoute::AccountDetail { .. } => {
                 vec!["Activate", "Disable", "Disconnect", "Back"]
             }
@@ -1996,23 +2020,24 @@ impl TuiShellState {
                 0 => self.push_route(ScreenRoute::SettingsProvider, FocusTarget::Menu),
                 1 => self.push_route(ScreenRoute::SettingsOpenAiOAuth, FocusTarget::Menu),
                 2 => self.push_route(ScreenRoute::SettingsAnthropicOAuth, FocusTarget::Menu),
-                3 => self.open_form(
+                3 => self.push_route(ScreenRoute::SettingsGithubOAuth, FocusTarget::Menu),
+                4 => self.open_form(
                     FormAction::Model,
                     self.config_snapshot.endpoint.model.clone(),
                     ScreenRoute::SettingsModelForm,
                 ),
-                4 => self.open_form(
+                5 => self.open_form(
                     FormAction::Endpoint,
                     self.config_snapshot.endpoint.base_url.clone(),
                     ScreenRoute::SettingsEndpointForm,
                 ),
-                5 => self.open_form(
+                6 => self.open_form(
                     FormAction::SystemPrompt,
                     String::new(),
                     ScreenRoute::SettingsSystemPromptForm,
                 ),
-                6 => self.push_route(ScreenRoute::SettingsRuntime, FocusTarget::Menu),
-                7 => self.set_workspace(Workspace::Chat),
+                7 => self.push_route(ScreenRoute::SettingsRuntime, FocusTarget::Menu),
+                8 => self.set_workspace(Workspace::Chat),
                 _ => {}
             },
             ScreenRoute::SettingsProvider => match self.menu_index {
@@ -2021,11 +2046,14 @@ impl TuiShellState {
                     self.screen_stack.pop();
                 }
             },
-            ScreenRoute::SettingsOpenAiOAuth | ScreenRoute::SettingsAnthropicOAuth => {
-                let provider = if matches!(self.current_route(), ScreenRoute::SettingsOpenAiOAuth) {
-                    OAuthProviderKind::OpenAi
-                } else {
-                    OAuthProviderKind::Anthropic
+            ScreenRoute::SettingsOpenAiOAuth
+            | ScreenRoute::SettingsAnthropicOAuth
+            | ScreenRoute::SettingsGithubOAuth => {
+                let provider = match self.current_route() {
+                    ScreenRoute::SettingsOpenAiOAuth => OAuthProviderKind::OpenAi,
+                    ScreenRoute::SettingsAnthropicOAuth => OAuthProviderKind::Anthropic,
+                    ScreenRoute::SettingsGithubOAuth => OAuthProviderKind::Github,
+                    _ => unreachable!(),
                 };
                 match self.menu_index {
                     0 => {
@@ -2111,6 +2139,13 @@ impl TuiShellState {
                 1 => self.push_route(
                     ScreenRoute::AccountList {
                         provider: OAuthProviderKind::Anthropic,
+                        action: AccountActionMode::Manage,
+                    },
+                    FocusTarget::List,
+                ),
+                2 => self.push_route(
+                    ScreenRoute::AccountList {
+                        provider: OAuthProviderKind::Github,
                         action: AccountActionMode::Manage,
                     },
                     FocusTarget::List,
@@ -2744,6 +2779,18 @@ fn run_inline_terminal_loop(
                     shell.apply_form(app)?;
                     print_inline_status(stdout, shell)?;
                     rerender_workspace = !matches!(shell.workspace, Workspace::Chat);
+                } else if matches!(
+                    parse_tui_command(shell.input.trim()),
+                    Ok(TuiCommand::GithubLogin)
+                ) {
+                    shell.set_activity(ActivityState::Loading, "starting github oauth flow");
+                    pending_oauth = Some(start_async_oauth_connect(
+                        app.client.socket_path().to_path_buf(),
+                        OAuthProviderKind::Github,
+                    )?);
+                    shell.input.clear();
+                    print_inline_status(stdout, shell)?;
+                    rerender_workspace = !matches!(shell.workspace, Workspace::Chat);
                 } else if shell.input.trim().starts_with('/')
                     && shell.input.trim() == shell.input.trim_end()
                     && !shell.input.contains(' ')
@@ -2975,6 +3022,17 @@ fn run_terminal_loop(
                             shell.activate_current_list_item(app)?;
                         } else if matches!(shell.focus, FocusTarget::Form) {
                             shell.apply_form(app)?;
+                        } else if matches!(
+                            parse_tui_command(shell.input.trim()),
+                            Ok(TuiCommand::GithubLogin)
+                        ) {
+                            shell
+                                .set_activity(ActivityState::Loading, "starting github oauth flow");
+                            pending_oauth = Some(start_async_oauth_connect(
+                                app.client.socket_path().to_path_buf(),
+                                OAuthProviderKind::Github,
+                            )?);
+                            shell.input.clear();
                         } else if shell.input.trim().starts_with('/')
                             && shell.input.trim() == shell.input.trim_end()
                             && !shell.input.contains(' ')
@@ -4103,12 +4161,14 @@ fn render_settings_workspace(frame: &mut Frame, area: Rect, shell: &TuiShellStat
         | ScreenRoute::SettingsProvider
         | ScreenRoute::SettingsOpenAiOAuth
         | ScreenRoute::SettingsAnthropicOAuth
+        | ScreenRoute::SettingsGithubOAuth
         | ScreenRoute::SettingsRuntime => {
             let title = match route {
                 ScreenRoute::SettingsRoot => "Settings",
                 ScreenRoute::SettingsProvider => "Provider",
                 ScreenRoute::SettingsOpenAiOAuth => "OpenAI OAuth",
                 ScreenRoute::SettingsAnthropicOAuth => "Anthropic OAuth",
+                ScreenRoute::SettingsGithubOAuth => "GitHub OAuth",
                 ScreenRoute::SettingsRuntime => "Runtime",
                 _ => unreachable!(),
             };
@@ -4224,6 +4284,7 @@ fn render_help_workspace(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
             Line::raw("/accounts    manage accounts"),
             Line::raw("/diagnostics show diagnostics"),
             Line::raw("/plugins     list installed plugins"),
+            Line::raw("/github-login connect GitHub account"),
             Line::raw("/more        extra tools"),
         ]))
         .block(Block::default().borders(Borders::ALL).title("Navigation"))
@@ -4529,6 +4590,7 @@ fn print_inline_workspace(
         | ScreenRoute::SettingsProvider
         | ScreenRoute::SettingsOpenAiOAuth
         | ScreenRoute::SettingsAnthropicOAuth
+        | ScreenRoute::SettingsGithubOAuth
         | ScreenRoute::SettingsRuntime
         | ScreenRoute::AccountsRoot
         | ScreenRoute::AccountDetail { .. } => {
@@ -4833,6 +4895,7 @@ pub fn parse_tui_command(input: &str) -> Result<TuiCommand, OberonError> {
         "/more" => Ok(TuiCommand::More),
         "/config" => Ok(TuiCommand::Config),
         "/plugins" => Ok(TuiCommand::Plugins),
+        "/github-login" => Ok(TuiCommand::GithubLogin),
         "/model" => require_argument(rest, "/model").map(TuiCommand::Model),
         "/endpoint" => require_argument(rest, "/endpoint").map(TuiCommand::Endpoint),
         "/system" => require_argument(rest, "/system").map(TuiCommand::System),
@@ -4866,6 +4929,7 @@ fn canonical_tui_command(command: &str) -> &str {
         "/more" | "/menu" => "/more",
         "/config" | "/cfg" | "/configuration" => "/config",
         "/plugins" | "/plugin" => "/plugins",
+        "/github-login" | "/gh-login" | "/github-auth" => "/github-login",
         "/model" | "/models" => "/model",
         "/endpoint" | "/endpiont" | "/url" => "/endpoint",
         "/system" | "/prompt" | "/sytem" => "/system",
@@ -4988,6 +5052,7 @@ fn provider_name_for_oauth(provider: OAuthProviderKind) -> &'static str {
     match provider {
         OAuthProviderKind::OpenAi => "OpenAI",
         OAuthProviderKind::Anthropic => "Anthropic",
+        OAuthProviderKind::Github => "GitHub",
     }
 }
 
@@ -5635,6 +5700,10 @@ mod tests {
         );
         assert_eq!(parse_tui_command("/plugins").unwrap(), TuiCommand::Plugins);
         assert_eq!(
+            parse_tui_command("/github-login").unwrap(),
+            TuiCommand::GithubLogin
+        );
+        assert_eq!(
             parse_tui_command("/plugin-load /tmp/example.obplg.zip").unwrap(),
             TuiCommand::PluginLoad("/tmp/example.obplg.zip".to_string())
         );
@@ -5837,6 +5906,7 @@ mod tests {
                 },
                 FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
                 FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+                FakeOAuthProvider::new(OAuthProviderKind::Github),
                 AccountRegistry::default(),
                 InMemorySecretStore::default(),
                 InMemoryAccountMetadataStore::default(),
@@ -6214,6 +6284,7 @@ mod tests {
                 },
                 FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
                 FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+                FakeOAuthProvider::new(OAuthProviderKind::Github),
                 AccountRegistry::default(),
                 InMemorySecretStore::default(),
                 InMemoryAccountMetadataStore::default(),
@@ -6258,6 +6329,7 @@ mod tests {
                 },
                 FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
                 FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+                FakeOAuthProvider::new(OAuthProviderKind::Github),
                 AccountRegistry::default(),
                 InMemorySecretStore::default(),
                 InMemoryAccountMetadataStore::default(),
@@ -6308,6 +6380,7 @@ mod tests {
                 },
                 FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
                 FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+                FakeOAuthProvider::new(OAuthProviderKind::Github),
                 AccountRegistry::default(),
                 InMemorySecretStore::default(),
                 InMemoryAccountMetadataStore::default(),
@@ -6383,6 +6456,7 @@ mod tests {
                 },
                 FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
                 FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+                FakeOAuthProvider::new(OAuthProviderKind::Github),
                 AccountRegistry::default(),
                 InMemorySecretStore::default(),
                 InMemoryAccountMetadataStore::default(),
@@ -6429,6 +6503,7 @@ mod tests {
                 },
                 FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
                 FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+                FakeOAuthProvider::new(OAuthProviderKind::Github),
                 AccountRegistry::default(),
                 InMemorySecretStore::default(),
                 InMemoryAccountMetadataStore::default(),
@@ -6477,6 +6552,7 @@ mod tests {
                 },
                 FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
                 FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+                FakeOAuthProvider::new(OAuthProviderKind::Github),
                 AccountRegistry::default(),
                 InMemorySecretStore::default(),
                 InMemoryAccountMetadataStore::default(),
@@ -6567,6 +6643,7 @@ mod tests {
                 },
                 FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
                 FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+                FakeOAuthProvider::new(OAuthProviderKind::Github),
                 AccountRegistry::default(),
                 InMemorySecretStore::default(),
                 InMemoryAccountMetadataStore::default(),

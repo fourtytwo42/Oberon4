@@ -16,7 +16,7 @@ pub trait StateStore {
     fn get(&self, key: &str) -> Result<String, OberonError>;
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct InMemorySecretStore {
     secrets: BTreeMap<String, String>,
 }

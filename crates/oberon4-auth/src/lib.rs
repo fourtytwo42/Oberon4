@@ -23,6 +23,11 @@ pub const ANTHROPIC_AUTHORIZE_URL: &str = "https://console.anthropic.com/v1/oaut
 pub const ANTHROPIC_TOKEN_URL: &str = "https://console.anthropic.com/v1/oauth/token";
 pub const ANTHROPIC_SCOPE: &str = "org:create_api_key user:profile user:inference";
 
+pub const GITHUB_CLIENT_ID_ENV: &str = "OBERON4_GITHUB_CLIENT_ID";
+pub const GITHUB_AUTHORIZE_URL: &str = "https://github.com/login/oauth/authorize";
+pub const GITHUB_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
+pub const GITHUB_SCOPE: &str = "repo read:user user:email";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OAuthProviderConfig {
     pub provider: OAuthProviderKind,
@@ -57,6 +62,23 @@ impl OAuthProviderConfig {
             scope: ANTHROPIC_SCOPE.to_string(),
             state_ttl: Duration::from_secs(600),
         }
+    }
+
+    pub fn github() -> Result<Self, OberonError> {
+        let client_id = std::env::var(GITHUB_CLIENT_ID_ENV).map_err(|_| {
+            OberonError::Validation(format!(
+                "github oauth requires {GITHUB_CLIENT_ID_ENV} to be set"
+            ))
+        })?;
+        Ok(Self {
+            provider: OAuthProviderKind::Github,
+            client_id,
+            authorize_url: GITHUB_AUTHORIZE_URL.to_string(),
+            token_url: GITHUB_TOKEN_URL.to_string(),
+            redirect_base: "http://localhost:1455".to_string(),
+            scope: GITHUB_SCOPE.to_string(),
+            state_ttl: Duration::from_secs(600),
+        })
     }
 }
 
@@ -109,6 +131,7 @@ impl OAuthTokenExchange for ReqwestOAuthTokenExchange {
 
         let response = client
             .post(&provider.token_url)
+            .header("Accept", "application/json")
             .form(&params)
             .send()
             .map_err(|err| OberonError::Storage(format!("oauth token request failed: {err}")))?;
@@ -507,6 +530,57 @@ impl Default for AnthropicOAuthAdapter {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct GithubOAuthAdapter {
+    inner: Option<OAuthFlowManager>,
+}
+
+impl GithubOAuthAdapter {
+    pub fn new() -> Self {
+        Self {
+            inner: OAuthProviderConfig::github()
+                .ok()
+                .map(OAuthFlowManager::new),
+        }
+    }
+
+    pub fn flow_manager(&self) -> Option<&OAuthFlowManager> {
+        self.inner.as_ref()
+    }
+}
+
+impl OAuthProvider for GithubOAuthAdapter {
+    fn provider_kind(&self) -> OAuthProviderKind {
+        OAuthProviderKind::Github
+    }
+
+    fn start_connect_flow(&self) -> Result<(OAuthStart, PendingOAuthFlow), OberonError> {
+        self.inner
+            .as_ref()
+            .ok_or_else(|| {
+                OberonError::Validation(format!(
+                    "github oauth requires {GITHUB_CLIENT_ID_ENV} to be set"
+                ))
+            })?
+            .start_flow("/auth/callback", None, now_unix())
+    }
+
+    fn exchange_callback(
+        &self,
+        flow: &PendingOAuthFlow,
+        callback: OAuthCallbackPayload,
+    ) -> Result<TokenBundle, OberonError> {
+        self.inner
+            .as_ref()
+            .ok_or_else(|| {
+                OberonError::Validation(format!(
+                    "github oauth requires {GITHUB_CLIENT_ID_ENV} to be set"
+                ))
+            })?
+            .complete_flow_bundle(flow, callback, &ReqwestOAuthTokenExchange, now_unix())
+    }
+}
+
 impl AnthropicOAuthAdapter {
     pub fn flow_manager(&self) -> &OAuthFlowManager {
         &self.inner
@@ -621,6 +695,7 @@ fn provider_name(provider: OAuthProviderKind) -> &'static str {
     match provider {
         OAuthProviderKind::OpenAi => "openai",
         OAuthProviderKind::Anthropic => "anthropic",
+        OAuthProviderKind::Github => "github",
     }
 }
 
@@ -628,6 +703,7 @@ fn provider_label(provider: OAuthProviderKind) -> &'static str {
     match provider {
         OAuthProviderKind::OpenAi => "OpenAI",
         OAuthProviderKind::Anthropic => "Anthropic",
+        OAuthProviderKind::Github => "GitHub",
     }
 }
 
@@ -637,6 +713,7 @@ fn provider_authorization_extras(provider: OAuthProviderKind) -> &'static str {
             "&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=pi"
         }
         OAuthProviderKind::Anthropic => "",
+        OAuthProviderKind::Github => "",
     }
 }
 
@@ -652,9 +729,9 @@ mod tests {
 
     use super::{
         AccountMetadataStore, AccountRegistry, AnthropicOAuthAdapter, FileAccountMetadataStore,
-        InMemoryAccountMetadataStore, OAuthCallbackPayload, OAuthFlowManager, OAuthProviderConfig,
-        OAuthTokenExchange, OpenAiOAuthAdapter, ReqwestOAuthTokenExchange, TokenBundle,
-        store_provider_token,
+        GithubOAuthAdapter, InMemoryAccountMetadataStore, OAuthCallbackPayload, OAuthFlowManager,
+        OAuthProviderConfig, OAuthTokenExchange, OpenAiOAuthAdapter, ReqwestOAuthTokenExchange,
+        TokenBundle, store_provider_token,
     };
     use oberon4_core::{InMemorySecretStore, OAuthProvider, OAuthProviderKind, SecretStore};
 
@@ -746,20 +823,59 @@ mod tests {
     }
 
     #[test]
-    fn openai_and_anthropic_adapters_report_correct_provider() {
+    fn github_flow_start_uses_github_urls() {
+        unsafe {
+            std::env::set_var(super::GITHUB_CLIENT_ID_ENV, "github-client-id");
+        }
+        let manager = OAuthFlowManager::new(OAuthProviderConfig::github().unwrap());
+        let (start, _) = manager.start_flow("/auth/callback", None, 75).unwrap();
+
+        assert_eq!(start.provider, OAuthProviderKind::Github);
+        assert!(
+            start
+                .authorization_url
+                .starts_with(super::GITHUB_AUTHORIZE_URL)
+        );
+        assert!(
+            start
+                .authorization_url
+                .contains("client_id=github-client-id")
+        );
+        assert!(start.authorization_url.contains("scope=repo%20read%3Auser"));
+        unsafe {
+            std::env::remove_var(super::GITHUB_CLIENT_ID_ENV);
+        }
+    }
+
+    #[test]
+    fn oauth_adapters_report_correct_provider() {
         let openai = OpenAiOAuthAdapter::default();
         let anthropic = AnthropicOAuthAdapter::default();
+        unsafe {
+            std::env::set_var(super::GITHUB_CLIENT_ID_ENV, "github-client-id");
+        }
+        let github = GithubOAuthAdapter::new();
 
         assert_eq!(openai.provider_kind(), OAuthProviderKind::OpenAi);
         assert_eq!(anthropic.provider_kind(), OAuthProviderKind::Anthropic);
+        assert_eq!(github.provider_kind(), OAuthProviderKind::Github);
         let (openai_start, _) = openai.start_connect_flow().unwrap();
         let (anthropic_start, _) = anthropic.start_connect_flow().unwrap();
+        let (github_start, _) = github.start_connect_flow().unwrap();
         assert!(openai_start.authorization_url.contains("auth.openai.com"));
         assert!(
             anthropic_start
                 .authorization_url
                 .contains("console.anthropic.com")
         );
+        assert!(
+            github_start
+                .authorization_url
+                .contains("github.com/login/oauth/authorize")
+        );
+        unsafe {
+            std::env::remove_var(super::GITHUB_CLIENT_ID_ENV);
+        }
     }
 
     #[test]

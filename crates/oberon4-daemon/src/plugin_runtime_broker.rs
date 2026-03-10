@@ -229,6 +229,9 @@ pub struct ServiceExecutionRequest<'a> {
     pub bearer_token: &'a str,
 }
 
+#[derive(Default)]
+pub struct ReqwestServiceTransport;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StubbedServiceResponse {
     pub status_code: u16,
@@ -278,6 +281,56 @@ impl ServiceTransport for InMemoryServiceTransport {
             response.headers.clone(),
             response.body.clone(),
         ))
+    }
+}
+
+impl ServiceTransport for ReqwestServiceTransport {
+    fn execute(
+        &self,
+        request: &ServiceExecutionRequest<'_>,
+    ) -> Result<(u16, Vec<HttpHeader>, serde_json::Value), OberonError> {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .map_err(|err| OberonError::Storage(format!("service client build failed: {err}")))?;
+        let url = format!("{}{}", request.base_url.trim_end_matches('/'), request.path);
+        let mut builder = client
+            .request(
+                reqwest::Method::from_bytes(request.method.as_bytes()).map_err(|err| {
+                    OberonError::Validation(format!("invalid service method: {err}"))
+                })?,
+                &url,
+            )
+            .bearer_auth(request.bearer_token)
+            .header("Accept", "application/json")
+            .header("User-Agent", "oberon4/0.1");
+        for header in request.headers {
+            builder = builder.header(&header.name, &header.value);
+        }
+        if let Some(body_json) = request.body_json {
+            builder = builder.json(body_json);
+        }
+        let response = builder
+            .send()
+            .map_err(|err| OberonError::Storage(format!("service request failed: {err}")))?;
+        let status = response.status().as_u16();
+        let headers = response
+            .headers()
+            .iter()
+            .map(|(name, value)| HttpHeader {
+                name: name.as_str().to_string(),
+                value: value.to_str().unwrap_or_default().to_string(),
+            })
+            .collect::<Vec<_>>();
+        let text = response
+            .text()
+            .map_err(|err| OberonError::Storage(format!("service response read failed: {err}")))?;
+        let body = if text.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({ "raw": text }))
+        };
+        Ok((status, headers, body))
     }
 }
 

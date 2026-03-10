@@ -101,12 +101,14 @@ impl OAuthProvider for FakeOAuthProvider {
         let provider_name = match self.kind {
             OAuthProviderKind::OpenAi => "openai",
             OAuthProviderKind::Anthropic => "anthropic",
+            OAuthProviderKind::Github => "github",
         };
         let flow_id = format!("{provider_name}-flow");
         let state = format!("{provider_name}-state");
         let redirect_uri = match self.kind {
             OAuthProviderKind::OpenAi => "http://localhost:1455/auth/callback".to_string(),
             OAuthProviderKind::Anthropic => "http://localhost:1455/callback".to_string(),
+            OAuthProviderKind::Github => "http://localhost:1455/auth/callback".to_string(),
         };
         Ok((
             OAuthStart {

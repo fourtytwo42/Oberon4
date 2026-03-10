@@ -21,6 +21,7 @@ pub enum ChatProviderKind {
 pub enum OAuthProviderKind {
     OpenAi,
     Anthropic,
+    Github,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

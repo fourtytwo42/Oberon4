@@ -34,8 +34,8 @@ pub use plugin_runtime::{
 pub use plugin_runtime_broker::{
     EncryptedLocalSecretBackend, InMemoryServiceTransport, LinuxSecretBackend, MacOsSecretBackend,
     NativeSecretBackendUnavailable, PluginRuntimeRedactor, PluginRuntimeSecretBroker,
-    PluginRuntimeServiceBroker, SecretBackend, SecretBinding, ServiceBinding, ServiceTransport,
-    WindowsSecretBackend,
+    PluginRuntimeServiceBroker, ReqwestServiceTransport, SecretBackend, SecretBinding,
+    ServiceBinding, ServiceTransport, WindowsSecretBackend,
 };
 pub use plugin_runtime_data::{PluginRuntimeArtifactBroker, PluginRuntimeWorkspaceBroker};
 pub use plugin_runtime_exec::ExecutionEngine;
@@ -244,11 +244,12 @@ struct CommandOutcome {
     should_shutdown: bool,
 }
 
-pub struct DaemonApp<C, S, P, OO, AO, SS, AS> {
+pub struct DaemonApp<C, S, P, OO, AO, GO, SS, AS> {
     runtime: DaemonRuntime<C, S>,
     chat_provider: P,
     openai_oauth: OO,
     anthropic_oauth: AO,
+    github_oauth: GO,
     accounts: AccountRegistry,
     pending_oauth_flows: BTreeMap<String, PendingOAuthFlow>,
     pending_approval_turns: BTreeMap<String, PendingApprovalTurn>,
@@ -270,6 +271,7 @@ impl Default
         >,
         oberon4_auth::OpenAiOAuthAdapter,
         oberon4_auth::AnthropicOAuthAdapter,
+        oberon4_auth::GithubOAuthAdapter,
         FileSecretStore,
         FileAccountMetadataStore,
     >
@@ -303,6 +305,7 @@ impl Default
             ProviderRouter::new(config.endpoint.provider, client, anthropic),
             oberon4_auth::OpenAiOAuthAdapter::default(),
             oberon4_auth::AnthropicOAuthAdapter::default(),
+            oberon4_auth::GithubOAuthAdapter::new(),
             accounts,
             FileSecretStore::default(),
             account_store,
@@ -310,14 +313,15 @@ impl Default
     }
 }
 
-impl<C, S, P, OO, AO, SS, AS> DaemonApp<C, S, P, OO, AO, SS, AS>
+impl<C, S, P, OO, AO, GO, SS, AS> DaemonApp<C, S, P, OO, AO, GO, SS, AS>
 where
     C: ConfigStore,
     S: SessionStore,
     P: ToolAwareChatProvider,
     OO: OAuthProvider,
     AO: OAuthProvider,
-    SS: SecretStore,
+    GO: OAuthProvider,
+    SS: SecretStore + Clone + Send + Sync + 'static,
     AS: AccountMetadataStore,
 {
     pub fn new(
@@ -325,6 +329,7 @@ where
         chat_provider: P,
         openai_oauth: OO,
         anthropic_oauth: AO,
+        github_oauth: GO,
         accounts: AccountRegistry,
         secrets: SS,
         account_store: AS,
@@ -334,6 +339,7 @@ where
             chat_provider,
             openai_oauth,
             anthropic_oauth,
+            github_oauth,
             accounts,
             pending_oauth_flows: BTreeMap::new(),
             pending_approval_turns: BTreeMap::new(),
@@ -464,7 +470,44 @@ where
             config.runtime.allowed_plugin_checksums.clone(),
             registry.all_registered_plugins(),
         );
-        PluginRuntimeHost::new(registry, policy)
+        let mut secret_bindings = Vec::new();
+        let mut service_bindings = Vec::new();
+        if let Some(account_id) = self.accounts.active_account_id(OAuthProviderKind::Github) {
+            secret_bindings.push(SecretBinding {
+                secret_handle: "sec_github".to_string(),
+                store_key: format!("oauth.github.{account_id}.access_token"),
+                secret_class: oberon4_core::SecretClass::OauthCredential,
+                allowed_operations: vec![oberon4_core::HandleOperation::Invoke],
+            });
+            service_bindings.push(ServiceBinding {
+                service_handle: "svc_github".to_string(),
+                service_name: "github.request".to_string(),
+                secret_handle: "sec_github".to_string(),
+                base_url: "https://api.github.com".to_string(),
+                allowed_operations: vec![oberon4_core::HandleOperation::Invoke],
+            });
+        }
+        let secret_broker = std::sync::Arc::new(PluginRuntimeSecretBroker::new(
+            EncryptedLocalSecretBackend::new(self.secrets.clone()),
+            secret_bindings.clone(),
+        ));
+        let service_secret_bindings = secret_bindings.clone();
+        let service_broker = std::sync::Arc::new(PluginRuntimeServiceBroker::new(
+            PluginRuntimeSecretBroker::new(
+                EncryptedLocalSecretBackend::new(self.secrets.clone()),
+                service_secret_bindings,
+            ),
+            service_bindings,
+            ReqwestServiceTransport,
+        ));
+        PluginRuntimeHost::with_runtime_services(
+            registry,
+            policy,
+            RuntimeBrokerFoundations::default(),
+            secret_broker,
+            service_broker,
+            std::sync::Arc::new(PluginRuntimeRedactor),
+        )
     }
 
     fn provider_tool_definitions() -> Vec<ProviderToolDefinition> {
@@ -845,17 +888,22 @@ where
         match provider {
             OAuthProviderKind::OpenAi => Ok(&self.openai_oauth),
             OAuthProviderKind::Anthropic => Ok(&self.anthropic_oauth),
+            OAuthProviderKind::Github => Ok(&self.github_oauth),
         }
     }
 
     fn active_account(&self) -> Option<String> {
-        [OAuthProviderKind::OpenAi, OAuthProviderKind::Anthropic]
-            .into_iter()
-            .find_map(|provider| {
-                self.accounts
-                    .active_account_id(provider)
-                    .map(str::to_string)
-            })
+        [
+            OAuthProviderKind::OpenAi,
+            OAuthProviderKind::Anthropic,
+            OAuthProviderKind::Github,
+        ]
+        .into_iter()
+        .find_map(|provider| {
+            self.accounts
+                .active_account_id(provider)
+                .map(str::to_string)
+        })
     }
 
     fn persist_accounts(&mut self) -> Result<(), OberonError> {
@@ -1224,9 +1272,9 @@ pub fn default_socket_path() -> PathBuf {
     std::env::temp_dir().join("oberon4-daemon.sock")
 }
 
-pub fn serve_unix_socket<C, S, P, OO, AO, SS, AS>(
+pub fn serve_unix_socket<C, S, P, OO, AO, GO, SS, AS>(
     socket_path: impl AsRef<Path>,
-    mut app: DaemonApp<C, S, P, OO, AO, SS, AS>,
+    mut app: DaemonApp<C, S, P, OO, AO, GO, SS, AS>,
 ) -> Result<(), OberonError>
 where
     C: ConfigStore,
@@ -1234,7 +1282,8 @@ where
     P: ToolAwareChatProvider,
     OO: OAuthProvider,
     AO: OAuthProvider,
-    SS: SecretStore,
+    GO: OAuthProvider,
+    SS: SecretStore + Clone + Send + Sync + 'static,
     AS: AccountMetadataStore,
 {
     let socket_path = socket_path.as_ref();
@@ -1264,9 +1313,9 @@ where
     Ok(())
 }
 
-fn handle_stream<C, S, P, OO, AO, SS, AS>(
+fn handle_stream<C, S, P, OO, AO, GO, SS, AS>(
     stream: &mut UnixStream,
-    app: &mut DaemonApp<C, S, P, OO, AO, SS, AS>,
+    app: &mut DaemonApp<C, S, P, OO, AO, GO, SS, AS>,
 ) -> Result<bool, OberonError>
 where
     C: ConfigStore,
@@ -1274,7 +1323,8 @@ where
     P: ToolAwareChatProvider,
     OO: OAuthProvider,
     AO: OAuthProvider,
-    SS: SecretStore,
+    GO: OAuthProvider,
+    SS: SecretStore + Clone + Send + Sync + 'static,
     AS: AccountMetadataStore,
 {
     let mut input = Vec::new();
@@ -1350,6 +1400,7 @@ fn provider_name(provider: OAuthProviderKind) -> &'static str {
     match provider {
         OAuthProviderKind::OpenAi => "openai",
         OAuthProviderKind::Anthropic => "anthropic",
+        OAuthProviderKind::Github => "github",
     }
 }
 
@@ -1494,6 +1545,7 @@ mod tests {
             FakeChatProvider::default(),
             FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
             FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+            FakeOAuthProvider::new(OAuthProviderKind::Github),
             AccountRegistry::default(),
             InMemorySecretStore::default(),
             InMemoryAccountMetadataStore::default(),
@@ -1654,6 +1706,7 @@ mod tests {
             provider,
             FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
             FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+            FakeOAuthProvider::new(OAuthProviderKind::Github),
             AccountRegistry::default(),
             InMemorySecretStore::default(),
             InMemoryAccountMetadataStore::default(),
@@ -1697,6 +1750,7 @@ mod tests {
             FakeChatProvider::default(),
             FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
             FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+            FakeOAuthProvider::new(OAuthProviderKind::Github),
             AccountRegistry::default(),
             InMemorySecretStore::default(),
             InMemoryAccountMetadataStore::default(),
@@ -1730,6 +1784,7 @@ mod tests {
                 FakeChatProvider::default(),
                 FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
                 FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+                FakeOAuthProvider::new(OAuthProviderKind::Github),
                 AccountRegistry::default(),
                 InMemorySecretStore::default(),
                 InMemoryAccountMetadataStore::default(),
@@ -1768,6 +1823,7 @@ mod tests {
             FakeChatProvider::default(),
             FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
             FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+            FakeOAuthProvider::new(OAuthProviderKind::Github),
             AccountRegistry::default(),
             InMemorySecretStore::default(),
             InMemoryAccountMetadataStore::default(),
@@ -1841,6 +1897,7 @@ mod tests {
             FakeChatProvider::default(),
             FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
             FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+            FakeOAuthProvider::new(OAuthProviderKind::Github),
             AccountRegistry::default(),
             FileSecretStore::new(&secret_path),
             FileAccountMetadataStore::new(&account_path),
@@ -1892,6 +1949,7 @@ mod tests {
             FakeChatProvider::default(),
             FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
             FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+            FakeOAuthProvider::new(OAuthProviderKind::Github),
             store.load_registry().unwrap(),
             FileSecretStore::new(&secret_path),
             store,
@@ -1934,6 +1992,7 @@ mod tests {
             provider,
             FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
             FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+            FakeOAuthProvider::new(OAuthProviderKind::Github),
             AccountRegistry::default(),
             secrets,
             InMemoryAccountMetadataStore::default(),
