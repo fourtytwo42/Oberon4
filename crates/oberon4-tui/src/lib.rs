@@ -28,8 +28,9 @@ use crossterm::{
 use oberon4_auth::AccountRegistry;
 use oberon4_core::{
     AppConfig, ChatMessage, ChatProvider, ChatRole, ChatToolCallDelta, InMemoryConfigStore,
-    InMemorySessionStore, OAuthProviderKind, OberonError, SavedSession, SessionId, SessionStore,
-    SessionSummary, StoredAccount, ToolError, ToolResult,
+    InMemorySessionStore, InstalledPluginKind, InstalledPluginStatus, OAuthProviderKind,
+    OberonError, SavedSession, SessionId, SessionStore, SessionSummary, StoredAccount, ToolError,
+    ToolResult,
 };
 use oberon4_daemon::{DaemonIpcClient, DaemonRuntime, LifecycleState};
 use oberon4_provider_openai::{FakeTransport, OpenAiCompatibleClient, RetryPolicy};
@@ -701,9 +702,7 @@ impl DaemonBackedTuiApp {
                     .send(&oberon4_core::DaemonCommand::ListPlugins)?
                 {
                     oberon4_core::DaemonEvent::PluginsListed { plugins } => Ok(TuiResponse {
-                        output: serde_json::to_string_pretty(&plugins).map_err(|err| {
-                            OberonError::Storage(format!("plugin list encode failed: {err}"))
-                        })?,
+                        output: format_installed_plugins(&plugins),
                         should_quit: false,
                     }),
                     event => protocol_error(event),
@@ -5482,6 +5481,56 @@ fn summarize_approval_payload(payload_json: &str) -> String {
     format!("{tool}.{command}: {action}")
 }
 
+fn format_plugin_kind(kind: &InstalledPluginKind) -> &'static str {
+    match kind {
+        InstalledPluginKind::OrdinaryPlugin => "plugin",
+        InstalledPluginKind::FirstPartyPackage => "package",
+    }
+}
+
+fn format_yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
+}
+
+fn format_installed_plugins(plugins: &[InstalledPluginStatus]) -> String {
+    if plugins.is_empty() {
+        return "no plugins installed".to_string();
+    }
+
+    plugins
+        .iter()
+        .map(|plugin| {
+            let mut lines = Vec::new();
+            lines.push(format!(
+                "{} [{}] v{}",
+                plugin.id,
+                format_plugin_kind(&plugin.kind),
+                plugin.version
+            ));
+            lines.push(format!(
+                "installed={} enabled={}",
+                format_yes_no(plugin.installed),
+                format_yes_no(plugin.enabled)
+            ));
+
+            if let Some(load_status) = plugin.load_status.as_deref() {
+                lines.push(format!("load={load_status}"));
+            }
+
+            if !plugin.reason_codes.is_empty() {
+                lines.push(format!("reasons: {}", plugin.reason_codes.join(", ")));
+            }
+
+            if let Some(last_error) = plugin.last_error.as_deref() {
+                lines.push(format!("error: {last_error}"));
+            }
+
+            lines.join("\n")
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 fn default_provider_client() -> OpenAiCompatibleClient<FakeTransport> {
     let mut client = OpenAiCompatibleClient::new(
         "https://api.openai.com",
@@ -5519,14 +5568,15 @@ mod tests {
         PendingSubmission, ScreenRoute, SessionMatchScore, TuiApp, TuiCommand, TuiShellState,
         UiLine, Workspace, build_transcript_rows, build_transcript_viewport,
         cancel_pending_submission, finalize_streamed_assistant, format_assistant_markdown,
-        handle_async_ui_event, handle_pending_local_command, handle_pending_timeout,
-        parse_callback_request, parse_tui_command, resolve_binary_launch_target,
-        session_match_score, start_async_submit, status_line, wait_for_oauth_callback,
+        format_installed_plugins, handle_async_ui_event, handle_pending_local_command,
+        handle_pending_timeout, parse_callback_request, parse_tui_command,
+        resolve_binary_launch_target, session_match_score, start_async_submit, status_line,
+        wait_for_oauth_callback,
     };
     use oberon4_auth::{AccountRegistry, InMemoryAccountMetadataStore};
     use oberon4_core::{
         AppConfig, ChatMessage, ChatRole, FakeChatProvider, FakeOAuthProvider, InMemorySecretStore,
-        OAuthProviderKind, SessionId, SessionSummary,
+        InstalledPluginKind, InstalledPluginStatus, OAuthProviderKind, SessionId, SessionSummary,
     };
     use oberon4_daemon::{DaemonApp, DaemonIpcClient, DaemonRuntime, serve_unix_socket};
     use ratatui::{
@@ -5628,6 +5678,58 @@ mod tests {
         assert!(status.output.contains("request_endpoint="));
         assert!(status.output.contains("oberon4_account="));
         assert!(config.output.contains("<redacted>"));
+    }
+
+    #[test]
+    fn format_installed_plugins_renders_empty_state() {
+        assert_eq!(format_installed_plugins(&[]), "no plugins installed");
+    }
+
+    #[test]
+    fn format_installed_plugins_renders_readable_entries() {
+        let rendered = format_installed_plugins(&[
+            InstalledPluginStatus {
+                id: "demo".to_string(),
+                version: "1.2.3".to_string(),
+                kind: InstalledPluginKind::OrdinaryPlugin,
+                host_trusted: false,
+                installed: true,
+                enabled: true,
+                archive_path: None,
+                archive_checksum: None,
+                config_path: None,
+                load_status: Some("ready".to_string()),
+                last_error: None,
+                reason_codes: Vec::new(),
+            },
+            InstalledPluginStatus {
+                id: "workspace-git".to_string(),
+                version: "0.1.0".to_string(),
+                kind: InstalledPluginKind::FirstPartyPackage,
+                host_trusted: true,
+                installed: false,
+                enabled: false,
+                archive_path: None,
+                archive_checksum: None,
+                config_path: None,
+                load_status: Some("missing-archive".to_string()),
+                last_error: Some("archive removed by operator".to_string()),
+                reason_codes: vec![
+                    "blocked_by_missing_archive".to_string(),
+                    "blocked_by_disable".to_string(),
+                ],
+            },
+        ]);
+
+        assert!(rendered.contains("demo [plugin] v1.2.3"));
+        assert!(rendered.contains("installed=yes enabled=yes"));
+        assert!(rendered.contains("load=ready"));
+        assert!(rendered.contains("workspace-git [package] v0.1.0"));
+        assert!(rendered.contains("installed=no enabled=no"));
+        assert!(rendered.contains("load=missing-archive"));
+        assert!(rendered.contains("reasons: blocked_by_missing_archive, blocked_by_disable"));
+        assert!(rendered.contains("error: archive removed by operator"));
+        assert!(!rendered.contains('{'));
     }
 
     #[test]
