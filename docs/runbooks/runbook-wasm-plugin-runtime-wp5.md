@@ -16,7 +16,7 @@
   - `env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' bash scripts/local-ci-gate.sh`
 
 Expected outcomes:
-- `workspace`, `git`, and `github` built-ins appear in runtime search/describe surfaces
+- installed and enabled first-party `workspace`, `git`, and `github` package tools appear in runtime search/describe surfaces
 - workspace reads, writes, and patches are revision-safe and brokered
 - `git.diff` produces artifact-backed diff metadata
 - `git.commit` and `git.push` work without a system `git` binary
@@ -29,7 +29,7 @@ Expected outcomes:
    - `cargo test -p oberon4-core`
    - `env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p oberon4-daemon`
 3. confirm:
-   - built-in versioned-package search results are absent
+   - versioned-package search results are absent when the package bundle is removed or disabled
    - `plugin_runtime_versioned` tests no longer pass because the package is gone
    - ordinary plugin runtime behavior remains intact
 

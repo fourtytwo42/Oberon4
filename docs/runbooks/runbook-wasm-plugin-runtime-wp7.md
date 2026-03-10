@@ -18,7 +18,7 @@
 Expected outcomes:
 - `dev` mode permits valid ordinary plugins without allowlist enforcement
 - `production` mode blocks ordinary plugins missing allowlist or conformance pass
-- built-in `workspace`, `git`, and `github` remain operational in production
+- installed and enabled host-trusted first-party `workspace`, `git`, and `github` packages remain operational in production
 - `tool_policy_inspect` reports admission, allowlist, conformance, and reason codes
 - threat-model regressions for secrets, workspace containment, and confused-deputy broker use remain covered by tests
 

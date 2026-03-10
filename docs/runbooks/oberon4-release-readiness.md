@@ -50,7 +50,7 @@ Status: active
 - [ ] `tool_search`, `tool_describe`, `tool_plan`, `tool_invoke`, and `tool_policy_inspect` are available through the daemon-backed provider loop
 - [ ] `dev` and `production` mode policy behavior verified against `tool_policy_inspect`
 - [ ] production allowlist and conformance gating verified for ordinary plugins
-- [ ] built-in workspace/git/github package remains available in `production`
+- [ ] installed and enabled first-party workspace/git/github package remains available in `production`
 - [ ] approval-required brokered flows pause and resume without exposing secrets or host paths
 - [ ] workspace containment, artifact offload, and redaction behavior verified in release candidate state
 

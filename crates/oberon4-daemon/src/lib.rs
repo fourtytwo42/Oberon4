@@ -402,7 +402,38 @@ where
         &self,
     ) -> Result<PluginRuntimeHost<FilePluginRegistry, StaticPolicyResolver>, OberonError> {
         let config = self.runtime.load_config()?;
-        let registry = FilePluginRegistry::load_from_roots(&[], HOST_RUNTIME_API_VERSION)?;
+        let plugin_roots = config
+            .runtime
+            .plugin_roots
+            .iter()
+            .map(PathBuf::from)
+            .collect::<Vec<_>>();
+        let package_roots = config
+            .runtime
+            .package_roots
+            .iter()
+            .map(PathBuf::from)
+            .collect::<Vec<_>>();
+        for root in &package_roots {
+            PluginRuntimeVersionedPackage::ensure_default_package_installed(root)?;
+        }
+        let registry = FilePluginRegistry::load_from_sources(
+            &plugin_roots,
+            &package_roots,
+            &config
+                .runtime
+                .enabled_packages
+                .iter()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            &config
+                .runtime
+                .disabled_packages
+                .iter()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            HOST_RUNTIME_API_VERSION,
+        )?;
         let policy = StaticPolicyResolver::for_registered_plugins(
             config.runtime.operating_mode.clone(),
             config.runtime.allowed_plugin_checksums.clone(),
@@ -1231,6 +1262,8 @@ fn provider_name(provider: OAuthProviderKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use std::{
+        cell::RefCell,
+        collections::VecDeque,
         fs, thread,
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
@@ -1244,10 +1277,12 @@ mod tests {
         InMemoryAccountMetadataStore,
     };
     use oberon4_core::{
-        AppConfig, ChatMessage, ChatProviderKind, ChatRole, DaemonCommand, DaemonEvent,
-        FakeChatProvider, FakeOAuthProvider, FileConfigStore, FileSecretStore, FileSessionStore,
-        InMemorySecretStore, OAuthCallbackPayload, OAuthProviderKind, OberonError, SavedSession,
-        SecretStore, SessionId, SessionSummary,
+        AppConfig, ChatMessage, ChatProviderKind, ChatRole, ChatStreamEvent, ChatToolCall,
+        DaemonCommand, DaemonEvent, FakeChatProvider, FakeOAuthProvider, FileConfigStore,
+        FileSecretStore, FileSessionStore, InMemorySecretStore, OAuthCallbackPayload,
+        OAuthProviderKind, OberonError, ProviderCapabilityMatrix, ProviderFinishState,
+        ProviderToolDefinition, SavedSession, SecretStore, SessionId, SessionSummary,
+        ToolAwareChatProvider, ToolAwareProviderResponse,
     };
     use oberon4_provider_openai::{FakeTransport, OpenAiCompatibleClient, RetryPolicy};
 
@@ -1257,6 +1292,52 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("oberon4-daemon-{name}-{nonce}"))
+    }
+
+    #[derive(Debug)]
+    struct ScriptedToolProvider {
+        responses: RefCell<VecDeque<ToolAwareProviderResponse>>,
+    }
+
+    impl ScriptedToolProvider {
+        fn new(responses: Vec<ToolAwareProviderResponse>) -> Self {
+            Self {
+                responses: RefCell::new(responses.into()),
+            }
+        }
+    }
+
+    impl ToolAwareChatProvider for ScriptedToolProvider {
+        fn stream_tool_aware_message(
+            &self,
+            _endpoint: &str,
+            _model: &str,
+            _messages: &[ChatMessage],
+            _tools: &[ProviderToolDefinition],
+            _on_event: &mut dyn FnMut(ChatStreamEvent) -> Result<(), OberonError>,
+        ) -> Result<ToolAwareProviderResponse, OberonError> {
+            self.responses
+                .borrow_mut()
+                .pop_front()
+                .ok_or_else(|| OberonError::Validation("scripted provider exhausted".to_string()))
+        }
+
+        fn provider_capabilities(&self) -> ProviderCapabilityMatrix {
+            ProviderCapabilityMatrix {
+                tool_definitions: true,
+                non_streaming_tool_calls: true,
+                streaming_tool_calls: true,
+                partial_argument_deltas: true,
+                mixed_text_and_tool_responses: true,
+                parallel_tool_calls: false,
+                schema_cleaning_required: false,
+                delegated_pending_support: false,
+            }
+        }
+
+        fn endpoint_health(&self, _endpoint: &str, _model: &str) -> Result<(), OberonError> {
+            Ok(())
+        }
     }
 
     #[test]
@@ -1404,6 +1485,115 @@ mod tests {
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[test]
+    fn host_tool_loop_does_not_reroute_tool_search_as_plugin_lookup() {
+        let provider = ScriptedToolProvider::new(vec![
+            ToolAwareProviderResponse {
+                message: ChatMessage {
+                    role: ChatRole::Assistant,
+                    content: String::new(),
+                    tool_call_id: None,
+                    tool_calls: vec![ChatToolCall {
+                        id: "call_search".to_string(),
+                        name: "tool_search".to_string(),
+                        arguments: r#"{"query":"tools","limit":5}"#.to_string(),
+                    }],
+                },
+                finish_state: ProviderFinishState::ToolCallRequested,
+            },
+            ToolAwareProviderResponse {
+                message: ChatMessage {
+                    role: ChatRole::Assistant,
+                    content: String::new(),
+                    tool_call_id: None,
+                    tool_calls: vec![ChatToolCall {
+                        id: "call_describe".to_string(),
+                        name: "tool_describe".to_string(),
+                        arguments: r#"{"tool":"tool_search","command":"tool_search"}"#.to_string(),
+                    }],
+                },
+                finish_state: ProviderFinishState::ToolCallRequested,
+            },
+            ToolAwareProviderResponse {
+                message: ChatMessage {
+                    role: ChatRole::Assistant,
+                    content: String::new(),
+                    tool_call_id: None,
+                    tool_calls: vec![ChatToolCall {
+                        id: "call_plan".to_string(),
+                        name: "tool_plan".to_string(),
+                        arguments: r#"{"tool":"github","command":"auth_status","input":{}}"#
+                            .to_string(),
+                    }],
+                },
+                finish_state: ProviderFinishState::ToolCallRequested,
+            },
+            ToolAwareProviderResponse {
+                message: ChatMessage {
+                    role: ChatRole::Assistant,
+                    content: String::new(),
+                    tool_call_id: None,
+                    tool_calls: vec![ChatToolCall {
+                        id: "call_invoke".to_string(),
+                        name: "tool_invoke".to_string(),
+                        arguments: r#"{"tool":"github","command":"auth_status","input":{}}"#
+                            .to_string(),
+                    }],
+                },
+                finish_state: ProviderFinishState::ToolCallRequested,
+            },
+            ToolAwareProviderResponse {
+                message: ChatMessage {
+                    role: ChatRole::Assistant,
+                    content: "done".to_string(),
+                    tool_call_id: None,
+                    tool_calls: Vec::new(),
+                },
+                finish_state: ProviderFinishState::ResponseComplete,
+            },
+        ]);
+
+        let mut app = DaemonApp::new(
+            DaemonRuntime::default(),
+            provider,
+            FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
+            FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+            AccountRegistry::default(),
+            InMemorySecretStore::default(),
+            InMemoryAccountMetadataStore::default(),
+        );
+        let _ = app.start().unwrap();
+
+        let mut events = Vec::new();
+        app.handle_chat_stream(
+            vec![ChatMessage {
+                role: ChatRole::User,
+                content: "what tools do you have?".to_string(),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+            }],
+            &mut |event| {
+                events.push(event);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            DaemonEvent::Error { message }
+            if message.contains("plugin:tool_search")
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            DaemonEvent::ToolResult { result } if result.tool == "tool_search"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            DaemonEvent::ChatComplete { message } if message.content == "done"
+        )));
     }
 
     #[test]
@@ -1673,6 +1863,10 @@ mod tests {
                         stream_responses: true,
                         operating_mode: oberon4_core::OperatingMode::Dev,
                         allowed_plugin_checksums: Vec::new(),
+                        plugin_roots: oberon4_core::RuntimeConfig::default().plugin_roots,
+                        package_roots: oberon4_core::RuntimeConfig::default().package_roots,
+                        enabled_packages: Vec::new(),
+                        disabled_packages: Vec::new(),
                     },
                 },
             })

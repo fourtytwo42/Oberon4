@@ -33,6 +33,9 @@ Recommended tiering:
 Packaging rule:
 - users should be able to install Oberon, add the package, and use it without compiling local code or installing a separate git toolchain
 - the preferred delivery model is prebuilt plugin artifacts plus host runtime support
+- the initial Oberon package-management model is `directory + config`:
+  - install or remove by adding or removing package files under configured package roots
+  - enable or disable with runtime config
 - git logic may be embedded in the plugin artifact, but trust boundaries remain host-managed
 
 ## 3. Goals

@@ -21,7 +21,7 @@ use oberon4_core::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::plugin_runtime::{HOST_RUNTIME_API_VERSION, RegisteredPlugin};
+use crate::plugin_runtime::{HOST_RUNTIME_API_VERSION, RegisteredPlugin, RegisteredToolSource};
 use crate::plugin_runtime_data::{PluginRuntimeWorkspaceBroker, hex_name};
 
 const DEFAULT_GITHUB_SERVICE_HANDLE: &str = "svc_github";
@@ -83,6 +83,14 @@ pub struct PluginRuntimeVersionedPackage {
 }
 
 impl PluginRuntimeVersionedPackage {
+    pub fn package_id() -> &'static str {
+        "versioned-workspace"
+    }
+
+    pub fn tool_ids() -> &'static [&'static str] {
+        &["workspace", "git", "github"]
+    }
+
     pub fn new(
         state_root: impl Into<PathBuf>,
         workspace_broker: Arc<PluginRuntimeWorkspaceBroker>,
@@ -110,6 +118,10 @@ impl PluginRuntimeVersionedPackage {
                 wasm_path: PathBuf::from("<builtin:workspace>"),
                 manifest: workspace_manifest(),
                 tool_tier: ToolTier::BrokeredPrivileged,
+                source_kind: RegisteredToolSource::FirstPartyPackage,
+                package_id: Some(Self::package_id().to_string()),
+                host_trusted: true,
+                enabled: true,
                 manifest_validation: ManifestValidationResult {
                     valid: true,
                     issues: Vec::new(),
@@ -122,6 +134,10 @@ impl PluginRuntimeVersionedPackage {
                 wasm_path: PathBuf::from("<builtin:git>"),
                 manifest: git_manifest(),
                 tool_tier: ToolTier::BrokeredPrivileged,
+                source_kind: RegisteredToolSource::FirstPartyPackage,
+                package_id: Some(Self::package_id().to_string()),
+                host_trusted: true,
+                enabled: true,
                 manifest_validation: ManifestValidationResult {
                     valid: true,
                     issues: Vec::new(),
@@ -134,6 +150,10 @@ impl PluginRuntimeVersionedPackage {
                 wasm_path: PathBuf::from("<builtin:github>"),
                 manifest: github_manifest(),
                 tool_tier: ToolTier::BrokeredPrivileged,
+                source_kind: RegisteredToolSource::FirstPartyPackage,
+                package_id: Some(Self::package_id().to_string()),
+                host_trusted: true,
+                enabled: true,
                 manifest_validation: ManifestValidationResult {
                     valid: true,
                     issues: Vec::new(),
@@ -146,6 +166,57 @@ impl PluginRuntimeVersionedPackage {
 
     pub fn is_builtin_tool(tool: &str) -> bool {
         matches!(tool, "workspace" | "git" | "github")
+    }
+
+    pub fn ensure_default_package_installed(package_root: &Path) -> Result<(), OberonError> {
+        let bootstrap_marker = oberon4_core::default_data_dir()
+            .join("plugin-runtime")
+            .join("first-party-package-bootstrap.marker");
+        if bootstrap_marker.exists() {
+            return Ok(());
+        }
+
+        Self::materialize_package_bundle(package_root)?;
+
+        if let Some(parent) = bootstrap_marker.parent() {
+            fs::create_dir_all(parent).map_err(|err| {
+                OberonError::Storage(format!("bootstrap marker dir create failed: {err}"))
+            })?;
+        }
+        fs::write(&bootstrap_marker, b"versioned-workspace-seeded")
+            .map_err(|err| OberonError::Storage(format!("bootstrap marker write failed: {err}")))?;
+        Ok(())
+    }
+
+    pub fn materialize_package_bundle(package_root: &Path) -> Result<(), OberonError> {
+        let package_dir = package_root.join(Self::package_id());
+        fs::create_dir_all(package_dir.join("tools"))
+            .map_err(|err| OberonError::Storage(format!("package root create failed: {err}")))?;
+
+        let package_manifest = serde_json::json!({
+            "id": Self::package_id(),
+            "version": "0.1.0",
+            "displayName": "Versioned Workspace Package",
+            "description": "First-party brokered workspace, git, and github tools.",
+            "tools": [
+                {"tool":"workspace","manifestPath":"tools/workspace.plugin.json"},
+                {"tool":"git","manifestPath":"tools/git.plugin.json"},
+                {"tool":"github","manifestPath":"tools/github.plugin.json"}
+            ]
+        });
+
+        fs::write(
+            package_dir.join("package.json"),
+            serde_json::to_vec_pretty(&package_manifest).map_err(|err| {
+                OberonError::Storage(format!("package manifest encode failed: {err}"))
+            })?,
+        )
+        .map_err(|err| OberonError::Storage(format!("package manifest write failed: {err}")))?;
+
+        write_package_tool_manifest(&package_dir, "workspace.plugin.json", &workspace_manifest())?;
+        write_package_tool_manifest(&package_dir, "git.plugin.json", &git_manifest())?;
+        write_package_tool_manifest(&package_dir, "github.plugin.json", &github_manifest())?;
+        Ok(())
     }
 
     pub fn plan(
@@ -1408,6 +1479,19 @@ fn workspace_manifest() -> PluginManifest {
             network_policy: None,
         }),
     }
+}
+
+fn write_package_tool_manifest(
+    package_dir: &Path,
+    file_name: &str,
+    manifest: &PluginManifest,
+) -> Result<(), OberonError> {
+    fs::write(
+        package_dir.join("tools").join(file_name),
+        serde_json::to_vec_pretty(manifest)
+            .map_err(|err| OberonError::Storage(format!("tool manifest encode failed: {err}")))?,
+    )
+    .map_err(|err| OberonError::Storage(format!("tool manifest write failed: {err}")))
 }
 
 fn git_manifest() -> PluginManifest {

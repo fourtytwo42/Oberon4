@@ -5,6 +5,8 @@ use std::{
     sync::Arc,
 };
 
+use serde::Deserialize;
+
 use oberon4_core::{
     AllowlistStatus, ApprovalExpectation, ApprovalRequestPayload, ApprovalResourceLimits,
     ArtifactRetentionPolicy, BrokeredServiceResult, CapabilityManifest, ConformanceStatus,
@@ -79,17 +81,42 @@ pub struct RegisteredPlugin {
     pub wasm_path: PathBuf,
     pub manifest: PluginManifest,
     pub tool_tier: ToolTier,
+    pub source_kind: RegisteredToolSource,
+    pub package_id: Option<String>,
+    pub host_trusted: bool,
+    pub enabled: bool,
     pub manifest_validation: ManifestValidationResult,
     pub conformance_status: ConformanceStatus,
     pub conformance_issues: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegisteredToolSource {
+    OrdinaryPlugin,
+    FirstPartyPackage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolAvailabilityMetadata {
+    pub tool: String,
+    pub tool_tier: ToolTier,
+    pub source_kind: Option<RegisteredToolSource>,
+    pub package_id: Option<String>,
+    pub installed: bool,
+    pub enabled: bool,
+    pub host_trusted: bool,
+    pub reason_codes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginAdmissionMetadata {
     pub is_builtin: bool,
+    pub is_host_trusted: bool,
     pub allowlist_status: AllowlistStatus,
     pub conformance_status: ConformanceStatus,
     pub production_eligible: bool,
+    pub package_installed: Option<bool>,
+    pub package_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,6 +136,7 @@ pub struct FilePluginRegistry {
     runtime_api_version: String,
     plugins: BTreeMap<String, RegisteredPlugin>,
     index: Vec<IndexedCommand>,
+    tool_availability: BTreeMap<String, ToolAvailabilityMetadata>,
 }
 
 impl FilePluginRegistry {
@@ -116,19 +144,61 @@ impl FilePluginRegistry {
         plugin_roots: &[PathBuf],
         runtime_api_version: &str,
     ) -> Result<Self, OberonError> {
+        Self::load_from_sources(
+            plugin_roots,
+            &[],
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            runtime_api_version,
+        )
+    }
+
+    pub fn load_from_sources(
+        plugin_roots: &[PathBuf],
+        package_roots: &[PathBuf],
+        enabled_packages: &BTreeSet<String>,
+        disabled_packages: &BTreeSet<String>,
+        runtime_api_version: &str,
+    ) -> Result<Self, OberonError> {
         let mut plugins = BTreeMap::new();
         let mut index = Vec::new();
+        let mut tool_availability = BTreeMap::new();
         let conformance_engine = ExecutionEngine::new(RuntimeBrokerFoundations::default())?;
 
-        for registered in PluginRuntimeVersionedPackage::registered_plugins() {
-            insert_registered_plugin(
+        if package_roots.is_empty() {
+            for registered in PluginRuntimeVersionedPackage::registered_plugins() {
+                insert_registered_plugin(
+                    &mut plugins,
+                    &mut index,
+                    &mut tool_availability,
+                    registered,
+                    runtime_api_version,
+                    false,
+                    Some(&conformance_engine),
+                )?;
+            }
+        }
+
+        for root in package_roots {
+            discover_first_party_packages(
+                root,
                 &mut plugins,
                 &mut index,
-                registered,
+                &mut tool_availability,
+                enabled_packages,
+                disabled_packages,
                 runtime_api_version,
-                false,
-                Some(&conformance_engine),
+                &conformance_engine,
             )?;
+        }
+
+        for package_id in enabled_packages {
+            if !tool_availability
+                .values()
+                .any(|metadata| metadata.package_id.as_deref() == Some(package_id.as_str()))
+            {
+                register_missing_first_party_package(package_id, &mut tool_availability);
+            }
         }
 
         for root in plugin_roots {
@@ -145,11 +215,16 @@ impl FilePluginRegistry {
                 insert_registered_plugin(
                     &mut plugins,
                     &mut index,
+                    &mut tool_availability,
                     RegisteredPlugin {
                         manifest_path,
                         wasm_path,
                         manifest,
                         tool_tier: ToolTier::OrdinaryPlugin,
+                        source_kind: RegisteredToolSource::OrdinaryPlugin,
+                        package_id: None,
+                        host_trusted: false,
+                        enabled: true,
                         manifest_validation: ManifestValidationResult {
                             valid: true,
                             issues: Vec::new(),
@@ -168,6 +243,7 @@ impl FilePluginRegistry {
             runtime_api_version: runtime_api_version.to_string(),
             plugins,
             index,
+            tool_availability,
         })
     }
 
@@ -180,10 +256,153 @@ impl FilePluginRegistry {
     pub fn all_registered_plugins(&self) -> Vec<RegisteredPlugin> {
         self.plugins.values().cloned().collect()
     }
+
+    pub fn tool_availability(&self, tool: &str) -> Option<ToolAvailabilityMetadata> {
+        self.tool_availability.get(tool).cloned()
+    }
+
+    pub fn runtime_api_version(&self) -> &str {
+        &self.runtime_api_version
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct FirstPartyPackageManifest {
+    pub id: String,
+    pub version: String,
+    #[serde(rename = "displayName")]
+    pub display_name: String,
+    pub description: String,
+    pub tools: Vec<FirstPartyPackageToolManifest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct FirstPartyPackageToolManifest {
+    pub tool: String,
+    #[serde(rename = "manifestPath")]
+    pub manifest_path: String,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn discover_first_party_packages(
+    root: &Path,
+    plugins: &mut BTreeMap<String, RegisteredPlugin>,
+    index: &mut Vec<IndexedCommand>,
+    tool_availability: &mut BTreeMap<String, ToolAvailabilityMetadata>,
+    enabled_packages: &BTreeSet<String>,
+    disabled_packages: &BTreeSet<String>,
+    runtime_api_version: &str,
+    conformance_engine: &ExecutionEngine,
+) -> Result<(), OberonError> {
+    for package_manifest_path in discover_package_manifest_paths(root)? {
+        let package = load_package_manifest(&package_manifest_path)?;
+        let package_enabled = (enabled_packages.is_empty()
+            || enabled_packages.contains(&package.id))
+            && !disabled_packages.contains(&package.id);
+        if !package_enabled {
+            register_package_tool_state(
+                &package,
+                tool_availability,
+                true,
+                false,
+                vec!["blocked_by_disable".to_string()],
+            );
+            continue;
+        }
+
+        let package_dir = package_manifest_path
+            .parent()
+            .ok_or_else(|| {
+                OberonError::ManifestValidation(format!(
+                    "{}: package manifest has no parent directory",
+                    package_manifest_path.display()
+                ))
+            })?
+            .to_path_buf();
+
+        for tool in &package.tools {
+            let manifest_path = package_dir.join(&tool.manifest_path);
+            let manifest = load_manifest(&manifest_path)?;
+            insert_registered_plugin(
+                plugins,
+                index,
+                tool_availability,
+                RegisteredPlugin {
+                    manifest_path: manifest_path.clone(),
+                    wasm_path: package_manifest_path.clone(),
+                    manifest,
+                    tool_tier: ToolTier::BrokeredPrivileged,
+                    source_kind: RegisteredToolSource::FirstPartyPackage,
+                    package_id: Some(package.id.clone()),
+                    host_trusted: true,
+                    enabled: true,
+                    manifest_validation: ManifestValidationResult {
+                        valid: true,
+                        issues: Vec::new(),
+                    },
+                    conformance_status: ConformanceStatus::Passed,
+                    conformance_issues: Vec::new(),
+                },
+                runtime_api_version,
+                false,
+                Some(conformance_engine),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn register_missing_first_party_package(
+    package_id: &str,
+    tool_availability: &mut BTreeMap<String, ToolAvailabilityMetadata>,
+) {
+    if package_id != PluginRuntimeVersionedPackage::package_id() {
+        return;
+    }
+    for tool in PluginRuntimeVersionedPackage::tool_ids() {
+        tool_availability.insert(
+            tool.to_string(),
+            ToolAvailabilityMetadata {
+                tool: tool.to_string(),
+                tool_tier: ToolTier::BrokeredPrivileged,
+                source_kind: Some(RegisteredToolSource::FirstPartyPackage),
+                package_id: Some(package_id.to_string()),
+                installed: false,
+                enabled: true,
+                host_trusted: true,
+                reason_codes: vec!["blocked_by_missing_package".to_string()],
+            },
+        );
+    }
+}
+
+fn register_package_tool_state(
+    package: &FirstPartyPackageManifest,
+    tool_availability: &mut BTreeMap<String, ToolAvailabilityMetadata>,
+    installed: bool,
+    enabled: bool,
+    reason_codes: Vec<String>,
+) {
+    for tool in &package.tools {
+        tool_availability.insert(
+            tool.tool.clone(),
+            ToolAvailabilityMetadata {
+                tool: tool.tool.clone(),
+                tool_tier: ToolTier::BrokeredPrivileged,
+                source_kind: Some(RegisteredToolSource::FirstPartyPackage),
+                package_id: Some(package.id.clone()),
+                installed,
+                enabled,
+                host_trusted: true,
+                reason_codes: reason_codes.clone(),
+            },
+        );
+    }
 }
 
 pub trait RegisteredPluginAccess: PluginRegistry {
     fn registered_plugin(&self, tool: &str) -> Result<RegisteredPlugin, OberonError>;
+    fn tool_availability(&self, tool: &str) -> Option<ToolAvailabilityMetadata>;
 }
 
 impl PluginRegistry for FilePluginRegistry {
@@ -325,6 +544,10 @@ impl RegisteredPluginAccess for FilePluginRegistry {
     fn registered_plugin(&self, tool: &str) -> Result<RegisteredPlugin, OberonError> {
         self.get_registered_plugin(tool).cloned()
     }
+
+    fn tool_availability(&self, tool: &str) -> Option<ToolAvailabilityMetadata> {
+        self.tool_availability(tool)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -409,7 +632,9 @@ impl StaticPolicyResolver {
         let plugin_admission = plugins
             .into_iter()
             .map(|plugin| {
-                let allowlist_status = if plugin.tool_tier == ToolTier::OrdinaryPlugin {
+                let allowlist_status = if plugin.host_trusted {
+                    AllowlistStatus::ExemptBuiltIn
+                } else if plugin.tool_tier == ToolTier::OrdinaryPlugin {
                     if allowlisted_checksums.contains(&plugin.manifest.provenance.checksum) {
                         AllowlistStatus::Allowlisted
                     } else if matches!(operating_mode, OperatingMode::Production) {
@@ -420,17 +645,21 @@ impl StaticPolicyResolver {
                 } else {
                     AllowlistStatus::ExemptBuiltIn
                 };
-                let production_eligible = plugin.tool_tier != ToolTier::OrdinaryPlugin
+                let production_eligible = plugin.host_trusted
+                    || plugin.tool_tier != ToolTier::OrdinaryPlugin
                     || (matches!(allowlist_status, AllowlistStatus::Allowlisted)
                         && matches!(plugin.conformance_status, ConformanceStatus::Passed)
                         && plugin.manifest_validation.valid);
                 (
                     plugin.manifest.id.clone(),
                     PluginAdmissionMetadata {
-                        is_builtin: plugin.tool_tier != ToolTier::OrdinaryPlugin,
+                        is_builtin: false,
+                        is_host_trusted: plugin.host_trusted,
                         allowlist_status,
                         conformance_status: plugin.conformance_status,
                         production_eligible,
+                        package_installed: plugin.package_id.as_ref().map(|_| true),
+                        package_enabled: plugin.package_id.as_ref().map(|_| plugin.enabled),
                     },
                 )
             })
@@ -455,8 +684,9 @@ impl StaticPolicyResolver {
 
     fn admission_for(&self, tool: &str, manifest: &PluginManifest) -> PluginAdmissionMetadata {
         self.plugin_admission.get(tool).cloned().unwrap_or_else(|| {
-            let is_builtin = matches!(tool, "workspace" | "git" | "github");
-            let allowlist_status = if is_builtin {
+            let is_builtin = false;
+            let is_host_trusted = matches!(tool, "workspace" | "git" | "github");
+            let allowlist_status = if is_builtin || is_host_trusted {
                 AllowlistStatus::ExemptBuiltIn
             } else if self
                 .allowlisted_checksums
@@ -468,25 +698,32 @@ impl StaticPolicyResolver {
             } else {
                 AllowlistStatus::NotRequired
             };
-            let conformance_status = if is_builtin {
+            let conformance_status = if is_host_trusted {
                 ConformanceStatus::Passed
             } else {
                 ConformanceStatus::NotRun
             };
-            let production_eligible = is_builtin
+            let production_eligible = is_host_trusted
                 || (matches!(allowlist_status, AllowlistStatus::Allowlisted)
                     && matches!(conformance_status, ConformanceStatus::Passed));
             PluginAdmissionMetadata {
                 is_builtin,
+                is_host_trusted,
                 allowlist_status,
                 conformance_status,
                 production_eligible,
+                package_installed: None,
+                package_enabled: None,
             }
         })
     }
 }
 
 impl PolicyResolver for StaticPolicyResolver {
+    fn operating_mode(&self) -> OperatingMode {
+        self.operating_mode.clone()
+    }
+
     fn resolve(
         &self,
         tool: &str,
@@ -508,7 +745,7 @@ impl PolicyResolver for StaticPolicyResolver {
             }
         }
 
-        if matches!(self.operating_mode, OperatingMode::Production) && !admission.is_builtin {
+        if matches!(self.operating_mode, OperatingMode::Production) && !admission.is_host_trusted {
             if !matches!(admission.allowlist_status, AllowlistStatus::Allowlisted) {
                 reason_codes.push("blocked_by_allowlist".to_string());
                 blocking_issues.push(format!(
@@ -565,6 +802,8 @@ impl PolicyResolver for StaticPolicyResolver {
             allowlist_status: admission.allowlist_status,
             conformance_status: admission.conformance_status,
             production_eligible: admission.production_eligible,
+            package_installed: admission.package_installed,
+            package_enabled: admission.package_enabled,
             reason_codes,
             blocking_issues,
         })
@@ -978,6 +1217,153 @@ where
             "plugin '{tool}.{command}' is not admitted: {reason}"
         )))
     }
+
+    fn unavailable_tool_error(&self, tool: &str) -> Option<OberonError>
+    where
+        R: RegisteredPluginAccess,
+    {
+        let availability = self.registry.tool_availability(tool)?;
+        if availability.installed && availability.enabled && availability.reason_codes.is_empty() {
+            return None;
+        }
+        let reason = if availability.reason_codes.is_empty() {
+            "tool is unavailable".to_string()
+        } else {
+            availability.reason_codes.join(", ")
+        };
+        Some(OberonError::PolicyDenied(format!(
+            "tool '{tool}' is unavailable: {reason}"
+        )))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct HostToolDefinition {
+    tool: &'static str,
+    command: &'static str,
+    summary: &'static str,
+    description: &'static str,
+    input_schema: serde_json::Value,
+    output_schema: serde_json::Value,
+    guidance: ToolGuidance,
+}
+
+fn host_tool_definitions() -> Vec<HostToolDefinition> {
+    vec![
+        HostToolDefinition {
+            tool: "tool_search",
+            command: "search",
+            summary: "Search installed tools and commands by capability.",
+            description: "Search installed tools and commands by capability.",
+            input_schema: serde_json::json!({
+                "type":"object",
+                "properties":{"query":{"type":"string"},"limit":{"type":"integer"}},
+                "required":["query"]
+            }),
+            output_schema: serde_json::json!({"type":"object"}),
+            guidance: ToolGuidance {
+                when_to_use: "Use before unfamiliar tool usage to discover tools and commands.".to_string(),
+                when_not_to_use: "Do not guess command names when search can narrow the surface.".to_string(),
+                examples: vec!["find git commands".to_string(), "find file write tools".to_string()],
+                common_mistakes: vec!["Treating host tools as plugin ids".to_string()],
+                failure_recovery: vec!["If results are too broad, search again with a narrower intent.".to_string()],
+            },
+        },
+        HostToolDefinition {
+            tool: "tool_describe",
+            command: "describe",
+            summary: "Describe one tool command with guidance and schemas.",
+            description: "Describe one tool command with guidance and schemas.",
+            input_schema: serde_json::json!({
+                "type":"object",
+                "properties":{"tool":{"type":"string"},"command":{"type":"string"}},
+                "required":["tool","command"]
+            }),
+            output_schema: serde_json::json!({"type":"object"}),
+            guidance: ToolGuidance {
+                when_to_use: "Use after search and before first use of a tool command.".to_string(),
+                when_not_to_use: "Do not invoke an unfamiliar command without inspecting its schema.".to_string(),
+                examples: vec!["describe git push".to_string()],
+                common_mistakes: vec!["Passing the host tool name as a plugin id".to_string()],
+                failure_recovery: vec!["If describe fails, confirm the tool and command pair from tool_search.".to_string()],
+            },
+        },
+        HostToolDefinition {
+            tool: "tool_plan",
+            command: "plan",
+            summary: "Plan a tool command before invoking it.",
+            description: "Plan a tool command before invoking it.",
+            input_schema: serde_json::json!({
+                "type":"object",
+                "properties":{"tool":{"type":"string"},"command":{"type":"string"},"input":{"type":"object"}},
+                "required":["tool","command","input"]
+            }),
+            output_schema: serde_json::json!({"type":"object"}),
+            guidance: ToolGuidance {
+                when_to_use: "Use before state-changing commands and before approval-gated actions.".to_string(),
+                when_not_to_use: "Do not skip planning for write or approval-sensitive operations.".to_string(),
+                examples: vec!["plan git push".to_string()],
+                common_mistakes: vec!["Planning host tools as nested plugin commands".to_string()],
+                failure_recovery: vec!["If planning is blocked, inspect policy and revise the request.".to_string()],
+            },
+        },
+        HostToolDefinition {
+            tool: "tool_invoke",
+            command: "invoke",
+            summary: "Invoke a specific tool command.",
+            description: "Invoke a specific tool command.",
+            input_schema: serde_json::json!({
+                "type":"object",
+                "properties":{"tool":{"type":"string"},"command":{"type":"string"},"input":{"type":"object"}},
+                "required":["tool","command","input"]
+            }),
+            output_schema: serde_json::json!({"type":"object"}),
+            guidance: ToolGuidance {
+                when_to_use: "Use after search, describe, and plan when execution is intended.".to_string(),
+                when_not_to_use: "Do not use for discovering tools; use tool_search first.".to_string(),
+                examples: vec!["invoke workspace read_file".to_string()],
+                common_mistakes: vec!["Using tool_invoke to call host tools recursively".to_string()],
+                failure_recovery: vec!["If invoke fails, inspect tool_policy_inspect or re-run tool_describe.".to_string()],
+            },
+        },
+        HostToolDefinition {
+            tool: "tool_policy_inspect",
+            command: "inspect",
+            summary: "Inspect policy and approval requirements for a tool command.",
+            description: "Inspect policy and approval requirements for a tool command.",
+            input_schema: serde_json::json!({
+                "type":"object",
+                "properties":{"tool":{"type":"string"},"command":{"type":"string"}},
+                "required":["tool","command"]
+            }),
+            output_schema: serde_json::json!({"type":"object"}),
+            guidance: ToolGuidance {
+                when_to_use: "Use when a command is blocked, requires approval, or needs budget visibility.".to_string(),
+                when_not_to_use: "Do not use as a substitute for tool_describe when you need command semantics.".to_string(),
+                examples: vec!["inspect git push".to_string()],
+                common_mistakes: vec!["Assuming policy matches command behavior without inspection".to_string()],
+                failure_recovery: vec!["If policy denies a command, adjust scope or obtain approval rather than retrying blindly.".to_string()],
+            },
+        },
+    ]
+}
+
+fn find_host_tool_definition(tool: &str, command: &str) -> Option<HostToolDefinition> {
+    let normalized_command = if command == tool {
+        match tool {
+            "tool_search" => "search",
+            "tool_describe" => "describe",
+            "tool_plan" => "plan",
+            "tool_invoke" => "invoke",
+            "tool_policy_inspect" => "inspect",
+            _ => command,
+        }
+    } else {
+        command
+    };
+    host_tool_definitions()
+        .into_iter()
+        .find(|definition| definition.tool == tool && definition.command == normalized_command)
 }
 
 impl<R, P> HostToolRuntime for PluginRuntimeHost<R, P>
@@ -987,6 +1373,30 @@ where
 {
     fn tool_search(&self, request: &SearchRequest) -> Result<SearchResponse, OberonError> {
         let mut response = self.registry.search(request)?;
+        let query = request.query.trim().to_lowercase();
+        let mut host_matches = host_tool_definitions()
+            .into_iter()
+            .filter(|definition| {
+                let tool = definition.tool.to_lowercase();
+                let command = definition.command.to_lowercase();
+                let summary = definition.summary.to_lowercase();
+                tool.contains(&query) || command.contains(&query) || summary.contains(&query)
+            })
+            .map(|definition| SearchMatch {
+                tool: definition.tool.to_string(),
+                command: definition.command.to_string(),
+                summary: definition.summary.to_string(),
+                tool_tier: ToolTier::CoreHost,
+                side_effects: SideEffectClass::None,
+                approval_required: false,
+                capabilities_required: Vec::new(),
+                confidence: if definition.tool.contains(request.query.trim()) {
+                    "1.00".to_string()
+                } else {
+                    "0.90".to_string()
+                },
+            })
+            .collect::<Vec<_>>();
         response.matches = response
             .matches
             .into_iter()
@@ -1007,6 +1417,17 @@ where
                 Some(entry)
             })
             .collect();
+        response.matches.append(&mut host_matches);
+        response.matches.sort_by(|left, right| {
+            right
+                .confidence
+                .cmp(&left.confidence)
+                .then_with(|| left.tool.cmp(&right.tool))
+                .then_with(|| left.command.cmp(&right.command))
+        });
+        if let Some(limit) = request.limit {
+            response.matches.truncate(limit as usize);
+        }
         Ok(response)
     }
 
@@ -1014,6 +1435,30 @@ where
         &self,
         request: &ToolDescribeRequest,
     ) -> Result<ToolDescribeResponse, OberonError> {
+        if let Some(definition) = find_host_tool_definition(&request.tool, &request.command) {
+            return Ok(ToolDescribeResponse {
+                tool: definition.tool.to_string(),
+                command: definition.command.to_string(),
+                summary: definition.description.to_string(),
+                input_schema: oberon4_core::CommandSchemaReference {
+                    id: format!("{}.{}.input", definition.tool, definition.command),
+                    schema: definition.input_schema,
+                },
+                output_schema: oberon4_core::CommandSchemaReference {
+                    id: format!("{}.{}.output", definition.tool, definition.command),
+                    schema: definition.output_schema,
+                },
+                side_effects: SideEffectClass::None,
+                approval_expectation: ApprovalExpectation::None,
+                capabilities_required: Vec::new(),
+                pagination_behavior: None,
+                artifact_rules: None,
+                guidance: definition.guidance,
+            });
+        }
+        if let Some(error) = self.unavailable_tool_error(&request.tool) {
+            return Err(error);
+        }
         let manifest = self.registry.manifest(&request.tool)?;
         let command = self
             .registry
@@ -1029,6 +1474,9 @@ where
                 "request command '{}' does not match invocation context command '{}'",
                 request.command, request.context.command
             )));
+        }
+        if let Some(error) = self.unavailable_tool_error(&request.context.plugin_id) {
+            return Err(error);
         }
 
         let manifest = self.registry.manifest(&request.context.plugin_id)?;
@@ -1196,6 +1644,9 @@ where
                 "request command '{}' does not match invocation context command '{}'",
                 request.command, request.context.command
             )));
+        }
+        if let Some(error) = self.unavailable_tool_error(&request.context.plugin_id) {
+            return Err(error);
         }
 
         let manifest = self.registry.manifest(&request.context.plugin_id)?;
@@ -1476,6 +1927,78 @@ where
         &self,
         request: &PolicyInspectRequest,
     ) -> Result<PolicyInspectResponse, OberonError> {
+        if let Some(definition) = find_host_tool_definition(&request.tool, &request.command) {
+            return Ok(PolicyInspectResponse {
+                status: PlanStatus::Ok,
+                tool: definition.tool.to_string(),
+                command: definition.command.to_string(),
+                capabilities: EffectiveCapabilities {
+                    allowed: Vec::new(),
+                    blocked: Vec::new(),
+                },
+                approval_required: false,
+                resource_limits: ResourceLimits {
+                    memory_bytes: None,
+                    time_ms: None,
+                    storage_bytes: None,
+                    output_bytes: None,
+                    network_policy: Some(NetworkPolicy::BrokeredOnly),
+                },
+                operating_mode: self.policy.operating_mode(),
+                plugin_admission_status: PluginAdmissionStatus::Allowed,
+                allowlist_status: AllowlistStatus::ExemptBuiltIn,
+                conformance_status: ConformanceStatus::Passed,
+                production_eligible: true,
+                package_installed: None,
+                package_enabled: None,
+                reason_codes: vec!["core_host_tool".to_string()],
+                service_handles_used: Vec::new(),
+                secret_classes_involved: Vec::new(),
+                security_levels: Vec::new(),
+            });
+        }
+        if let Some(availability) = self.registry.tool_availability(&request.tool) {
+            if !availability.installed || !availability.enabled {
+                return Ok(PolicyInspectResponse {
+                    status: PlanStatus::Ok,
+                    tool: request.tool.clone(),
+                    command: request.command.clone(),
+                    capabilities: EffectiveCapabilities {
+                        allowed: Vec::new(),
+                        blocked: Vec::new(),
+                    },
+                    approval_required: false,
+                    resource_limits: ResourceLimits {
+                        memory_bytes: None,
+                        time_ms: None,
+                        storage_bytes: None,
+                        output_bytes: None,
+                        network_policy: Some(NetworkPolicy::Denied),
+                    },
+                    operating_mode: self.policy.operating_mode(),
+                    plugin_admission_status: PluginAdmissionStatus::Blocked,
+                    allowlist_status: if availability.host_trusted {
+                        AllowlistStatus::ExemptBuiltIn
+                    } else {
+                        AllowlistStatus::NotRequired
+                    },
+                    conformance_status: ConformanceStatus::NotRun,
+                    production_eligible: availability.host_trusted,
+                    package_installed: availability
+                        .package_id
+                        .as_ref()
+                        .map(|_| availability.installed),
+                    package_enabled: availability
+                        .package_id
+                        .as_ref()
+                        .map(|_| availability.enabled),
+                    reason_codes: availability.reason_codes,
+                    service_handles_used: Vec::new(),
+                    secret_classes_involved: Vec::new(),
+                    security_levels: Vec::new(),
+                });
+            }
+        }
         let manifest = self.registry.manifest(&request.tool)?;
         let command = self
             .registry
@@ -1499,6 +2022,8 @@ where
             allowlist_status: resolution.allowlist_status,
             conformance_status: resolution.conformance_status,
             production_eligible: resolution.production_eligible,
+            package_installed: resolution.package_installed,
+            package_enabled: resolution.package_enabled,
             reason_codes: {
                 let mut reason_codes = resolution.reason_codes;
                 if workspace_allowed {
@@ -1626,6 +2151,32 @@ fn discover_manifest_paths(root: &Path) -> Result<Vec<PathBuf>, OberonError> {
     Ok(manifests)
 }
 
+fn discover_package_manifest_paths(root: &Path) -> Result<Vec<PathBuf>, OberonError> {
+    let mut manifests = Vec::new();
+    if !root.exists() {
+        return Ok(manifests);
+    }
+
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        for entry in fs::read_dir(&current)
+            .map_err(|err| OberonError::Storage(format!("read_dir failed: {err}")))?
+        {
+            let entry =
+                entry.map_err(|err| OberonError::Storage(format!("dir entry failed: {err}")))?;
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.file_name().and_then(|name| name.to_str()) == Some("package.json") {
+                manifests.push(path);
+            }
+        }
+    }
+
+    manifests.sort();
+    Ok(manifests)
+}
+
 fn load_manifest(path: &Path) -> Result<PluginManifest, OberonError> {
     let raw = fs::read_to_string(path)
         .map_err(|err| OberonError::Storage(format!("manifest read failed: {err}")))?;
@@ -1633,9 +2184,17 @@ fn load_manifest(path: &Path) -> Result<PluginManifest, OberonError> {
         .map_err(|err| OberonError::ManifestValidation(format!("invalid plugin.json: {err}")))
 }
 
+fn load_package_manifest(path: &Path) -> Result<FirstPartyPackageManifest, OberonError> {
+    let raw = fs::read_to_string(path)
+        .map_err(|err| OberonError::Storage(format!("package manifest read failed: {err}")))?;
+    serde_json::from_str(&raw)
+        .map_err(|err| OberonError::ManifestValidation(format!("invalid package.json: {err}")))
+}
+
 fn insert_registered_plugin(
     plugins: &mut BTreeMap<String, RegisteredPlugin>,
     index: &mut Vec<IndexedCommand>,
+    tool_availability: &mut BTreeMap<String, ToolAvailabilityMetadata>,
     mut registered: RegisteredPlugin,
     runtime_api_version: &str,
     require_executable: bool,
@@ -1697,6 +2256,20 @@ fn insert_registered_plugin(
                 capabilities_required: command.required_capabilities.clone(),
                 approval_expectation: command.approval_expectation.clone(),
             }),
+    );
+
+    tool_availability.insert(
+        plugin_id.clone(),
+        ToolAvailabilityMetadata {
+            tool: plugin_id.clone(),
+            tool_tier: registered.tool_tier.clone(),
+            source_kind: Some(registered.source_kind.clone()),
+            package_id: registered.package_id.clone(),
+            installed: true,
+            enabled: registered.enabled,
+            host_trusted: registered.host_trusted,
+            reason_codes: Vec::new(),
+        },
     );
 
     plugins.insert(plugin_id, registered);
@@ -2195,6 +2768,8 @@ mod tests {
     use oberon4_core::{BuildMetadata, CapabilityGrant, CapabilityGrantKind, HandleOperation};
     use oberon4_core::{ManifestValidationResult, PluginRegistry, SideEffectClass};
     use oberon4_core::{OberonError, RequestId};
+
+    use crate::plugin_runtime_versioned::PluginRuntimeVersionedPackage;
 
     const VALID_WASM: &[u8] = include_bytes!("../tests/fixtures/plugin-runtime/valid/plugin.wasm");
 
@@ -2765,6 +3340,145 @@ mod tests {
         assert!(inspect.production_eligible);
         assert_eq!(inspect.resource_limits.time_ms, Some(2_000));
         assert_eq!(inspect.resource_limits.output_bytes, Some(65_536));
+    }
+
+    #[test]
+    fn host_tools_are_searchable_describable_and_policy_visible() {
+        let registry = FilePluginRegistry::load_from_roots(&[], HOST_RUNTIME_API_VERSION).unwrap();
+        let host = PluginRuntimeHost::new(registry, StaticPolicyResolver::default()).unwrap();
+
+        let search = host
+            .tool_search(&SearchRequest {
+                query: "tools".to_string(),
+                limit: Some(5),
+                session_id: None,
+            })
+            .unwrap();
+        assert!(
+            search
+                .matches
+                .iter()
+                .any(|entry| entry.tool == "tool_search")
+        );
+
+        let describe = host
+            .tool_describe(&ToolDescribeRequest {
+                tool: "tool_search".to_string(),
+                command: "tool_search".to_string(),
+            })
+            .unwrap();
+        assert_eq!(describe.tool, "tool_search");
+        assert_eq!(describe.command, "search");
+
+        let inspect = host
+            .tool_policy_inspect(&PolicyInspectRequest {
+                tool: "tool_search".to_string(),
+                command: "tool_search".to_string(),
+            })
+            .unwrap();
+        assert_eq!(
+            inspect.plugin_admission_status,
+            PluginAdmissionStatus::Allowed
+        );
+        assert_eq!(inspect.allowlist_status, AllowlistStatus::ExemptBuiltIn);
+        assert!(inspect.reason_codes.contains(&"core_host_tool".to_string()));
+    }
+
+    #[test]
+    fn first_party_package_can_be_disabled_and_missing_with_explicit_policy_diagnostics() {
+        let package_root = temp_dir("first-party-package");
+        PluginRuntimeVersionedPackage::materialize_package_bundle(&package_root).unwrap();
+
+        let disabled_registry = FilePluginRegistry::load_from_sources(
+            &[],
+            &[package_root.clone()],
+            &BTreeSet::new(),
+            &BTreeSet::from([PluginRuntimeVersionedPackage::package_id().to_string()]),
+            HOST_RUNTIME_API_VERSION,
+        )
+        .unwrap();
+        let disabled_host =
+            PluginRuntimeHost::new(disabled_registry, StaticPolicyResolver::default()).unwrap();
+        let disabled_search = disabled_host
+            .tool_search(&SearchRequest {
+                query: "git".to_string(),
+                limit: None,
+                session_id: None,
+            })
+            .unwrap();
+        assert!(
+            !disabled_search
+                .matches
+                .iter()
+                .any(|entry| entry.tool == "git")
+        );
+        let disabled_policy = disabled_host
+            .tool_policy_inspect(&PolicyInspectRequest {
+                tool: "git".to_string(),
+                command: "push".to_string(),
+            })
+            .unwrap();
+        assert_eq!(
+            disabled_policy.plugin_admission_status,
+            PluginAdmissionStatus::Blocked
+        );
+        assert_eq!(disabled_policy.package_installed, Some(true));
+        assert_eq!(disabled_policy.package_enabled, Some(false));
+        assert!(
+            disabled_policy
+                .reason_codes
+                .contains(&"blocked_by_disable".to_string())
+        );
+
+        let missing_registry = FilePluginRegistry::load_from_sources(
+            &[],
+            &[temp_dir("missing-first-party")],
+            &BTreeSet::from([PluginRuntimeVersionedPackage::package_id().to_string()]),
+            &BTreeSet::new(),
+            HOST_RUNTIME_API_VERSION,
+        )
+        .unwrap();
+        let missing_host =
+            PluginRuntimeHost::new(missing_registry, StaticPolicyResolver::default()).unwrap();
+        let missing_policy = missing_host
+            .tool_policy_inspect(&PolicyInspectRequest {
+                tool: "git".to_string(),
+                command: "push".to_string(),
+            })
+            .unwrap();
+        assert_eq!(
+            missing_policy.plugin_admission_status,
+            PluginAdmissionStatus::Blocked
+        );
+        assert_eq!(missing_policy.package_installed, Some(false));
+        assert_eq!(missing_policy.package_enabled, Some(true));
+        assert!(
+            missing_policy
+                .reason_codes
+                .contains(&"blocked_by_missing_package".to_string())
+        );
+
+        let _ = fs::remove_dir_all(package_root);
+    }
+
+    #[test]
+    fn malformed_first_party_package_manifest_fails_activation_cleanly() {
+        let root = temp_dir("malformed-package");
+        let package_dir = root.join(PluginRuntimeVersionedPackage::package_id());
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::write(package_dir.join("package.json"), b"{not-json").unwrap();
+
+        let error = FilePluginRegistry::load_from_sources(
+            &[],
+            &[root.clone()],
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            HOST_RUNTIME_API_VERSION,
+        )
+        .unwrap_err();
+        assert!(matches!(error, OberonError::ManifestValidation(_)));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

@@ -496,6 +496,10 @@ pub struct PolicyInspectResponse {
     pub conformance_status: ConformanceStatus,
     #[serde(rename = "productionEligible")]
     pub production_eligible: bool,
+    #[serde(default, rename = "packageInstalled")]
+    pub package_installed: Option<bool>,
+    #[serde(default, rename = "packageEnabled")]
+    pub package_enabled: Option<bool>,
     #[serde(default, rename = "reasonCodes")]
     pub reason_codes: Vec<String>,
     #[serde(default, rename = "serviceHandlesUsed")]
@@ -857,6 +861,10 @@ pub struct PolicyResolution {
     pub conformance_status: ConformanceStatus,
     #[serde(rename = "productionEligible")]
     pub production_eligible: bool,
+    #[serde(default, rename = "packageInstalled")]
+    pub package_installed: Option<bool>,
+    #[serde(default, rename = "packageEnabled")]
+    pub package_enabled: Option<bool>,
     #[serde(default, rename = "reasonCodes")]
     pub reason_codes: Vec<String>,
     #[serde(default, rename = "blockingIssues")]
@@ -1027,6 +1035,7 @@ pub trait PluginRegistry {
 }
 
 pub trait PolicyResolver {
+    fn operating_mode(&self) -> OperatingMode;
     fn resolve(
         &self,
         tool: &str,
@@ -1611,6 +1620,8 @@ mod tests {
             allowlist_status: AllowlistStatus::Allowlisted,
             conformance_status: ConformanceStatus::Passed,
             production_eligible: true,
+            package_installed: Some(true),
+            package_enabled: Some(true),
             reason_codes: Vec::new(),
             service_handles_used: vec!["svc_github_main".to_string()],
             secret_classes_involved: vec![SecretClass::OauthCredential],
@@ -1935,6 +1946,8 @@ mod tests {
             allowlist_status: AllowlistStatus::Allowlisted,
             conformance_status: ConformanceStatus::Passed,
             production_eligible: true,
+            package_installed: Some(true),
+            package_enabled: Some(true),
             reason_codes: Vec::new(),
             blocking_issues: Vec::new(),
         };

@@ -53,6 +53,10 @@ Examples:
 
 Portable ordinary plugins should run unchanged across supported Oberon hosts when they stay within the portable capability envelope.
 
+First-party package rule:
+- brokered privileged packages such as `workspace`, `git`, and `github` may be installable and removable from package roots without becoming ordinary WASM plugins
+- those packages stay host-trusted and host-brokered even when their registration is file-based and modular
+
 ## 2. Agent-Facing Contract
 Recommended host-native tool surface:
 - `tool_search`
@@ -86,7 +90,7 @@ Design rule:
 - keep the agent-facing contract free of platform-specific assumptions such as shell syntax, platform-native paths, or host process-manager semantics
 
 ## 3. Runtime Flow
-1. host scans plugin directories and loads manifests
+1. host scans configured package roots for first-party package manifests and configured plugin roots for ordinary plugin manifests
 2. host validates manifest structure, ids, versions, capability declarations, and schemas
 3. host builds a search index from manifest metadata without executing plugins
 4. agent calls `tool_search`
