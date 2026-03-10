@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     fs,
+    io::Read,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -25,6 +26,7 @@ use wasmtime_wasi::{
     DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView,
     p2::{add_to_linker_sync, pipe::MemoryOutputPipe},
 };
+use zip::ZipArchive;
 
 use crate::plugin_runtime::{RegisteredPlugin, RuntimeBrokerFoundations};
 
@@ -304,9 +306,10 @@ impl ExecutionEngine {
             plugin.manifest_path.display(),
             plugin.wasm_path.display()
         );
-        let mtime_ms = fs::metadata(&plugin.wasm_path)
+        let metadata_path = plugin.archive_path.as_ref().unwrap_or(&plugin.wasm_path);
+        let mtime_ms = fs::metadata(metadata_path)
             .and_then(|meta| meta.modified())
-            .map_err(|err| OberonError::Storage(format!("plugin.wasm metadata failed: {err}")))?
+            .map_err(|err| OberonError::Storage(format!("plugin runtime metadata failed: {err}")))?
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|err| OberonError::Storage(format!("mtime conversion failed: {err}")))?
             .as_millis();
@@ -320,12 +323,28 @@ impl ExecutionEngine {
                 return Ok(cached.component.clone());
             }
         }
-        let component = Component::from_file(&self.engine, &plugin.wasm_path).map_err(|err| {
-            OberonError::Storage(format!(
-                "component load failed for {}: {err}",
-                plugin.wasm_path.display()
-            ))
-        })?;
+        let component = if let Some(archive_path) = &plugin.archive_path {
+            let entry_name = plugin.archive_entry_wasm_path.as_deref().ok_or_else(|| {
+                OberonError::Storage(format!(
+                    "archive-backed plugin '{}' missing wasm entry path",
+                    plugin.manifest.id
+                ))
+            })?;
+            let bytes = read_archive_entry_bytes(archive_path, entry_name)?;
+            Component::new(&self.engine, bytes).map_err(|err| {
+                OberonError::Storage(format!(
+                    "component load failed for {}::{entry_name}: {err}",
+                    archive_path.display()
+                ))
+            })?
+        } else {
+            Component::from_file(&self.engine, &plugin.wasm_path).map_err(|err| {
+                OberonError::Storage(format!(
+                    "component load failed for {}: {err}",
+                    plugin.wasm_path.display()
+                ))
+            })?
+        };
         cache.insert(
             key,
             CachedComponent {
@@ -675,6 +694,24 @@ impl ExecutionEngine {
             next_suggested_action: Some("tool_policy_inspect".to_string()),
         }
     }
+}
+
+fn read_archive_entry_bytes(archive_path: &Path, entry_name: &str) -> Result<Vec<u8>, OberonError> {
+    let bytes = fs::read(archive_path)
+        .map_err(|err| OberonError::Storage(format!("archive read failed: {err}")))?;
+    let mut archive = ZipArchive::new(std::io::Cursor::new(bytes))
+        .map_err(|err| OberonError::Storage(format!("archive open failed: {err}")))?;
+    let mut file = archive.by_name(entry_name).map_err(|err| {
+        OberonError::Storage(format!(
+            "archive entry '{}' missing in {}: {err}",
+            entry_name,
+            archive_path.display()
+        ))
+    })?;
+    let mut component = Vec::new();
+    file.read_to_end(&mut component)
+        .map_err(|err| OberonError::Storage(format!("archive entry read failed: {err}")))?;
+    Ok(component)
 }
 
 impl Drop for ExecutionEngine {

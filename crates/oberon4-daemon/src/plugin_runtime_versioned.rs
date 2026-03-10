@@ -3,6 +3,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
+    io::Write,
     path::{Path, PathBuf},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -20,6 +21,7 @@ use oberon4_core::{
     WorkspacePreconditionStatus, WorkspaceWriteRequest,
 };
 use serde::{Deserialize, Serialize};
+use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
 use crate::plugin_runtime::{HOST_RUNTIME_API_VERSION, RegisteredPlugin, RegisteredToolSource};
 use crate::plugin_runtime_data::{PluginRuntimeWorkspaceBroker, hex_name};
@@ -122,6 +124,11 @@ impl PluginRuntimeVersionedPackage {
                 package_id: Some(Self::package_id().to_string()),
                 host_trusted: true,
                 enabled: true,
+                archive_path: None,
+                archive_entry_manifest_path: None,
+                archive_entry_wasm_path: None,
+                archive_checksum: None,
+                generated_config_path: None,
                 manifest_validation: ManifestValidationResult {
                     valid: true,
                     issues: Vec::new(),
@@ -138,6 +145,11 @@ impl PluginRuntimeVersionedPackage {
                 package_id: Some(Self::package_id().to_string()),
                 host_trusted: true,
                 enabled: true,
+                archive_path: None,
+                archive_entry_manifest_path: None,
+                archive_entry_wasm_path: None,
+                archive_checksum: None,
+                generated_config_path: None,
                 manifest_validation: ManifestValidationResult {
                     valid: true,
                     issues: Vec::new(),
@@ -154,6 +166,11 @@ impl PluginRuntimeVersionedPackage {
                 package_id: Some(Self::package_id().to_string()),
                 host_trusted: true,
                 enabled: true,
+                archive_path: None,
+                archive_entry_manifest_path: None,
+                archive_entry_wasm_path: None,
+                archive_checksum: None,
+                generated_config_path: None,
                 manifest_validation: ManifestValidationResult {
                     valid: true,
                     issues: Vec::new(),
@@ -188,6 +205,28 @@ impl PluginRuntimeVersionedPackage {
         Ok(())
     }
 
+    pub fn ensure_default_package_archive_installed(
+        archive_root: &Path,
+    ) -> Result<(), OberonError> {
+        let bootstrap_marker = oberon4_core::default_data_dir()
+            .join("plugin-runtime")
+            .join("first-party-package-archive-bootstrap.marker");
+        if bootstrap_marker.exists() {
+            return Ok(());
+        }
+
+        Self::materialize_package_archive(archive_root)?;
+
+        if let Some(parent) = bootstrap_marker.parent() {
+            fs::create_dir_all(parent).map_err(|err| {
+                OberonError::Storage(format!("bootstrap marker dir create failed: {err}"))
+            })?;
+        }
+        fs::write(&bootstrap_marker, b"versioned-workspace-archive-seeded")
+            .map_err(|err| OberonError::Storage(format!("bootstrap marker write failed: {err}")))?;
+        Ok(())
+    }
+
     pub fn materialize_package_bundle(package_root: &Path) -> Result<(), OberonError> {
         let package_dir = package_root.join(Self::package_id());
         fs::create_dir_all(package_dir.join("tools"))
@@ -216,6 +255,69 @@ impl PluginRuntimeVersionedPackage {
         write_package_tool_manifest(&package_dir, "workspace.plugin.json", &workspace_manifest())?;
         write_package_tool_manifest(&package_dir, "git.plugin.json", &git_manifest())?;
         write_package_tool_manifest(&package_dir, "github.plugin.json", &github_manifest())?;
+        Ok(())
+    }
+
+    pub fn materialize_package_archive(archive_root: &Path) -> Result<(), OberonError> {
+        fs::create_dir_all(archive_root)
+            .map_err(|err| OberonError::Storage(format!("archive root create failed: {err}")))?;
+        let archive_path = archive_root.join(format!("{}.obpkg.zip", Self::package_id()));
+        let file = fs::File::create(&archive_path)
+            .map_err(|err| OberonError::Storage(format!("archive create failed: {err}")))?;
+        let mut zip = ZipWriter::new(file);
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+
+        let archive_manifest = serde_json::json!({
+            "id": Self::package_id(),
+            "version": "0.1.0",
+            "kind": "first-party-package",
+            "packageManifestPath": "package.json",
+            "settings": []
+        });
+        let package_manifest = serde_json::json!({
+            "id": Self::package_id(),
+            "version": "0.1.0",
+            "displayName": "Versioned Workspace Package",
+            "description": "First-party brokered workspace, git, and github tools.",
+            "tools": [
+                {"tool":"workspace","manifestPath":"tools/workspace.plugin.json"},
+                {"tool":"git","manifestPath":"tools/git.plugin.json"},
+                {"tool":"github","manifestPath":"tools/github.plugin.json"}
+            ]
+        });
+
+        zip.start_file("oberon-archive.json", options)
+            .map_err(|err| OberonError::Storage(format!("archive entry create failed: {err}")))?;
+        zip.write_all(
+            &serde_json::to_vec_pretty(&archive_manifest).map_err(|err| {
+                OberonError::Storage(format!("archive manifest encode failed: {err}"))
+            })?,
+        )
+        .map_err(|err| OberonError::Storage(format!("archive manifest write failed: {err}")))?;
+
+        zip.start_file("package.json", options)
+            .map_err(|err| OberonError::Storage(format!("package entry create failed: {err}")))?;
+        zip.write_all(
+            &serde_json::to_vec_pretty(&package_manifest).map_err(|err| {
+                OberonError::Storage(format!("package manifest encode failed: {err}"))
+            })?,
+        )
+        .map_err(|err| OberonError::Storage(format!("package manifest write failed: {err}")))?;
+
+        write_package_tool_manifest_to_zip(
+            &mut zip,
+            "tools/workspace.plugin.json",
+            &workspace_manifest(),
+        )?;
+        write_package_tool_manifest_to_zip(&mut zip, "tools/git.plugin.json", &git_manifest())?;
+        write_package_tool_manifest_to_zip(
+            &mut zip,
+            "tools/github.plugin.json",
+            &github_manifest(),
+        )?;
+
+        zip.finish()
+            .map_err(|err| OberonError::Storage(format!("archive finalize failed: {err}")))?;
         Ok(())
     }
 
@@ -1489,6 +1591,21 @@ fn write_package_tool_manifest(
     fs::write(
         package_dir.join("tools").join(file_name),
         serde_json::to_vec_pretty(manifest)
+            .map_err(|err| OberonError::Storage(format!("tool manifest encode failed: {err}")))?,
+    )
+    .map_err(|err| OberonError::Storage(format!("tool manifest write failed: {err}")))
+}
+
+fn write_package_tool_manifest_to_zip(
+    zip: &mut ZipWriter<fs::File>,
+    entry_name: &str,
+    manifest: &PluginManifest,
+) -> Result<(), OberonError> {
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    zip.start_file(entry_name, options)
+        .map_err(|err| OberonError::Storage(format!("zip entry create failed: {err}")))?;
+    zip.write_all(
+        &serde_json::to_vec_pretty(manifest)
             .map_err(|err| OberonError::Storage(format!("tool manifest encode failed: {err}")))?,
     )
     .map_err(|err| OberonError::Storage(format!("tool manifest write failed: {err}")))

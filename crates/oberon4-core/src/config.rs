@@ -28,6 +28,10 @@ pub struct RuntimeConfig {
     pub stream_responses: bool,
     pub operating_mode: OperatingMode,
     pub allowed_plugin_checksums: Vec<String>,
+    pub plugin_archive_roots: Vec<String>,
+    pub plugin_config_root: String,
+    pub enabled_plugins: Vec<String>,
+    pub disabled_plugins: Vec<String>,
     pub plugin_roots: Vec<String>,
     pub package_roots: Vec<String>,
     pub enabled_packages: Vec<String>,
@@ -66,6 +70,10 @@ impl Default for RuntimeConfig {
             stream_responses: true,
             operating_mode: OperatingMode::Dev,
             allowed_plugin_checksums: Vec::new(),
+            plugin_archive_roots: vec![data_dir.join("plugins").display().to_string()],
+            plugin_config_root: data_dir.join("plugin-config").display().to_string(),
+            enabled_plugins: Vec::new(),
+            disabled_plugins: Vec::new(),
             plugin_roots: vec![data_dir.join("plugins").display().to_string()],
             package_roots: vec![data_dir.join("packages").display().to_string()],
             enabled_packages: Vec::new(),
@@ -107,6 +115,16 @@ mod tests {
         assert_eq!(decoded.runtime.operating_mode, OperatingMode::Dev);
         assert!(decoded.runtime.allowed_plugin_checksums.is_empty());
         assert_eq!(
+            decoded.runtime.plugin_archive_roots,
+            super::RuntimeConfig::default().plugin_archive_roots
+        );
+        assert_eq!(
+            decoded.runtime.plugin_config_root,
+            super::RuntimeConfig::default().plugin_config_root
+        );
+        assert!(decoded.runtime.enabled_plugins.is_empty());
+        assert!(decoded.runtime.disabled_plugins.is_empty());
+        assert_eq!(
             decoded.runtime.plugin_roots,
             super::RuntimeConfig::default().plugin_roots
         );
@@ -140,6 +158,16 @@ mod tests {
         assert!(!decoded.runtime.stream_responses);
         assert_eq!(decoded.runtime.operating_mode, OperatingMode::Dev);
         assert!(decoded.runtime.allowed_plugin_checksums.is_empty());
+        assert_eq!(
+            decoded.runtime.plugin_archive_roots,
+            super::RuntimeConfig::default().plugin_archive_roots
+        );
+        assert_eq!(
+            decoded.runtime.plugin_config_root,
+            super::RuntimeConfig::default().plugin_config_root
+        );
+        assert!(decoded.runtime.enabled_plugins.is_empty());
+        assert!(decoded.runtime.disabled_plugins.is_empty());
         assert_eq!(
             decoded.runtime.plugin_roots,
             super::RuntimeConfig::default().plugin_roots

@@ -14,6 +14,7 @@ Companion documents:
 - `docs/prd/architecture-wasm-tool-runtime.md`
 - `docs/prd/tool-interaction-contract.md`
 - `docs/prd/provider-tool-compatibility.md`
+- `docs/prd/plugin-archive-schema.md`
 
 ## 2. Boundary Model
 The runtime has three separate contract layers:
@@ -36,13 +37,21 @@ Rules:
 - host adapters own platform-native filesystem, secret store, browser, and network details
 
 ## 4. Plugin Package Inputs
-Each plugin package should contain:
-- `plugin.json`
-- `plugin.wasm`
-- optional bundled docs/examples
-- optional test fixtures
+Primary install shape:
+- ordinary plugin archive:
+  - `oberon-archive.json`
+  - `plugin.json`
+  - `plugin.wasm`
+- first-party package archive:
+  - `oberon-archive.json`
+  - `package.json`
+  - referenced tool manifests such as `tools/*.plugin.json`
 
-The manifest is read by the host before plugin activation.
+Compatibility path:
+- unpacked `plugin.json + plugin.wasm`
+- unpacked `package.json + tools/*.plugin.json`
+
+The archive wrapper and inner manifests are read by the host before plugin activation.
 
 Minimum manifest fields:
 - `id`
@@ -54,6 +63,10 @@ Minimum manifest fields:
 - `capabilities`
 - `prompting`
 - `provenance`
+
+Generated config rule:
+- the host should generate and maintain a separate operator-editable config file for each discovered archive
+- generated config should preserve operator settings while keeping install metadata authoritative and host-managed
 
 ## 5. Typed Runtime Surface
 The preferred direction is a typed WIT or component-model contract for host/plugin transport.

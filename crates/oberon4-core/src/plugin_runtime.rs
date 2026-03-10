@@ -500,6 +500,14 @@ pub struct PolicyInspectResponse {
     pub package_installed: Option<bool>,
     #[serde(default, rename = "packageEnabled")]
     pub package_enabled: Option<bool>,
+    #[serde(default, rename = "archiveInstalled")]
+    pub archive_installed: Option<bool>,
+    #[serde(default, rename = "archiveEnabled")]
+    pub archive_enabled: Option<bool>,
+    #[serde(default, rename = "archiveKind")]
+    pub archive_kind: Option<String>,
+    #[serde(default, rename = "archiveChecksum")]
+    pub archive_checksum: Option<String>,
     #[serde(default, rename = "reasonCodes")]
     pub reason_codes: Vec<String>,
     #[serde(default, rename = "serviceHandlesUsed")]
@@ -865,6 +873,14 @@ pub struct PolicyResolution {
     pub package_installed: Option<bool>,
     #[serde(default, rename = "packageEnabled")]
     pub package_enabled: Option<bool>,
+    #[serde(default, rename = "archiveInstalled")]
+    pub archive_installed: Option<bool>,
+    #[serde(default, rename = "archiveEnabled")]
+    pub archive_enabled: Option<bool>,
+    #[serde(default, rename = "archiveKind")]
+    pub archive_kind: Option<String>,
+    #[serde(default, rename = "archiveChecksum")]
+    pub archive_checksum: Option<String>,
     #[serde(default, rename = "reasonCodes")]
     pub reason_codes: Vec<String>,
     #[serde(default, rename = "blockingIssues")]
@@ -1622,6 +1638,10 @@ mod tests {
             production_eligible: true,
             package_installed: Some(true),
             package_enabled: Some(true),
+            archive_installed: Some(true),
+            archive_enabled: Some(true),
+            archive_kind: Some("first-party-package".to_string()),
+            archive_checksum: Some("sha256:abc".to_string()),
             reason_codes: Vec::new(),
             service_handles_used: vec!["svc_github_main".to_string()],
             secret_classes_involved: vec![SecretClass::OauthCredential],
@@ -1948,6 +1968,10 @@ mod tests {
             production_eligible: true,
             package_installed: Some(true),
             package_enabled: Some(true),
+            archive_installed: Some(true),
+            archive_enabled: Some(true),
+            archive_kind: Some("ordinary-plugin".to_string()),
+            archive_checksum: Some("sha256:def".to_string()),
             reason_codes: Vec::new(),
             blocking_issues: Vec::new(),
         };

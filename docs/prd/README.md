@@ -11,6 +11,7 @@ Documents:
 - `provider-tool-compatibility.md`: provider-specific tool-call normalization and compatibility rules
 - `plugin-runtime-contract.md`: typed host/plugin boundary, handle model, and runtime envelope contracts
 - `plugin-manifest-schema.md`: concrete `plugin.json` schema for WASM/WASI plugins
+- `plugin-archive-schema.md`: concrete `oberon-archive.json` and generated-config schema for installed plugin and package archives
 - `plugin-runtime-interface-schema.md`: concrete host/plugin runtime interface shapes for future WIT mapping
 - `approval-and-policy-schemas.md`: concrete schemas for approval payloads and `tool_policy_inspect`
 - `PRD-versioned-workspace-git.md`: first concrete versioned workspace, git, and GitHub integration package for the WASM/WASI tool system

@@ -8,6 +8,7 @@ Companion specifications:
 - `docs/prd/tool-interaction-contract.md`
 - `docs/prd/provider-tool-compatibility.md`
 - `docs/prd/plugin-runtime-contract.md`
+- `docs/prd/plugin-archive-schema.md`
 
 ## 1. Problem Statement
 Build a secure, host-managed tool plugin system for Oberon4 where agent-usable tools execute as isolated WASM/WASI modules instead of arbitrary host code. The system must let agents discover tools on demand through a compact search surface, load verbose tool guidance only when needed, and execute plugins with explicit capability boundaries and isolated storage.
@@ -27,6 +28,7 @@ Build a secure, host-managed tool plugin system for Oberon4 where agent-usable t
 - `FR-112`: workspace, artifact, and large-payload handling model for file and media oriented tools.
 - `FR-113`: secret custody model where agents and plugins use secrets indirectly through host mediation rather than reading raw secret values.
 - `FR-114`: cross-platform, host-agnostic runtime contract that behaves consistently across supported Oberon platforms.
+- `FR-115`: zip-based install and generated per-plugin config model for ordinary plugins and first-party packages.
 
 ## 3. Non-Goals (Initial Runtime Slice)
 - host shell execution from plugins
@@ -136,6 +138,12 @@ Build a secure, host-managed tool plugin system for Oberon4 where agent-usable t
   - `AC-114.2`: plugins must interact with host-managed logical resources and capability handles rather than raw platform-native resource identifiers whenever practical.
   - `AC-114.3`: platform-specific differences such as secret storage, filesystem mapping, browser adapters, and external integration adapters must be confined to host implementations behind stable runtime contracts.
   - `AC-114.4`: the runtime foundation must be testable on Linux, macOS, and Windows without changing plugin manifests or command contracts for ordinary portable plugins.
+
+- `FR-115` Zip install and generated config
+  - `AC-115.1`: ordinary plugins may be installed as `.obplg.zip` archives and first-party packages may be installed as `.obpkg.zip` archives under host-configured archive roots.
+  - `AC-115.2`: the host generates a deterministic per-plugin config file for every discovered archive and preserves operator-edited settings across restarts.
+  - `AC-115.3`: removing an archive must remove the tool surface from discovery and invocation while leaving explicit missing-installed diagnostics in policy or registry surfaces.
+  - `AC-115.4`: archive integrity must use host-computed `sha256` and fail closed on malformed archive metadata or invalid generated config.
 
 ## 5. Non-Functional Requirements
 - `NFR-101` Security: deny-by-default capability model with host-owned policy enforcement.

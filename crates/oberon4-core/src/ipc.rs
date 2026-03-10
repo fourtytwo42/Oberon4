@@ -5,6 +5,7 @@ use crate::{
     OAuthProviderKind, SavedSession, StoredAccount, ToolError, ToolResult,
 };
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DaemonCommand {

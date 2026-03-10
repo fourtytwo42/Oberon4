@@ -14,5 +14,8 @@ oberon4-provider-openai = { path = "../oberon4-provider-openai" }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "0.10"
+toml = "0.8"
 wasmtime = { version = "36.0.6", default-features = false, features = ["component-model", "cranelift", "runtime", "std"] }
 wasmtime-wasi = { version = "36.0.6", default-features = false }
+zip = { version = "2.2", default-features = false, features = ["deflate"] }

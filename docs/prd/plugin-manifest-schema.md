@@ -10,6 +10,12 @@ Purpose:
 Companion documents:
 - `docs/prd/plugin-runtime-contract.md`
 - `docs/prd/PRD-wasm-tool-runtime.md`
+- `docs/prd/plugin-archive-schema.md`
+
+Installation note:
+- ordinary plugins may be installed directly as `plugin.json + plugin.wasm` during compatibility or migration flows
+- the primary install path is an `.obplg.zip` archive described by `docs/prd/plugin-archive-schema.md`
+- the archive wrapper provides install metadata and generated-config defaults; `plugin.json` remains the canonical runtime manifest
 
 ## 1. Schema Shape
 Recommended manifest shape:

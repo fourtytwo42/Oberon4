@@ -1,11 +1,15 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
+    io::{Cursor, Read},
     path::{Path, PathBuf},
     sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use zip::ZipArchive;
 
 use oberon4_core::{
     AllowlistStatus, ApprovalExpectation, ApprovalRequestPayload, ApprovalResourceLimits,
@@ -85,9 +89,23 @@ pub struct RegisteredPlugin {
     pub package_id: Option<String>,
     pub host_trusted: bool,
     pub enabled: bool,
+    pub archive_path: Option<PathBuf>,
+    pub archive_entry_manifest_path: Option<String>,
+    pub archive_entry_wasm_path: Option<String>,
+    pub archive_checksum: Option<String>,
+    pub generated_config_path: Option<PathBuf>,
     pub manifest_validation: ManifestValidationResult,
     pub conformance_status: ConformanceStatus,
     pub conformance_issues: Vec<String>,
+}
+
+impl RegisteredPlugin {
+    fn source_kind_string(&self) -> String {
+        match self.source_kind {
+            RegisteredToolSource::OrdinaryPlugin => "ordinary-plugin".to_string(),
+            RegisteredToolSource::FirstPartyPackage => "first-party-package".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,6 +123,8 @@ pub struct ToolAvailabilityMetadata {
     pub installed: bool,
     pub enabled: bool,
     pub host_trusted: bool,
+    pub archive_kind: Option<String>,
+    pub archive_checksum: Option<String>,
     pub reason_codes: Vec<String>,
 }
 
@@ -117,6 +137,10 @@ pub struct PluginAdmissionMetadata {
     pub production_eligible: bool,
     pub package_installed: Option<bool>,
     pub package_enabled: Option<bool>,
+    pub archive_installed: Option<bool>,
+    pub archive_enabled: Option<bool>,
+    pub archive_kind: Option<String>,
+    pub archive_checksum: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,6 +153,124 @@ struct IndexedCommand {
     side_effects: SideEffectClass,
     capabilities_required: Vec<String>,
     approval_expectation: Option<ApprovalExpectation>,
+}
+
+const ARCHIVE_MANIFEST_NAME: &str = "oberon-archive.json";
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum ArchiveKind {
+    OrdinaryPlugin,
+    FirstPartyPackage,
+}
+
+impl ArchiveKind {
+    fn extension(&self) -> &'static str {
+        match self {
+            Self::OrdinaryPlugin => ".obplg.zip",
+            Self::FirstPartyPackage => ".obpkg.zip",
+        }
+    }
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::OrdinaryPlugin => "ordinary-plugin",
+            Self::FirstPartyPackage => "first-party-package",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+struct ArchiveManifest {
+    pub id: String,
+    pub version: String,
+    pub kind: ArchiveKind,
+    #[serde(default, rename = "pluginManifestPath")]
+    pub plugin_manifest_path: Option<String>,
+    #[serde(default, rename = "wasmPath")]
+    pub wasm_path: Option<String>,
+    #[serde(default, rename = "packageManifestPath")]
+    pub package_manifest_path: Option<String>,
+    #[serde(default)]
+    pub settings: Vec<ArchiveSettingDefinition>,
+    #[serde(default)]
+    pub signature: Option<oberon4_core::SignatureMetadata>,
+    #[serde(default)]
+    pub build: Option<oberon4_core::BuildMetadata>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+struct ArchiveSettingDefinition {
+    pub key: String,
+    #[serde(rename = "type")]
+    pub value_type: String,
+    pub default: toml::Value,
+    pub description: String,
+    pub sensitivity: String,
+    #[serde(default, rename = "operatorEditable")]
+    pub operator_editable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct InstalledArchiveConfig {
+    pub id: String,
+    pub kind: String,
+    pub version: String,
+    #[serde(rename = "archivePath")]
+    pub archive_path: String,
+    #[serde(rename = "archiveSha256")]
+    pub archive_sha256: String,
+    pub installed: bool,
+    #[serde(rename = "installedAt")]
+    pub installed_at: String,
+    #[serde(rename = "lastSeenAt")]
+    pub last_seen_at: String,
+    pub enabled: bool,
+    #[serde(default, rename = "disabledReason")]
+    pub disabled_reason: Option<String>,
+    #[serde(rename = "loadStatus")]
+    pub load_status: String,
+    #[serde(default, rename = "lastError")]
+    pub last_error: Option<String>,
+    #[serde(default)]
+    pub settings: BTreeMap<String, toml::Value>,
+    #[serde(default, rename = "deprecatedSettings")]
+    pub deprecated_settings: BTreeMap<String, toml::Value>,
+    #[serde(default, rename = "runtimeOverrides")]
+    pub runtime_overrides: Option<oberon4_core::ResourceBudgetRequest>,
+}
+
+impl InstalledArchiveConfig {
+    fn new(
+        archive: &DiscoveredArchive,
+        settings: BTreeMap<String, toml::Value>,
+        now: &str,
+    ) -> Self {
+        Self {
+            id: archive.manifest.id.clone(),
+            kind: archive.manifest.kind.as_str().to_string(),
+            version: archive.manifest.version.clone(),
+            archive_path: archive.path.display().to_string(),
+            archive_sha256: archive.sha256.clone(),
+            installed: true,
+            installed_at: now.to_string(),
+            last_seen_at: now.to_string(),
+            enabled: true,
+            disabled_reason: None,
+            load_status: "ready".to_string(),
+            last_error: None,
+            settings,
+            deprecated_settings: BTreeMap::new(),
+            runtime_overrides: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DiscoveredArchive {
+    path: PathBuf,
+    sha256: String,
+    manifest: ArchiveManifest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,6 +327,7 @@ impl FilePluginRegistry {
                 &mut plugins,
                 &mut index,
                 &mut tool_availability,
+                &BTreeSet::new(),
                 enabled_packages,
                 disabled_packages,
                 runtime_api_version,
@@ -225,6 +368,156 @@ impl FilePluginRegistry {
                         package_id: None,
                         host_trusted: false,
                         enabled: true,
+                        archive_path: None,
+                        archive_entry_manifest_path: None,
+                        archive_entry_wasm_path: None,
+                        archive_checksum: None,
+                        generated_config_path: None,
+                        manifest_validation: ManifestValidationResult {
+                            valid: true,
+                            issues: Vec::new(),
+                        },
+                        conformance_status: ConformanceStatus::NotRun,
+                        conformance_issues: Vec::new(),
+                    },
+                    runtime_api_version,
+                    true,
+                    Some(&conformance_engine),
+                )?;
+            }
+        }
+
+        Ok(Self {
+            runtime_api_version: runtime_api_version.to_string(),
+            plugins,
+            index,
+            tool_availability,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_from_runtime_sources(
+        plugin_archive_roots: &[PathBuf],
+        plugin_config_root: &Path,
+        enabled_plugins: &BTreeSet<String>,
+        disabled_plugins: &BTreeSet<String>,
+        plugin_roots: &[PathBuf],
+        package_roots: &[PathBuf],
+        enabled_packages: &BTreeSet<String>,
+        disabled_packages: &BTreeSet<String>,
+        runtime_api_version: &str,
+    ) -> Result<Self, OberonError> {
+        let mut plugins = BTreeMap::new();
+        let mut index = Vec::new();
+        let mut tool_availability = BTreeMap::new();
+        let conformance_engine = ExecutionEngine::new(RuntimeBrokerFoundations::default())?;
+
+        if package_roots.is_empty() && plugin_archive_roots.is_empty() {
+            for registered in PluginRuntimeVersionedPackage::registered_plugins() {
+                insert_registered_plugin(
+                    &mut plugins,
+                    &mut index,
+                    &mut tool_availability,
+                    registered,
+                    runtime_api_version,
+                    false,
+                    Some(&conformance_engine),
+                )?;
+            }
+        }
+
+        fs::create_dir_all(plugin_config_root).map_err(|err| {
+            OberonError::Storage(format!(
+                "plugin config root create failed ({}): {err}",
+                plugin_config_root.display()
+            ))
+        })?;
+        let existing_configs = load_installed_archive_configs(plugin_config_root)?;
+        let mut seen_archive_ids = BTreeSet::new();
+        for root in plugin_archive_roots {
+            discover_archive_plugins(
+                root,
+                plugin_config_root,
+                &existing_configs,
+                &mut seen_archive_ids,
+                &mut plugins,
+                &mut index,
+                &mut tool_availability,
+                enabled_plugins,
+                disabled_plugins,
+                runtime_api_version,
+                &conformance_engine,
+            )?;
+        }
+        register_missing_archive_configs(
+            &existing_configs,
+            &seen_archive_ids,
+            &mut tool_availability,
+        );
+        let archive_managed_ids = existing_configs
+            .keys()
+            .chain(seen_archive_ids.iter())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+
+        for root in package_roots {
+            discover_first_party_packages(
+                root,
+                &mut plugins,
+                &mut index,
+                &mut tool_availability,
+                &archive_managed_ids,
+                enabled_packages,
+                disabled_packages,
+                runtime_api_version,
+                &conformance_engine,
+            )?;
+        }
+
+        for package_id in enabled_packages {
+            if archive_managed_ids.contains(package_id) {
+                continue;
+            }
+            if !tool_availability
+                .values()
+                .any(|metadata| metadata.package_id.as_deref() == Some(package_id.as_str()))
+            {
+                register_missing_first_party_package(package_id, &mut tool_availability);
+            }
+        }
+
+        for root in plugin_roots {
+            let manifest_paths = discover_manifest_paths(root)?;
+            for manifest_path in manifest_paths {
+                let manifest = load_manifest(&manifest_path)?;
+                if archive_managed_ids.contains(&manifest.id) {
+                    continue;
+                }
+                let wasm_path = manifest_path.with_file_name("plugin.wasm");
+                if !wasm_path.is_file() {
+                    return Err(OberonError::ManifestValidation(format!(
+                        "{}: missing plugin.wasm adjacent to plugin.json",
+                        manifest_path.display()
+                    )));
+                }
+                insert_registered_plugin(
+                    &mut plugins,
+                    &mut index,
+                    &mut tool_availability,
+                    RegisteredPlugin {
+                        manifest_path,
+                        wasm_path,
+                        manifest,
+                        tool_tier: ToolTier::OrdinaryPlugin,
+                        source_kind: RegisteredToolSource::OrdinaryPlugin,
+                        package_id: None,
+                        host_trusted: false,
+                        enabled: true,
+                        archive_path: None,
+                        archive_entry_manifest_path: None,
+                        archive_entry_wasm_path: None,
+                        archive_checksum: None,
+                        generated_config_path: None,
                         manifest_validation: ManifestValidationResult {
                             valid: true,
                             issues: Vec::new(),
@@ -283,12 +576,601 @@ struct FirstPartyPackageToolManifest {
     pub manifest_path: String,
 }
 
+fn now_timestamp() -> Result<String, OberonError> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| OberonError::Storage(format!("clock failure: {err}")))?
+        .as_secs()
+        .to_string())
+}
+
+fn archive_config_path(config_root: &Path, id: &str) -> PathBuf {
+    config_root.join(format!("{id}.toml"))
+}
+
+fn discover_archive_paths(root: &Path) -> Result<Vec<PathBuf>, OberonError> {
+    let mut archives = Vec::new();
+    if !root.exists() {
+        return Ok(archives);
+    }
+
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        for entry in fs::read_dir(&current)
+            .map_err(|err| OberonError::Storage(format!("read_dir failed: {err}")))?
+        {
+            let entry =
+                entry.map_err(|err| OberonError::Storage(format!("dir entry failed: {err}")))?;
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if let Some(name) = path.file_name().and_then(|value| value.to_str()) {
+                if name.ends_with(".obplg.zip") || name.ends_with(".obpkg.zip") {
+                    archives.push(path);
+                }
+            }
+        }
+    }
+
+    archives.sort();
+    Ok(archives)
+}
+
+fn read_archive_bytes(path: &Path) -> Result<Vec<u8>, OberonError> {
+    fs::read(path).map_err(|err| OberonError::Storage(format!("archive read failed: {err}")))
+}
+
+fn compute_archive_sha256(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    format!("sha256:{:x}", digest)
+}
+
+fn open_zip_archive(bytes: &[u8]) -> Result<ZipArchive<Cursor<Vec<u8>>>, OberonError> {
+    ZipArchive::new(Cursor::new(bytes.to_vec()))
+        .map_err(|err| OberonError::ManifestValidation(format!("invalid archive zip: {err}")))
+}
+
+fn read_zip_entry_bytes(
+    archive: &mut ZipArchive<Cursor<Vec<u8>>>,
+    entry_path: &str,
+) -> Result<Vec<u8>, OberonError> {
+    let mut file = archive.by_name(entry_path).map_err(|err| {
+        OberonError::ManifestValidation(format!("missing archive entry '{entry_path}': {err}"))
+    })?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|err| OberonError::Storage(format!("archive entry read failed: {err}")))?;
+    Ok(bytes)
+}
+
+fn read_zip_entry_string(
+    archive: &mut ZipArchive<Cursor<Vec<u8>>>,
+    entry_path: &str,
+) -> Result<String, OberonError> {
+    String::from_utf8(read_zip_entry_bytes(archive, entry_path)?)
+        .map_err(|err| OberonError::ManifestValidation(format!("archive entry utf8 failed: {err}")))
+}
+
+fn load_archive_manifest(path: &Path) -> Result<DiscoveredArchive, OberonError> {
+    let bytes = read_archive_bytes(path)?;
+    let sha256 = compute_archive_sha256(&bytes);
+    let mut archive = open_zip_archive(&bytes)?;
+    let raw = read_zip_entry_string(&mut archive, ARCHIVE_MANIFEST_NAME)?;
+    let manifest: ArchiveManifest = serde_json::from_str(&raw).map_err(|err| {
+        OberonError::ManifestValidation(format!("invalid archive manifest: {err}"))
+    })?;
+
+    if !path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(|name| name.ends_with(manifest.kind.extension()))
+        .unwrap_or(false)
+    {
+        return Err(OberonError::ManifestValidation(format!(
+            "{}: archive extension does not match kind {}",
+            path.display(),
+            manifest.kind.as_str()
+        )));
+    }
+
+    Ok(DiscoveredArchive {
+        path: path.to_path_buf(),
+        sha256,
+        manifest,
+    })
+}
+
+fn load_archive_plugin_manifest(
+    archive_path: &Path,
+    manifest_path: &str,
+) -> Result<PluginManifest, OberonError> {
+    let bytes = read_archive_bytes(archive_path)?;
+    let mut archive = open_zip_archive(&bytes)?;
+    let raw = read_zip_entry_string(&mut archive, manifest_path)?;
+    serde_json::from_str(&raw).map_err(|err| {
+        OberonError::ManifestValidation(format!("invalid plugin.json in archive: {err}"))
+    })
+}
+
+fn load_archive_package_manifest(
+    archive_path: &Path,
+    manifest_path: &str,
+) -> Result<FirstPartyPackageManifest, OberonError> {
+    let bytes = read_archive_bytes(archive_path)?;
+    let mut archive = open_zip_archive(&bytes)?;
+    let raw = read_zip_entry_string(&mut archive, manifest_path)?;
+    serde_json::from_str(&raw).map_err(|err| {
+        OberonError::ManifestValidation(format!("invalid package.json in archive: {err}"))
+    })
+}
+
+fn archive_setting_defaults(
+    settings: &[ArchiveSettingDefinition],
+) -> BTreeMap<String, toml::Value> {
+    settings
+        .iter()
+        .map(|setting| (setting.key.clone(), setting.default.clone()))
+        .collect()
+}
+
+fn validate_setting_value(setting: &ArchiveSettingDefinition, value: &toml::Value) -> bool {
+    match setting.value_type.as_str() {
+        "string" => value.is_str(),
+        "integer" => value.as_integer().is_some(),
+        "number" => value.as_float().is_some() || value.as_integer().is_some(),
+        "boolean" => value.as_bool().is_some(),
+        "array" => value.as_array().is_some(),
+        "object" => value.as_table().is_some(),
+        _ => false,
+    }
+}
+
+fn load_installed_archive_configs(
+    config_root: &Path,
+) -> Result<BTreeMap<String, (PathBuf, InstalledArchiveConfig)>, OberonError> {
+    let mut configs = BTreeMap::new();
+    if !config_root.exists() {
+        return Ok(configs);
+    }
+
+    for entry in fs::read_dir(config_root)
+        .map_err(|err| OberonError::Storage(format!("config dir read failed: {err}")))?
+    {
+        let entry =
+            entry.map_err(|err| OberonError::Storage(format!("config entry failed: {err}")))?;
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("toml") {
+            continue;
+        }
+        let raw = fs::read_to_string(&path)
+            .map_err(|err| OberonError::Storage(format!("config file read failed: {err}")))?;
+        let config: InstalledArchiveConfig = toml::from_str(&raw).map_err(|err| {
+            OberonError::ManifestValidation(format!("invalid generated config: {err}"))
+        })?;
+        configs.insert(config.id.clone(), (path, config));
+    }
+
+    Ok(configs)
+}
+
+fn write_installed_archive_config(
+    config_path: &Path,
+    config: &InstalledArchiveConfig,
+) -> Result<(), OberonError> {
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| OberonError::Storage(format!("config dir create failed: {err}")))?;
+    }
+    let encoded = toml::to_string_pretty(config)
+        .map_err(|err| OberonError::Storage(format!("config encode failed: {err}")))?;
+    fs::write(config_path, encoded)
+        .map_err(|err| OberonError::Storage(format!("config write failed: {err}")))
+}
+
+fn load_or_create_archive_config(
+    config_root: &Path,
+    archive: &DiscoveredArchive,
+    existing: Option<&(PathBuf, InstalledArchiveConfig)>,
+) -> Result<(PathBuf, InstalledArchiveConfig), OberonError> {
+    let now = now_timestamp()?;
+    let config_path = existing
+        .map(|(path, _)| path.clone())
+        .unwrap_or_else(|| archive_config_path(config_root, &archive.manifest.id));
+    let setting_defaults = archive_setting_defaults(&archive.manifest.settings);
+
+    let mut config = if let Some((_, prior)) = existing {
+        let mut prior = prior.clone();
+        prior.version = archive.manifest.version.clone();
+        prior.kind = archive.manifest.kind.as_str().to_string();
+        prior.archive_path = archive.path.display().to_string();
+        prior.archive_sha256 = archive.sha256.clone();
+        prior.installed = true;
+        prior.last_seen_at = now.clone();
+        prior.load_status = "ready".to_string();
+        prior.last_error = None;
+
+        for (key, value) in &setting_defaults {
+            prior
+                .settings
+                .entry(key.clone())
+                .or_insert_with(|| value.clone());
+        }
+
+        let mut deprecated = BTreeMap::new();
+        let active_keys = archive
+            .manifest
+            .settings
+            .iter()
+            .map(|setting| setting.key.as_str())
+            .collect::<BTreeSet<_>>();
+        let prior_keys = prior.settings.keys().cloned().collect::<Vec<_>>();
+        for key in prior_keys {
+            if !active_keys.contains(key.as_str()) {
+                if let Some(value) = prior.settings.remove(&key) {
+                    deprecated.insert(key, value);
+                }
+            }
+        }
+        prior.deprecated_settings.extend(deprecated);
+        prior
+    } else {
+        InstalledArchiveConfig::new(archive, setting_defaults, &now)
+    };
+
+    for setting in &archive.manifest.settings {
+        if let Some(value) = config.settings.get(&setting.key) {
+            if !validate_setting_value(setting, value) {
+                config.load_status = "invalid-config".to_string();
+                config.last_error = Some(format!(
+                    "setting '{}' does not match declared type '{}'",
+                    setting.key, setting.value_type
+                ));
+                write_installed_archive_config(&config_path, &config)?;
+                return Err(OberonError::Validation(
+                    config
+                        .last_error
+                        .clone()
+                        .unwrap_or_else(|| "invalid generated config".to_string()),
+                ));
+            }
+        }
+    }
+
+    write_installed_archive_config(&config_path, &config)?;
+    Ok((config_path, config))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn discover_archive_plugins(
+    root: &Path,
+    config_root: &Path,
+    existing_configs: &BTreeMap<String, (PathBuf, InstalledArchiveConfig)>,
+    seen_archive_ids: &mut BTreeSet<String>,
+    plugins: &mut BTreeMap<String, RegisteredPlugin>,
+    index: &mut Vec<IndexedCommand>,
+    tool_availability: &mut BTreeMap<String, ToolAvailabilityMetadata>,
+    enabled_plugins: &BTreeSet<String>,
+    disabled_plugins: &BTreeSet<String>,
+    runtime_api_version: &str,
+    conformance_engine: &ExecutionEngine,
+) -> Result<(), OberonError> {
+    for archive_path in discover_archive_paths(root)? {
+        let archive = load_archive_manifest(&archive_path)?;
+        let archive_id = archive.manifest.id.clone();
+        seen_archive_ids.insert(archive_id.clone());
+
+        let existing = existing_configs.get(&archive_id);
+        let config_result = load_or_create_archive_config(config_root, &archive, existing);
+        let (config_path, config) = match config_result {
+            Ok(value) => value,
+            Err(err) => {
+                register_invalid_archive_config(&archive, config_root, tool_availability, err)?;
+                continue;
+            }
+        };
+
+        let enabled_by_config = config.enabled && !disabled_plugins.contains(&archive_id);
+        let explicitly_enabled =
+            enabled_plugins.is_empty() || enabled_plugins.contains(&archive_id);
+        let archive_enabled = enabled_by_config && explicitly_enabled;
+
+        if !archive_enabled {
+            register_archive_disabled_state(&archive, tool_availability);
+            continue;
+        }
+
+        match archive.manifest.kind {
+            ArchiveKind::OrdinaryPlugin => {
+                let manifest_path =
+                    archive
+                        .manifest
+                        .plugin_manifest_path
+                        .clone()
+                        .ok_or_else(|| {
+                            OberonError::ManifestValidation(format!(
+                                "{}: ordinary-plugin archive missing pluginManifestPath",
+                                archive.path.display()
+                            ))
+                        })?;
+                let wasm_path = archive.manifest.wasm_path.clone().ok_or_else(|| {
+                    OberonError::ManifestValidation(format!(
+                        "{}: ordinary-plugin archive missing wasmPath",
+                        archive.path.display()
+                    ))
+                })?;
+                let manifest = load_archive_plugin_manifest(&archive.path, &manifest_path)?;
+                if manifest.id != archive.manifest.id
+                    || manifest.version != archive.manifest.version
+                {
+                    return Err(OberonError::ManifestValidation(format!(
+                        "{}: archive manifest id/version does not match plugin.json",
+                        archive.path.display()
+                    )));
+                }
+                insert_registered_plugin(
+                    plugins,
+                    index,
+                    tool_availability,
+                    RegisteredPlugin {
+                        manifest_path: PathBuf::from(format!(
+                            "{}::{manifest_path}",
+                            archive.path.display()
+                        )),
+                        wasm_path: PathBuf::from(format!(
+                            "{}::{wasm_path}",
+                            archive.path.display()
+                        )),
+                        manifest,
+                        tool_tier: ToolTier::OrdinaryPlugin,
+                        source_kind: RegisteredToolSource::OrdinaryPlugin,
+                        package_id: None,
+                        host_trusted: false,
+                        enabled: true,
+                        archive_path: Some(archive.path.clone()),
+                        archive_entry_manifest_path: Some(manifest_path),
+                        archive_entry_wasm_path: Some(wasm_path),
+                        archive_checksum: Some(archive.sha256.clone()),
+                        generated_config_path: Some(config_path.clone()),
+                        manifest_validation: ManifestValidationResult {
+                            valid: true,
+                            issues: Vec::new(),
+                        },
+                        conformance_status: ConformanceStatus::NotRun,
+                        conformance_issues: Vec::new(),
+                    },
+                    runtime_api_version,
+                    true,
+                    Some(conformance_engine),
+                )?;
+            }
+            ArchiveKind::FirstPartyPackage => {
+                let manifest_path =
+                    archive
+                        .manifest
+                        .package_manifest_path
+                        .clone()
+                        .ok_or_else(|| {
+                            OberonError::ManifestValidation(format!(
+                                "{}: first-party-package archive missing packageManifestPath",
+                                archive.path.display()
+                            ))
+                        })?;
+                let package = load_archive_package_manifest(&archive.path, &manifest_path)?;
+                if package.id != archive.manifest.id || package.version != archive.manifest.version
+                {
+                    return Err(OberonError::ManifestValidation(format!(
+                        "{}: archive manifest id/version does not match package.json",
+                        archive.path.display()
+                    )));
+                }
+                for tool in &package.tools {
+                    let entry_path = tool.manifest_path.clone();
+                    let manifest = load_archive_plugin_manifest(&archive.path, &entry_path)?;
+                    insert_registered_plugin(
+                        plugins,
+                        index,
+                        tool_availability,
+                        RegisteredPlugin {
+                            manifest_path: PathBuf::from(format!(
+                                "{}::{entry_path}",
+                                archive.path.display()
+                            )),
+                            wasm_path: archive.path.clone(),
+                            manifest,
+                            tool_tier: ToolTier::BrokeredPrivileged,
+                            source_kind: RegisteredToolSource::FirstPartyPackage,
+                            package_id: Some(package.id.clone()),
+                            host_trusted: true,
+                            enabled: true,
+                            archive_path: Some(archive.path.clone()),
+                            archive_entry_manifest_path: Some(entry_path),
+                            archive_entry_wasm_path: None,
+                            archive_checksum: Some(archive.sha256.clone()),
+                            generated_config_path: Some(config_path.clone()),
+                            manifest_validation: ManifestValidationResult {
+                                valid: true,
+                                issues: Vec::new(),
+                            },
+                            conformance_status: ConformanceStatus::Passed,
+                            conformance_issues: Vec::new(),
+                        },
+                        runtime_api_version,
+                        false,
+                        Some(conformance_engine),
+                    )?;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn register_archive_disabled_state(
+    archive: &DiscoveredArchive,
+    tool_availability: &mut BTreeMap<String, ToolAvailabilityMetadata>,
+) {
+    match archive.manifest.kind {
+        ArchiveKind::OrdinaryPlugin => {
+            tool_availability.insert(
+                archive.manifest.id.clone(),
+                ToolAvailabilityMetadata {
+                    tool: archive.manifest.id.clone(),
+                    tool_tier: ToolTier::OrdinaryPlugin,
+                    source_kind: Some(RegisteredToolSource::OrdinaryPlugin),
+                    package_id: None,
+                    installed: true,
+                    enabled: false,
+                    host_trusted: false,
+                    archive_kind: Some(archive.manifest.kind.as_str().to_string()),
+                    archive_checksum: Some(archive.sha256.clone()),
+                    reason_codes: vec!["blocked_by_disable".to_string()],
+                },
+            );
+        }
+        ArchiveKind::FirstPartyPackage => {
+            register_package_tool_state(
+                &FirstPartyPackageManifest {
+                    id: archive.manifest.id.clone(),
+                    version: archive.manifest.version.clone(),
+                    display_name: archive.manifest.id.clone(),
+                    description: String::new(),
+                    tools: PluginRuntimeVersionedPackage::tool_ids()
+                        .iter()
+                        .map(|tool| FirstPartyPackageToolManifest {
+                            tool: (*tool).to_string(),
+                            manifest_path: String::new(),
+                        })
+                        .collect(),
+                },
+                tool_availability,
+                true,
+                false,
+                vec!["blocked_by_disable".to_string()],
+            );
+            for tool in PluginRuntimeVersionedPackage::tool_ids() {
+                if let Some(metadata) = tool_availability.get_mut(*tool) {
+                    metadata.archive_kind = Some(archive.manifest.kind.as_str().to_string());
+                    metadata.archive_checksum = Some(archive.sha256.clone());
+                }
+            }
+        }
+    }
+}
+
+fn register_invalid_archive_config(
+    archive: &DiscoveredArchive,
+    config_root: &Path,
+    tool_availability: &mut BTreeMap<String, ToolAvailabilityMetadata>,
+    err: OberonError,
+) -> Result<(), OberonError> {
+    let config_path = archive_config_path(config_root, &archive.manifest.id);
+    let now = now_timestamp()?;
+    let mut config = InstalledArchiveConfig::new(
+        archive,
+        archive_setting_defaults(&archive.manifest.settings),
+        &now,
+    );
+    config.load_status = "invalid-config".to_string();
+    config.last_error = Some(err.to_string());
+    write_installed_archive_config(&config_path, &config)?;
+
+    match archive.manifest.kind {
+        ArchiveKind::OrdinaryPlugin => {
+            tool_availability.insert(
+                archive.manifest.id.clone(),
+                ToolAvailabilityMetadata {
+                    tool: archive.manifest.id.clone(),
+                    tool_tier: ToolTier::OrdinaryPlugin,
+                    source_kind: Some(RegisteredToolSource::OrdinaryPlugin),
+                    package_id: None,
+                    installed: true,
+                    enabled: false,
+                    host_trusted: false,
+                    archive_kind: Some(archive.manifest.kind.as_str().to_string()),
+                    archive_checksum: Some(archive.sha256.clone()),
+                    reason_codes: vec!["blocked_by_invalid_config".to_string()],
+                },
+            );
+        }
+        ArchiveKind::FirstPartyPackage => {
+            for tool in PluginRuntimeVersionedPackage::tool_ids() {
+                tool_availability.insert(
+                    (*tool).to_string(),
+                    ToolAvailabilityMetadata {
+                        tool: (*tool).to_string(),
+                        tool_tier: ToolTier::BrokeredPrivileged,
+                        source_kind: Some(RegisteredToolSource::FirstPartyPackage),
+                        package_id: Some(archive.manifest.id.clone()),
+                        installed: true,
+                        enabled: false,
+                        host_trusted: true,
+                        archive_kind: Some(archive.manifest.kind.as_str().to_string()),
+                        archive_checksum: Some(archive.sha256.clone()),
+                        reason_codes: vec!["blocked_by_invalid_config".to_string()],
+                    },
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn register_missing_archive_configs(
+    existing_configs: &BTreeMap<String, (PathBuf, InstalledArchiveConfig)>,
+    seen_archive_ids: &BTreeSet<String>,
+    tool_availability: &mut BTreeMap<String, ToolAvailabilityMetadata>,
+) {
+    for (id, (_, config)) in existing_configs {
+        if seen_archive_ids.contains(id) || !config.enabled {
+            continue;
+        }
+        if config.kind == "ordinary-plugin" {
+            tool_availability.insert(
+                id.clone(),
+                ToolAvailabilityMetadata {
+                    tool: id.clone(),
+                    tool_tier: ToolTier::OrdinaryPlugin,
+                    source_kind: Some(RegisteredToolSource::OrdinaryPlugin),
+                    package_id: None,
+                    installed: false,
+                    enabled: true,
+                    host_trusted: false,
+                    archive_kind: Some(config.kind.clone()),
+                    archive_checksum: Some(config.archive_sha256.clone()),
+                    reason_codes: vec!["blocked_by_missing_archive".to_string()],
+                },
+            );
+        } else if id == PluginRuntimeVersionedPackage::package_id() {
+            for tool in PluginRuntimeVersionedPackage::tool_ids() {
+                tool_availability.insert(
+                    (*tool).to_string(),
+                    ToolAvailabilityMetadata {
+                        tool: (*tool).to_string(),
+                        tool_tier: ToolTier::BrokeredPrivileged,
+                        source_kind: Some(RegisteredToolSource::FirstPartyPackage),
+                        package_id: Some(id.clone()),
+                        installed: false,
+                        enabled: true,
+                        host_trusted: true,
+                        archive_kind: Some(config.kind.clone()),
+                        archive_checksum: Some(config.archive_sha256.clone()),
+                        reason_codes: vec!["blocked_by_missing_archive".to_string()],
+                    },
+                );
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn discover_first_party_packages(
     root: &Path,
     plugins: &mut BTreeMap<String, RegisteredPlugin>,
     index: &mut Vec<IndexedCommand>,
     tool_availability: &mut BTreeMap<String, ToolAvailabilityMetadata>,
+    archive_managed_ids: &BTreeSet<String>,
     enabled_packages: &BTreeSet<String>,
     disabled_packages: &BTreeSet<String>,
     runtime_api_version: &str,
@@ -296,6 +1178,9 @@ fn discover_first_party_packages(
 ) -> Result<(), OberonError> {
     for package_manifest_path in discover_package_manifest_paths(root)? {
         let package = load_package_manifest(&package_manifest_path)?;
+        if archive_managed_ids.contains(&package.id) {
+            continue;
+        }
         let package_enabled = (enabled_packages.is_empty()
             || enabled_packages.contains(&package.id))
             && !disabled_packages.contains(&package.id);
@@ -336,6 +1221,11 @@ fn discover_first_party_packages(
                     package_id: Some(package.id.clone()),
                     host_trusted: true,
                     enabled: true,
+                    archive_path: None,
+                    archive_entry_manifest_path: None,
+                    archive_entry_wasm_path: None,
+                    archive_checksum: None,
+                    generated_config_path: None,
                     manifest_validation: ManifestValidationResult {
                         valid: true,
                         issues: Vec::new(),
@@ -370,6 +1260,8 @@ fn register_missing_first_party_package(
                 installed: false,
                 enabled: true,
                 host_trusted: true,
+                archive_kind: None,
+                archive_checksum: None,
                 reason_codes: vec!["blocked_by_missing_package".to_string()],
             },
         );
@@ -394,6 +1286,8 @@ fn register_package_tool_state(
                 installed,
                 enabled,
                 host_trusted: true,
+                archive_kind: None,
+                archive_checksum: None,
                 reason_codes: reason_codes.clone(),
             },
         );
@@ -650,6 +1544,12 @@ impl StaticPolicyResolver {
                     || (matches!(allowlist_status, AllowlistStatus::Allowlisted)
                         && matches!(plugin.conformance_status, ConformanceStatus::Passed)
                         && plugin.manifest_validation.valid);
+                let archive_installed = plugin.archive_path.as_ref().map(|_| true);
+                let archive_enabled = plugin.archive_path.as_ref().map(|_| plugin.enabled);
+                let archive_kind = plugin
+                    .archive_path
+                    .as_ref()
+                    .map(|_| plugin.source_kind_string());
                 (
                     plugin.manifest.id.clone(),
                     PluginAdmissionMetadata {
@@ -660,6 +1560,10 @@ impl StaticPolicyResolver {
                         production_eligible,
                         package_installed: plugin.package_id.as_ref().map(|_| true),
                         package_enabled: plugin.package_id.as_ref().map(|_| plugin.enabled),
+                        archive_installed,
+                        archive_enabled,
+                        archive_kind,
+                        archive_checksum: plugin.archive_checksum.clone(),
                     },
                 )
             })
@@ -714,6 +1618,10 @@ impl StaticPolicyResolver {
                 production_eligible,
                 package_installed: None,
                 package_enabled: None,
+                archive_installed: None,
+                archive_enabled: None,
+                archive_kind: None,
+                archive_checksum: None,
             }
         })
     }
@@ -804,6 +1712,10 @@ impl PolicyResolver for StaticPolicyResolver {
             production_eligible: admission.production_eligible,
             package_installed: admission.package_installed,
             package_enabled: admission.package_enabled,
+            archive_installed: admission.archive_installed,
+            archive_enabled: admission.archive_enabled,
+            archive_kind: admission.archive_kind,
+            archive_checksum: admission.archive_checksum,
             reason_codes,
             blocking_issues,
         })
@@ -1951,6 +2863,10 @@ where
                 production_eligible: true,
                 package_installed: None,
                 package_enabled: None,
+                archive_installed: None,
+                archive_enabled: None,
+                archive_kind: None,
+                archive_checksum: None,
                 reason_codes: vec!["core_host_tool".to_string()],
                 service_handles_used: Vec::new(),
                 secret_classes_involved: Vec::new(),
@@ -1992,6 +2908,16 @@ where
                         .package_id
                         .as_ref()
                         .map(|_| availability.enabled),
+                    archive_installed: availability
+                        .archive_kind
+                        .as_ref()
+                        .map(|_| availability.installed),
+                    archive_enabled: availability
+                        .archive_kind
+                        .as_ref()
+                        .map(|_| availability.enabled),
+                    archive_kind: availability.archive_kind.clone(),
+                    archive_checksum: availability.archive_checksum.clone(),
                     reason_codes: availability.reason_codes,
                     service_handles_used: Vec::new(),
                     secret_classes_involved: Vec::new(),
@@ -2024,6 +2950,10 @@ where
             production_eligible: resolution.production_eligible,
             package_installed: resolution.package_installed,
             package_enabled: resolution.package_enabled,
+            archive_installed: resolution.archive_installed,
+            archive_enabled: resolution.archive_enabled,
+            archive_kind: resolution.archive_kind,
+            archive_checksum: resolution.archive_checksum,
             reason_codes: {
                 let mut reason_codes = resolution.reason_codes;
                 if workspace_allowed {
@@ -2216,11 +3146,18 @@ fn insert_registered_plugin(
         )));
     }
 
-    if require_executable && !registered.wasm_path.is_file() {
-        return Err(OberonError::ManifestValidation(format!(
-            "{}: missing plugin.wasm adjacent to plugin.json",
-            registered.manifest_path.display()
-        )));
+    if require_executable {
+        let executable_present = if let Some(archive_path) = &registered.archive_path {
+            archive_path.is_file() && registered.archive_entry_wasm_path.is_some()
+        } else {
+            registered.wasm_path.is_file()
+        };
+        if !executable_present {
+            return Err(OberonError::ManifestValidation(format!(
+                "{}: missing plugin.wasm for plugin registration",
+                registered.manifest_path.display()
+            )));
+        }
     }
 
     if registered.tool_tier == ToolTier::OrdinaryPlugin {
@@ -2268,6 +3205,11 @@ fn insert_registered_plugin(
             installed: true,
             enabled: registered.enabled,
             host_trusted: registered.host_trusted,
+            archive_kind: registered
+                .archive_path
+                .as_ref()
+                .map(|_| registered.source_kind_string()),
+            archive_checksum: registered.archive_checksum.clone(),
             reason_codes: Vec::new(),
         },
     );
@@ -2293,7 +3235,12 @@ fn evaluate_plugin_conformance(
     }
 
     if registered.tool_tier == ToolTier::OrdinaryPlugin {
-        if !registered.wasm_path.is_file() {
+        let has_component = if let Some(archive_path) = &registered.archive_path {
+            archive_path.is_file() && registered.archive_entry_wasm_path.is_some()
+        } else {
+            registered.wasm_path.is_file()
+        };
+        if !has_component {
             issues.push("component:missing_wasm".to_string());
         } else if let Some(engine) = conformance_engine {
             if let Err(err) = engine.validate_component_contract(registered) {
@@ -2749,6 +3696,7 @@ mod tests {
     use std::{
         collections::BTreeSet,
         fs,
+        io::Write,
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -2768,6 +3716,7 @@ mod tests {
     use oberon4_core::{BuildMetadata, CapabilityGrant, CapabilityGrantKind, HandleOperation};
     use oberon4_core::{ManifestValidationResult, PluginRegistry, SideEffectClass};
     use oberon4_core::{OberonError, RequestId};
+    use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
     use crate::plugin_runtime_versioned::PluginRuntimeVersionedPackage;
 
@@ -2892,6 +3841,75 @@ mod tests {
         write_manifest_with_wasm(root, manifest, b"not-a-real-component");
     }
 
+    fn write_archive_plugin_with_settings(
+        archive_root: &std::path::Path,
+        manifest: &PluginManifest,
+        wasm: &[u8],
+        settings: serde_json::Value,
+    ) -> std::path::PathBuf {
+        fs::create_dir_all(archive_root).unwrap();
+        let archive_path = archive_root.join(format!("{}.obplg.zip", manifest.id));
+        let file = fs::File::create(&archive_path).unwrap();
+        let mut zip = ZipWriter::new(file);
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+
+        let archive_manifest = serde_json::json!({
+            "id": manifest.id,
+            "version": manifest.version,
+            "kind": "ordinary-plugin",
+            "pluginManifestPath": "plugin.json",
+            "wasmPath": "plugin.wasm",
+            "settings": settings,
+        });
+
+        zip.start_file("oberon-archive.json", options).unwrap();
+        zip.write_all(&serde_json::to_vec_pretty(&archive_manifest).unwrap())
+            .unwrap();
+        zip.start_file("plugin.json", options).unwrap();
+        zip.write_all(&serde_json::to_vec_pretty(manifest).unwrap())
+            .unwrap();
+        zip.start_file("plugin.wasm", options).unwrap();
+        zip.write_all(wasm).unwrap();
+        zip.finish().unwrap();
+        archive_path
+    }
+
+    fn write_archive_plugin(
+        archive_root: &std::path::Path,
+        manifest: &PluginManifest,
+        wasm: &[u8],
+    ) -> std::path::PathBuf {
+        write_archive_plugin_with_settings(archive_root, manifest, wasm, serde_json::json!([]))
+    }
+
+    fn load_archive_host(
+        archive_root: &std::path::Path,
+        config_root: &std::path::Path,
+        enabled_plugins: Vec<String>,
+        disabled_plugins: Vec<String>,
+        operating_mode: OperatingMode,
+        allowlisted_checksums: Vec<String>,
+    ) -> PluginRuntimeHost<FilePluginRegistry, StaticPolicyResolver> {
+        let registry = FilePluginRegistry::load_from_runtime_sources(
+            &[archive_root.to_path_buf()],
+            config_root,
+            &enabled_plugins.into_iter().collect(),
+            &disabled_plugins.into_iter().collect(),
+            &[],
+            &[],
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            HOST_RUNTIME_API_VERSION,
+        )
+        .unwrap();
+        let policy = StaticPolicyResolver::for_registered_plugins(
+            operating_mode,
+            allowlisted_checksums,
+            registry.all_registered_plugins(),
+        );
+        PluginRuntimeHost::new(registry, policy).unwrap()
+    }
+
     fn sample_context() -> InvocationContext {
         InvocationContext {
             request_id: RequestId::new(),
@@ -2913,6 +3931,297 @@ mod tests {
             storage_limit_bytes: 268_435_456,
             network_policy: NetworkPolicy::Denied,
         }
+    }
+
+    #[test]
+    fn archive_plugin_is_discoverable_and_generates_config_defaults() {
+        let archive_root = temp_dir("archive-ordinary");
+        let config_root = temp_dir("archive-config");
+        let manifest = sample_manifest();
+        write_archive_plugin_with_settings(
+            &archive_root,
+            &manifest,
+            VALID_WASM,
+            serde_json::json!([{
+                "key": "mode",
+                "type": "string",
+                "default": "safe",
+                "description": "Execution mode",
+                "sensitivity": "low",
+                "operatorEditable": true
+            }]),
+        );
+
+        let host = load_archive_host(
+            &archive_root,
+            &config_root,
+            Vec::new(),
+            Vec::new(),
+            OperatingMode::Dev,
+            Vec::new(),
+        );
+
+        let search = host
+            .tool_search(&SearchRequest {
+                query: "write file".to_string(),
+                limit: None,
+                session_id: None,
+            })
+            .unwrap();
+        assert!(
+            search
+                .matches
+                .iter()
+                .any(|entry| entry.tool == "workspace-git")
+        );
+
+        let config_path = config_root.join("workspace-git.toml");
+        assert!(config_path.is_file());
+        let config: toml::Value =
+            toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert_eq!(config["id"].as_str(), Some("workspace-git"));
+        assert_eq!(config["kind"].as_str(), Some("ordinary-plugin"));
+        assert_eq!(config["enabled"].as_bool(), Some(true));
+        assert_eq!(config["settings"]["mode"].as_str(), Some("safe"));
+        assert!(
+            config["archiveSha256"]
+                .as_str()
+                .unwrap()
+                .starts_with("sha256:")
+        );
+
+        let inspect = host
+            .tool_policy_inspect(&PolicyInspectRequest {
+                tool: "workspace-git".to_string(),
+                command: "write_file_atomic".to_string(),
+            })
+            .unwrap();
+        assert_eq!(inspect.archive_installed, Some(true));
+        assert_eq!(inspect.archive_enabled, Some(true));
+        assert_eq!(inspect.archive_kind.as_deref(), Some("ordinary-plugin"));
+        assert!(
+            inspect
+                .archive_checksum
+                .as_deref()
+                .unwrap()
+                .starts_with("sha256:")
+        );
+
+        let _ = fs::remove_dir_all(archive_root);
+        let _ = fs::remove_dir_all(config_root);
+    }
+
+    #[test]
+    fn archive_plugin_disable_and_missing_archive_states_are_visible() {
+        let archive_root = temp_dir("archive-disable");
+        let config_root = temp_dir("archive-disable-config");
+        let manifest = sample_manifest();
+        let archive_path = write_archive_plugin(&archive_root, &manifest, VALID_WASM);
+
+        let _ = load_archive_host(
+            &archive_root,
+            &config_root,
+            Vec::new(),
+            Vec::new(),
+            OperatingMode::Dev,
+            Vec::new(),
+        );
+
+        let config_path = config_root.join("workspace-git.toml");
+        let mut config: toml::Value =
+            toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        config["enabled"] = toml::Value::Boolean(false);
+        fs::write(&config_path, toml::to_string_pretty(&config).unwrap()).unwrap();
+
+        let disabled_host = load_archive_host(
+            &archive_root,
+            &config_root,
+            Vec::new(),
+            Vec::new(),
+            OperatingMode::Dev,
+            Vec::new(),
+        );
+        let search = disabled_host
+            .tool_search(&SearchRequest {
+                query: "write file".to_string(),
+                limit: None,
+                session_id: None,
+            })
+            .unwrap();
+        assert!(
+            !search
+                .matches
+                .iter()
+                .any(|entry| entry.tool == "workspace-git")
+        );
+        let inspect = disabled_host
+            .tool_policy_inspect(&PolicyInspectRequest {
+                tool: "workspace-git".to_string(),
+                command: "write_file_atomic".to_string(),
+            })
+            .unwrap();
+        assert_eq!(inspect.archive_installed, Some(true));
+        assert_eq!(inspect.archive_enabled, Some(false));
+        assert!(
+            inspect
+                .reason_codes
+                .contains(&"blocked_by_disable".to_string())
+        );
+
+        config["enabled"] = toml::Value::Boolean(true);
+        fs::write(&config_path, toml::to_string_pretty(&config).unwrap()).unwrap();
+        fs::remove_file(archive_path).unwrap();
+
+        let missing_host = load_archive_host(
+            &archive_root,
+            &config_root,
+            Vec::new(),
+            Vec::new(),
+            OperatingMode::Dev,
+            Vec::new(),
+        );
+        let missing_inspect = missing_host
+            .tool_policy_inspect(&PolicyInspectRequest {
+                tool: "workspace-git".to_string(),
+                command: "write_file_atomic".to_string(),
+            })
+            .unwrap();
+        assert_eq!(missing_inspect.archive_installed, Some(false));
+        assert_eq!(missing_inspect.archive_enabled, Some(true));
+        assert!(
+            missing_inspect
+                .reason_codes
+                .contains(&"blocked_by_missing_archive".to_string())
+        );
+
+        let _ = fs::remove_dir_all(archive_root);
+        let _ = fs::remove_dir_all(config_root);
+    }
+
+    #[test]
+    fn operator_archive_config_edits_persist_across_restarts() {
+        let archive_root = temp_dir("archive-persist");
+        let config_root = temp_dir("archive-persist-config");
+        let manifest = sample_manifest();
+        write_archive_plugin_with_settings(
+            &archive_root,
+            &manifest,
+            VALID_WASM,
+            serde_json::json!([{
+                "key": "mode",
+                "type": "string",
+                "default": "safe",
+                "description": "Execution mode",
+                "sensitivity": "low",
+                "operatorEditable": true
+            }]),
+        );
+
+        let _ = load_archive_host(
+            &archive_root,
+            &config_root,
+            Vec::new(),
+            Vec::new(),
+            OperatingMode::Dev,
+            Vec::new(),
+        );
+        let config_path = config_root.join("workspace-git.toml");
+        let mut config: toml::Value =
+            toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        config["settings"]["mode"] = toml::Value::String("turbo".to_string());
+        fs::write(&config_path, toml::to_string_pretty(&config).unwrap()).unwrap();
+
+        let _ = load_archive_host(
+            &archive_root,
+            &config_root,
+            Vec::new(),
+            Vec::new(),
+            OperatingMode::Dev,
+            Vec::new(),
+        );
+
+        let persisted: toml::Value =
+            toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert_eq!(persisted["settings"]["mode"].as_str(), Some("turbo"));
+
+        let _ = fs::remove_dir_all(archive_root);
+        let _ = fs::remove_dir_all(config_root);
+    }
+
+    #[test]
+    fn versioned_first_party_package_archive_is_discoverable() {
+        let archive_root = temp_dir("archive-package");
+        let config_root = temp_dir("archive-package-config");
+        PluginRuntimeVersionedPackage::materialize_package_archive(&archive_root).unwrap();
+
+        let host = load_archive_host(
+            &archive_root,
+            &config_root,
+            Vec::new(),
+            Vec::new(),
+            OperatingMode::Dev,
+            Vec::new(),
+        );
+
+        let search = host
+            .tool_search(&SearchRequest {
+                query: "git push github".to_string(),
+                limit: None,
+                session_id: None,
+            })
+            .unwrap();
+        assert!(search.matches.iter().any(|entry| entry.tool == "git"));
+        assert!(search.matches.iter().any(|entry| entry.tool == "github"));
+
+        let inspect = host
+            .tool_policy_inspect(&PolicyInspectRequest {
+                tool: "git".to_string(),
+                command: "push".to_string(),
+            })
+            .unwrap();
+        assert_eq!(inspect.archive_installed, Some(true));
+        assert_eq!(inspect.archive_enabled, Some(true));
+        assert_eq!(inspect.archive_kind.as_deref(), Some("first-party-package"));
+
+        let package_config = config_root.join("versioned-workspace.toml");
+        assert!(package_config.is_file());
+
+        let _ = fs::remove_dir_all(archive_root);
+        let _ = fs::remove_dir_all(config_root);
+    }
+
+    #[test]
+    fn archived_ordinary_plugin_production_admission_uses_manifest_checksum_allowlist() {
+        let archive_root = temp_dir("archive-prod-allowlist");
+        let config_root = temp_dir("archive-prod-allowlist-config");
+        let manifest = sample_manifest();
+        write_archive_plugin(&archive_root, &manifest, VALID_WASM);
+
+        let host = load_archive_host(
+            &archive_root,
+            &config_root,
+            Vec::new(),
+            Vec::new(),
+            OperatingMode::Production,
+            vec![manifest.provenance.checksum.clone()],
+        );
+
+        let inspect = host
+            .tool_policy_inspect(&PolicyInspectRequest {
+                tool: "workspace-git".to_string(),
+                command: "write_file_atomic".to_string(),
+            })
+            .unwrap();
+        assert_eq!(
+            inspect.plugin_admission_status,
+            PluginAdmissionStatus::Allowed
+        );
+        assert_eq!(inspect.allowlist_status, AllowlistStatus::Allowlisted);
+        assert_eq!(inspect.archive_installed, Some(true));
+        assert_eq!(inspect.archive_enabled, Some(true));
+
+        let _ = fs::remove_dir_all(archive_root);
+        let _ = fs::remove_dir_all(config_root);
     }
 
     #[test]

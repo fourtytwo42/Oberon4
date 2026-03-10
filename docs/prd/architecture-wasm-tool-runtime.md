@@ -4,6 +4,7 @@ Companion specifications:
 - `docs/prd/tool-interaction-contract.md`
 - `docs/prd/provider-tool-compatibility.md`
 - `docs/prd/plugin-runtime-contract.md`
+- `docs/prd/plugin-archive-schema.md`
 
 ## 1. System Shape
 The WASM/WASI tool runtime is a host-managed subsystem inside Oberon4.
@@ -90,20 +91,21 @@ Design rule:
 - keep the agent-facing contract free of platform-specific assumptions such as shell syntax, platform-native paths, or host process-manager semantics
 
 ## 3. Runtime Flow
-1. host scans configured package roots for first-party package manifests and configured plugin roots for ordinary plugin manifests
+1. host scans configured archive roots for `.obplg.zip` and `.obpkg.zip` artifacts, plus compatibility plugin and package roots when enabled
 2. host validates manifest structure, ids, versions, capability declarations, and schemas
-3. host builds a search index from manifest metadata without executing plugins
-4. agent calls `tool_search`
-5. host returns compact ranked matches
-6. agent calls `tool_describe`
-7. host returns verbose plugin prompting, schema, examples, and safety notes
-8. agent optionally calls `tool_plan`
-9. host returns side-effect class, required capabilities, approval expectations, and estimated execution details
-10. agent calls `tool_invoke`
-11. host validates input schema and policy
-12. host prepares isolated WASI execution context and storage mounts
-13. host invokes the plugin command
-14. host validates output schema and returns structured results or structured errors
+3. host generates or refreshes `plugin-config/<id>.toml` for each discovered archive
+4. host builds a search index from manifest metadata without executing plugins
+5. agent calls `tool_search`
+6. host returns compact ranked matches
+7. agent calls `tool_describe`
+8. host returns verbose plugin prompting, schema, examples, and safety notes
+9. agent optionally calls `tool_plan`
+10. host returns side-effect class, required capabilities, approval expectations, and estimated execution details
+11. agent calls `tool_invoke`
+12. host validates input schema and policy
+13. host prepares isolated WASI execution context and storage mounts
+14. host invokes the plugin command
+15. host validates output schema and returns structured results or structured errors
 
 For brokered privileged services, steps 12 and 13 may route to a host-owned integration adapter instead of a generic ordinary plugin runtime.
 
@@ -166,11 +168,17 @@ Plugins do not own:
 - platform-specific code paths as part of the ordinary portable plugin contract
 
 ## 6. Plugin Package Contract
-Each plugin package should contain:
-- a WASM module
-- a manifest
+Primary install contract:
+- archive wrapper `oberon-archive.json`
+- inner runtime manifest(s)
+- a WASM module for ordinary plugins
 - optional bundled docs/examples
 - optional test fixtures and migration metadata
+
+Generated config contract:
+- every discovered archive gets a generated `plugin-config/<id>.toml`
+- generated config stores install metadata, enabled state, load status, last error, and operator-editable settings
+- generated config remains after archive removal so the host can report missing-installed state explicitly
 
 Minimum manifest fields:
 - `id`

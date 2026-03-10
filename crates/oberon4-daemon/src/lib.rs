@@ -402,6 +402,13 @@ where
         &self,
     ) -> Result<PluginRuntimeHost<FilePluginRegistry, StaticPolicyResolver>, OberonError> {
         let config = self.runtime.load_config()?;
+        let plugin_archive_roots = config
+            .runtime
+            .plugin_archive_roots
+            .iter()
+            .map(PathBuf::from)
+            .collect::<Vec<_>>();
+        let plugin_config_root = PathBuf::from(&config.runtime.plugin_config_root);
         let plugin_roots = config
             .runtime
             .plugin_roots
@@ -414,10 +421,24 @@ where
             .iter()
             .map(PathBuf::from)
             .collect::<Vec<_>>();
-        for root in &package_roots {
-            PluginRuntimeVersionedPackage::ensure_default_package_installed(root)?;
+        for root in &plugin_archive_roots {
+            PluginRuntimeVersionedPackage::ensure_default_package_archive_installed(root)?;
         }
-        let registry = FilePluginRegistry::load_from_sources(
+        let registry = FilePluginRegistry::load_from_runtime_sources(
+            &plugin_archive_roots,
+            &plugin_config_root,
+            &config
+                .runtime
+                .enabled_plugins
+                .iter()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            &config
+                .runtime
+                .disabled_plugins
+                .iter()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
             &plugin_roots,
             &package_roots,
             &config
@@ -1863,6 +1884,12 @@ mod tests {
                         stream_responses: true,
                         operating_mode: oberon4_core::OperatingMode::Dev,
                         allowed_plugin_checksums: Vec::new(),
+                        plugin_archive_roots: oberon4_core::RuntimeConfig::default()
+                            .plugin_archive_roots,
+                        plugin_config_root: oberon4_core::RuntimeConfig::default()
+                            .plugin_config_root,
+                        enabled_plugins: Vec::new(),
+                        disabled_plugins: Vec::new(),
                         plugin_roots: oberon4_core::RuntimeConfig::default().plugin_roots,
                         package_roots: oberon4_core::RuntimeConfig::default().package_roots,
                         enabled_packages: Vec::new(),
