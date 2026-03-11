@@ -71,16 +71,34 @@ impl OAuthProviderConfig {
     }
 
     pub fn github() -> Result<Self, OberonError> {
+        let store = oberon4_core::FileSecretStore::default();
         let client_id = load_github_app_secret(
+            &store,
             GITHUB_CLIENT_ID_ENV,
             GITHUB_CLIENT_ID_STORE_KEY,
             "client id",
         )?;
         let client_secret = load_github_app_secret(
+            &store,
             GITHUB_CLIENT_SECRET_ENV,
             GITHUB_CLIENT_SECRET_STORE_KEY,
             "client secret",
         )?;
+        Ok(Self {
+            provider: OAuthProviderKind::Github,
+            client_id,
+            client_secret: Some(client_secret),
+            authorize_url: GITHUB_AUTHORIZE_URL.to_string(),
+            token_url: GITHUB_TOKEN_URL.to_string(),
+            redirect_base: "http://localhost:1455".to_string(),
+            scope: GITHUB_SCOPE.to_string(),
+            state_ttl: Duration::from_secs(600),
+        })
+    }
+
+    pub fn github_from_store<S: SecretStore>(store: &S) -> Result<Self, OberonError> {
+        let client_id = store.get_secret(GITHUB_CLIENT_ID_STORE_KEY)?;
+        let client_secret = store.get_secret(GITHUB_CLIENT_SECRET_STORE_KEY)?;
         Ok(Self {
             provider: OAuthProviderKind::Github,
             client_id,
@@ -559,6 +577,12 @@ impl GithubOAuthAdapter {
         }
     }
 
+    pub fn from_config(config: OAuthProviderConfig) -> Self {
+        Self {
+            inner: Some(OAuthFlowManager::new(config)),
+        }
+    }
+
     pub fn flow_manager(&self) -> Option<&OAuthFlowManager> {
         self.inner.as_ref()
     }
@@ -732,7 +756,8 @@ fn provider_authorization_extras(provider: OAuthProviderKind) -> &'static str {
     }
 }
 
-fn load_github_app_secret(
+fn load_github_app_secret<S: SecretStore>(
+    store: &S,
     env_key: &str,
     store_key: &str,
     field_label: &str,
@@ -744,7 +769,6 @@ fn load_github_app_secret(
         }
     }
 
-    let store = oberon4_core::FileSecretStore::default();
     match store.get_secret(store_key) {
         Ok(value) if !value.trim().is_empty() => Ok(value),
         _ => Err(OberonError::Validation(format!(
@@ -793,6 +817,19 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("oberon4-accounts-{name}-{nonce}.json"))
+    }
+
+    fn github_test_config() -> OAuthProviderConfig {
+        OAuthProviderConfig {
+            provider: OAuthProviderKind::Github,
+            client_id: "github-client-id".to_string(),
+            client_secret: Some("github-client-secret".to_string()),
+            authorize_url: super::GITHUB_AUTHORIZE_URL.to_string(),
+            token_url: super::GITHUB_TOKEN_URL.to_string(),
+            redirect_base: "http://localhost:1455".to_string(),
+            scope: super::GITHUB_SCOPE.to_string(),
+            state_ttl: std::time::Duration::from_secs(600),
+        }
     }
 
     #[test]
@@ -860,11 +897,7 @@ mod tests {
 
     #[test]
     fn github_flow_start_uses_github_urls() {
-        unsafe {
-            std::env::set_var(super::GITHUB_CLIENT_ID_ENV, "github-client-id");
-            std::env::set_var(super::GITHUB_CLIENT_SECRET_ENV, "github-client-secret");
-        }
-        let manager = OAuthFlowManager::new(OAuthProviderConfig::github().unwrap());
+        let manager = OAuthFlowManager::new(github_test_config());
         let (start, _) = manager.start_flow("/auth/callback", None, 75).unwrap();
 
         assert_eq!(start.provider, OAuthProviderKind::Github);
@@ -879,21 +912,13 @@ mod tests {
                 .contains("client_id=github-client-id")
         );
         assert!(start.authorization_url.contains("scope=repo%20read%3Auser"));
-        unsafe {
-            std::env::remove_var(super::GITHUB_CLIENT_ID_ENV);
-            std::env::remove_var(super::GITHUB_CLIENT_SECRET_ENV);
-        }
     }
 
     #[test]
     fn oauth_adapters_report_correct_provider() {
         let openai = OpenAiOAuthAdapter::default();
         let anthropic = AnthropicOAuthAdapter::default();
-        unsafe {
-            std::env::set_var(super::GITHUB_CLIENT_ID_ENV, "github-client-id");
-            std::env::set_var(super::GITHUB_CLIENT_SECRET_ENV, "github-client-secret");
-        }
-        let github = GithubOAuthAdapter::new();
+        let github = GithubOAuthAdapter::from_config(github_test_config());
 
         assert_eq!(openai.provider_kind(), OAuthProviderKind::OpenAi);
         assert_eq!(anthropic.provider_kind(), OAuthProviderKind::Anthropic);
@@ -912,20 +937,11 @@ mod tests {
                 .authorization_url
                 .contains("github.com/login/oauth/authorize")
         );
-        unsafe {
-            std::env::remove_var(super::GITHUB_CLIENT_ID_ENV);
-            std::env::remove_var(super::GITHUB_CLIENT_SECRET_ENV);
-        }
     }
 
     #[test]
     fn github_config_falls_back_to_host_secret_store() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "oberon4-github-oauth-secrets-{}",
-            std::process::id()
-        ));
-        let secret_path = temp_dir.join("secrets.json");
-        let _ = std::fs::remove_dir_all(&temp_dir);
+        let secret_path = temp_path("github-oauth-secrets");
         let mut store = oberon4_core::FileSecretStore::new(&secret_path);
         store
             .set_secret(super::GITHUB_CLIENT_ID_STORE_KEY, "github-client-id")
@@ -937,23 +953,14 @@ mod tests {
             )
             .unwrap();
 
-        unsafe {
-            std::env::remove_var(super::GITHUB_CLIENT_ID_ENV);
-            std::env::remove_var(super::GITHUB_CLIENT_SECRET_ENV);
-            std::env::set_var("OBERON4_DATA_DIR", &temp_dir);
-        }
-
-        let config = OAuthProviderConfig::github().unwrap();
+        let config = OAuthProviderConfig::github_from_store(&store).unwrap();
         assert_eq!(config.client_id, "github-client-id");
         assert_eq!(
             config.client_secret.as_deref(),
             Some("github-client-secret")
         );
 
-        unsafe {
-            std::env::remove_var("OBERON4_DATA_DIR");
-        }
-        let _ = std::fs::remove_dir_all(temp_dir);
+        let _ = std::fs::remove_file(secret_path);
     }
 
     #[test]
