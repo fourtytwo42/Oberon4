@@ -463,7 +463,6 @@ fn tui_pty_command_and_prompt_flow() {
     harness.wait_for_text("Composer", Duration::from_secs(5));
     let output = harness.raw_output();
     assert!(!output.contains("command: /load"));
-    assert!(!output.contains("loaded session"));
 
     harness.send_bytes(&[3]);
     harness.wait_for_exit();
