@@ -24,14 +24,18 @@ pub const ANTHROPIC_TOKEN_URL: &str = "https://console.anthropic.com/v1/oauth/to
 pub const ANTHROPIC_SCOPE: &str = "org:create_api_key user:profile user:inference";
 
 pub const GITHUB_CLIENT_ID_ENV: &str = "OBERON4_GITHUB_CLIENT_ID";
+pub const GITHUB_CLIENT_SECRET_ENV: &str = "OBERON4_GITHUB_CLIENT_SECRET";
 pub const GITHUB_AUTHORIZE_URL: &str = "https://github.com/login/oauth/authorize";
 pub const GITHUB_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 pub const GITHUB_SCOPE: &str = "repo read:user user:email";
+pub const GITHUB_CLIENT_ID_STORE_KEY: &str = "oauth.github.app.client_id";
+pub const GITHUB_CLIENT_SECRET_STORE_KEY: &str = "oauth.github.app.client_secret";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OAuthProviderConfig {
     pub provider: OAuthProviderKind,
     pub client_id: String,
+    pub client_secret: Option<String>,
     pub authorize_url: String,
     pub token_url: String,
     pub redirect_base: String,
@@ -44,6 +48,7 @@ impl OAuthProviderConfig {
         Self {
             provider: OAuthProviderKind::OpenAi,
             client_id: OPENAI_CLIENT_ID.to_string(),
+            client_secret: None,
             authorize_url: OPENAI_AUTHORIZE_URL.to_string(),
             token_url: OPENAI_TOKEN_URL.to_string(),
             redirect_base: "http://localhost:1455".to_string(),
@@ -56,6 +61,7 @@ impl OAuthProviderConfig {
         Self {
             provider: OAuthProviderKind::Anthropic,
             client_id: ANTHROPIC_CLIENT_ID.to_string(),
+            client_secret: None,
             authorize_url: ANTHROPIC_AUTHORIZE_URL.to_string(),
             token_url: ANTHROPIC_TOKEN_URL.to_string(),
             redirect_base: "http://localhost:1455".to_string(),
@@ -65,14 +71,20 @@ impl OAuthProviderConfig {
     }
 
     pub fn github() -> Result<Self, OberonError> {
-        let client_id = std::env::var(GITHUB_CLIENT_ID_ENV).map_err(|_| {
-            OberonError::Validation(format!(
-                "github oauth requires {GITHUB_CLIENT_ID_ENV} to be set"
-            ))
-        })?;
+        let client_id = load_github_app_secret(
+            GITHUB_CLIENT_ID_ENV,
+            GITHUB_CLIENT_ID_STORE_KEY,
+            "client id",
+        )?;
+        let client_secret = load_github_app_secret(
+            GITHUB_CLIENT_SECRET_ENV,
+            GITHUB_CLIENT_SECRET_STORE_KEY,
+            "client secret",
+        )?;
         Ok(Self {
             provider: OAuthProviderKind::Github,
             client_id,
+            client_secret: Some(client_secret),
             authorize_url: GITHUB_AUTHORIZE_URL.to_string(),
             token_url: GITHUB_TOKEN_URL.to_string(),
             redirect_base: "http://localhost:1455".to_string(),
@@ -121,13 +133,16 @@ impl OAuthTokenExchange for ReqwestOAuthTokenExchange {
             .build()
             .map_err(|err| OberonError::Storage(format!("oauth client build failed: {err}")))?;
 
-        let params = [
+        let mut params = vec![
             ("grant_type", "authorization_code"),
             ("client_id", provider.client_id.as_str()),
             ("code", code),
             ("code_verifier", code_verifier),
             ("redirect_uri", redirect_uri),
         ];
+        if let Some(client_secret) = provider.client_secret.as_deref() {
+            params.push(("client_secret", client_secret));
+        }
 
         let response = client
             .post(&provider.token_url)
@@ -558,9 +573,9 @@ impl OAuthProvider for GithubOAuthAdapter {
         self.inner
             .as_ref()
             .ok_or_else(|| {
-                OberonError::Validation(format!(
-                    "github oauth requires {GITHUB_CLIENT_ID_ENV} to be set"
-                ))
+                OberonError::Validation(
+                    "github oauth requires app credentials in env or host secret store".to_string(),
+                )
             })?
             .start_flow("/auth/callback", None, now_unix())
     }
@@ -573,9 +588,9 @@ impl OAuthProvider for GithubOAuthAdapter {
         self.inner
             .as_ref()
             .ok_or_else(|| {
-                OberonError::Validation(format!(
-                    "github oauth requires {GITHUB_CLIENT_ID_ENV} to be set"
-                ))
+                OberonError::Validation(
+                    "github oauth requires app credentials in env or host secret store".to_string(),
+                )
             })?
             .complete_flow_bundle(flow, callback, &ReqwestOAuthTokenExchange, now_unix())
     }
@@ -717,6 +732,27 @@ fn provider_authorization_extras(provider: OAuthProviderKind) -> &'static str {
     }
 }
 
+fn load_github_app_secret(
+    env_key: &str,
+    store_key: &str,
+    field_label: &str,
+) -> Result<String, OberonError> {
+    if let Ok(value) = std::env::var(env_key) {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+    }
+
+    let store = oberon4_core::FileSecretStore::default();
+    match store.get_secret(store_key) {
+        Ok(value) if !value.trim().is_empty() => Ok(value),
+        _ => Err(OberonError::Validation(format!(
+            "github oauth requires {field_label} in {env_key} or host secret store key {store_key}"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -826,6 +862,7 @@ mod tests {
     fn github_flow_start_uses_github_urls() {
         unsafe {
             std::env::set_var(super::GITHUB_CLIENT_ID_ENV, "github-client-id");
+            std::env::set_var(super::GITHUB_CLIENT_SECRET_ENV, "github-client-secret");
         }
         let manager = OAuthFlowManager::new(OAuthProviderConfig::github().unwrap());
         let (start, _) = manager.start_flow("/auth/callback", None, 75).unwrap();
@@ -844,6 +881,7 @@ mod tests {
         assert!(start.authorization_url.contains("scope=repo%20read%3Auser"));
         unsafe {
             std::env::remove_var(super::GITHUB_CLIENT_ID_ENV);
+            std::env::remove_var(super::GITHUB_CLIENT_SECRET_ENV);
         }
     }
 
@@ -853,6 +891,7 @@ mod tests {
         let anthropic = AnthropicOAuthAdapter::default();
         unsafe {
             std::env::set_var(super::GITHUB_CLIENT_ID_ENV, "github-client-id");
+            std::env::set_var(super::GITHUB_CLIENT_SECRET_ENV, "github-client-secret");
         }
         let github = GithubOAuthAdapter::new();
 
@@ -875,7 +914,46 @@ mod tests {
         );
         unsafe {
             std::env::remove_var(super::GITHUB_CLIENT_ID_ENV);
+            std::env::remove_var(super::GITHUB_CLIENT_SECRET_ENV);
         }
+    }
+
+    #[test]
+    fn github_config_falls_back_to_host_secret_store() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "oberon4-github-oauth-secrets-{}",
+            std::process::id()
+        ));
+        let secret_path = temp_dir.join("secrets.json");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let mut store = oberon4_core::FileSecretStore::new(&secret_path);
+        store
+            .set_secret(super::GITHUB_CLIENT_ID_STORE_KEY, "github-client-id")
+            .unwrap();
+        store
+            .set_secret(
+                super::GITHUB_CLIENT_SECRET_STORE_KEY,
+                "github-client-secret",
+            )
+            .unwrap();
+
+        unsafe {
+            std::env::remove_var(super::GITHUB_CLIENT_ID_ENV);
+            std::env::remove_var(super::GITHUB_CLIENT_SECRET_ENV);
+            std::env::set_var("OBERON4_DATA_DIR", &temp_dir);
+        }
+
+        let config = OAuthProviderConfig::github().unwrap();
+        assert_eq!(config.client_id, "github-client-id");
+        assert_eq!(
+            config.client_secret.as_deref(),
+            Some("github-client-secret")
+        );
+
+        unsafe {
+            std::env::remove_var("OBERON4_DATA_DIR");
+        }
+        let _ = std::fs::remove_dir_all(temp_dir);
     }
 
     #[test]

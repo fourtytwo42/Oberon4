@@ -457,7 +457,8 @@ impl CliApp {
                     OAuthProviderKind::Github => {
                         let adapter = self.github_oauth.as_ref().ok_or_else(|| {
                             OberonError::Validation(
-                                "github oauth requires OBERON4_GITHUB_CLIENT_ID".to_string(),
+                                "github oauth requires app credentials in env or host secret store"
+                                    .to_string(),
                             )
                         })?;
                         let (start, _) = adapter.start_connect_flow()?;
@@ -2579,6 +2580,34 @@ mod tests {
         assert_eq!(disable.exit_code, 0);
         assert_eq!(activate.exit_code, 0);
         assert_eq!(disconnect.exit_code, 0);
+    }
+
+    #[test]
+    fn github_account_connect_uses_env_backed_app_credentials() {
+        let _guard = env_guard();
+        unsafe {
+            std::env::set_var("OBERON4_GITHUB_CLIENT_ID", "github-client-id");
+            std::env::set_var("OBERON4_GITHUB_CLIENT_SECRET", "github-client-secret");
+        }
+
+        let mut app = CliApp::default();
+        let connect = app.run(CliCommand::AccountConnect {
+            provider: oberon4_core::OAuthProviderKind::Github,
+        });
+
+        assert_eq!(connect.exit_code, 0);
+        assert!(connect.stdout.contains("github.com/login/oauth/authorize"));
+        assert!(
+            app.accounts
+                .list()
+                .iter()
+                .any(|account| account.provider == OAuthProviderKind::Github)
+        );
+
+        unsafe {
+            std::env::remove_var("OBERON4_GITHUB_CLIENT_ID");
+            std::env::remove_var("OBERON4_GITHUB_CLIENT_SECRET");
+        }
     }
 
     #[test]

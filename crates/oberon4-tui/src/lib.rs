@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     io::{self, BufRead, BufReader, Write},
-    net::TcpListener,
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
@@ -311,7 +311,7 @@ enum AsyncUiEvent {
 
 #[derive(Debug)]
 enum OAuthUiEvent {
-    Started(String),
+    Started { message: String, url: String },
     Complete(String),
     Failed(OberonError),
 }
@@ -2639,22 +2639,26 @@ fn run_inline_terminal_loop(
 
         if let Some(pending) = pending_oauth.as_ref() {
             match pending.receiver.try_recv() {
-                Ok(OAuthUiEvent::Started(message)) => {
-                    shell.set_activity(ActivityState::Loading, message);
+                Ok(OAuthUiEvent::Started { message, url }) => {
+                    shell.set_activity(ActivityState::Loading, message.clone());
+                    push_oauth_status_line(shell, format!("GitHub login URL: {url}"));
                 }
                 Ok(OAuthUiEvent::Complete(message)) => {
                     pending_oauth = None;
+                    clear_oauth_status_lines(shell);
                     shell.refresh_runtime_data(app);
                     shell.set_activity(ActivityState::Idle, message);
                 }
                 Ok(OAuthUiEvent::Failed(err)) => {
                     pending_oauth = None;
+                    clear_oauth_status_lines(shell);
                     shell.set_activity(ActivityState::Error, err.to_string());
                     shell.refresh_runtime_data(app);
                 }
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => {
                     pending_oauth = None;
+                    clear_oauth_status_lines(shell);
                     shell.set_activity(ActivityState::Error, "oauth flow worker disconnected");
                 }
             }
@@ -2811,6 +2815,7 @@ fn run_inline_terminal_loop(
             KeyCode::Esc => {
                 if let Some(pending) = pending_oauth.take() {
                     pending.cancel_flag.store(true, Ordering::Relaxed);
+                    clear_oauth_status_lines(shell);
                     shell.set_activity(ActivityState::Idle, "oauth flow canceled");
                 }
                 if matches!(shell.workspace, Workspace::Sessions)
@@ -2868,22 +2873,26 @@ fn run_terminal_loop(
 
         if let Some(pending) = pending_oauth.as_ref() {
             match pending.receiver.try_recv() {
-                Ok(OAuthUiEvent::Started(message)) => {
-                    shell.set_activity(ActivityState::Loading, message);
+                Ok(OAuthUiEvent::Started { message, url }) => {
+                    shell.set_activity(ActivityState::Loading, message.clone());
+                    push_oauth_status_line(shell, format!("GitHub login URL: {url}"));
                 }
                 Ok(OAuthUiEvent::Complete(message)) => {
                     pending_oauth = None;
+                    clear_oauth_status_lines(shell);
                     shell.refresh_runtime_data(app);
                     shell.set_activity(ActivityState::Idle, message);
                 }
                 Ok(OAuthUiEvent::Failed(err)) => {
                     pending_oauth = None;
+                    clear_oauth_status_lines(shell);
                     shell.set_activity(ActivityState::Error, err.to_string());
                     shell.refresh_runtime_data(app);
                 }
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => {
                     pending_oauth = None;
+                    clear_oauth_status_lines(shell);
                     shell.set_activity(ActivityState::Error, "oauth flow worker disconnected");
                 }
             }
@@ -3068,6 +3077,7 @@ fn run_terminal_loop(
                     KeyCode::Esc => {
                         if let Some(pending) = pending_oauth.take() {
                             pending.cancel_flag.store(true, Ordering::Relaxed);
+                            clear_oauth_status_lines(shell);
                             shell.set_activity(ActivityState::Idle, "oauth flow canceled");
                         }
                         if matches!(shell.focus, FocusTarget::List)
@@ -3607,9 +3617,14 @@ fn render_header(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
     } else {
         "focus=chat".to_string()
     };
+    let status = if shell.status.trim().is_empty() {
+        "ready"
+    } else {
+        shell.status.trim()
+    };
     let header_lines = Text::from(vec![Line::styled(
         format!(
-            " Oberon4 | request={} | daemon={} | {} | model={} | oberon4-account={} | session={}{} | {} ",
+            " Oberon4 | request={} | daemon={} | {} | status={} | model={} | oberon4-account={} | session={}{} | {} ",
             shell.status_snapshot.endpoint,
             if shell.status_snapshot.running {
                 "running"
@@ -3617,6 +3632,7 @@ fn render_header(frame: &mut Frame, area: Rect, shell: &TuiShellState) {
                 "stopped"
             },
             shell.activity_label(),
+            status,
             shell.status_snapshot.model,
             shell.status_snapshot.active_account,
             session,
@@ -4701,6 +4717,20 @@ fn sync_shell_transcript_from_app(shell: &mut TuiShellState, app: &DaemonBackedT
         .collect();
 }
 
+fn push_oauth_status_line(shell: &mut TuiShellState, message: impl Into<String>) {
+    shell.transcript.push(UiLine {
+        role: "status".to_string(),
+        content: message.into(),
+    });
+    shell.scroll_transcript_to_bottom();
+}
+
+fn clear_oauth_status_lines(shell: &mut TuiShellState) {
+    shell
+        .transcript
+        .retain(|line| !(line.role == "status" && line.content.starts_with("GitHub login URL: ")));
+}
+
 fn submit_inline_input(
     stdout: &mut io::Stdout,
     app: &mut DaemonBackedTuiApp,
@@ -4936,7 +4966,7 @@ fn canonical_tui_command(command: &str) -> &str {
         "/more" | "/menu" => "/more",
         "/config" | "/cfg" | "/configuration" => "/config",
         "/plugins" | "/plugin" => "/plugins",
-        "/github-login" | "/gh-login" | "/github-auth" => "/github-login",
+        "/github-login" | "/gh-login" | "/github-auth" | "/github-connect" => "/github-login",
         "/model" | "/models" => "/model",
         "/endpoint" | "/endpiont" | "/url" => "/endpoint",
         "/system" | "/prompt" | "/sytem" => "/system",
@@ -5277,7 +5307,7 @@ fn start_async_oauth_connect(
 
             let browser_message = match open_browser(&start.url) {
                 Ok(()) => format!(
-                    "opening browser for {} login...",
+                    "opening browser for {} login... if nothing opens, use the URL below",
                     provider_name_for_oauth(provider)
                 ),
                 Err(_) => format!(
@@ -5286,7 +5316,10 @@ fn start_async_oauth_connect(
                     start.url
                 ),
             };
-            let _ = sender.send(OAuthUiEvent::Started(browser_message));
+            let _ = sender.send(OAuthUiEvent::Started {
+                message: browser_message,
+                url: start.url.clone(),
+            });
             let callback = wait_for_oauth_callback(
                 &start.redirect_uri,
                 Duration::from_secs(300),
@@ -5325,18 +5358,9 @@ fn wait_for_oauth_callback(
     cancel_flag: &AtomicBool,
 ) -> Result<oberon4_core::OAuthCallbackPayload, OberonError> {
     let (host, port, expected_path) = parse_redirect_uri(redirect_uri)?;
-    let bind_host = if host == "localhost" {
-        "127.0.0.1".to_string()
-    } else {
-        host
-    };
-    let listener = TcpListener::bind((bind_host.as_str(), port))
-        .map_err(|err| OberonError::Storage(format!("oauth callback listener failed: {err}")))?;
-    listener.set_nonblocking(true).map_err(|err| {
-        OberonError::Storage(format!("oauth callback nonblocking setup failed: {err}"))
-    })?;
+    let listeners = bind_oauth_callback_listeners(&host, port)?;
     let started_at = Instant::now();
-    let (mut stream, _) = loop {
+    let (mut stream, _) = 'accept: loop {
         if cancel_flag.load(Ordering::Relaxed) {
             return Err(OberonError::Validation(
                 "oauth callback canceled".to_string(),
@@ -5347,16 +5371,22 @@ fn wait_for_oauth_callback(
                 "oauth callback timed out waiting for browser redirect".to_string(),
             ));
         }
-        match listener.accept() {
-            Ok(connection) => break connection,
-            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(50));
+        let mut pending = false;
+        for listener in &listeners {
+            match listener.accept() {
+                Ok(connection) => break 'accept connection,
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                    pending = true;
+                }
+                Err(err) => {
+                    return Err(OberonError::Storage(format!(
+                        "oauth callback accept failed: {err}"
+                    )));
+                }
             }
-            Err(err) => {
-                return Err(OberonError::Storage(format!(
-                    "oauth callback accept failed: {err}"
-                )));
-            }
+        }
+        if pending {
+            thread::sleep(Duration::from_millis(50));
         }
     };
     let mut reader = BufReader::new(
@@ -5379,6 +5409,46 @@ fn wait_for_oauth_callback(
         .write_all(response.as_bytes())
         .map_err(|err| OberonError::Storage(format!("oauth callback response failed: {err}")))?;
     Ok(callback)
+}
+
+fn bind_oauth_callback_listeners(host: &str, port: u16) -> Result<Vec<TcpListener>, OberonError> {
+    let addresses = if host == "localhost" {
+        vec![
+            SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+            SocketAddr::from((Ipv6Addr::LOCALHOST, port)),
+        ]
+    } else {
+        vec![format!("{host}:{port}").parse().map_err(|err| {
+            OberonError::Validation(format!("invalid oauth callback host: {err}"))
+        })?]
+    };
+
+    let mut listeners = Vec::new();
+    let mut last_error = None;
+    for address in addresses {
+        match TcpListener::bind(address) {
+            Ok(listener) => {
+                listener.set_nonblocking(true).map_err(|err| {
+                    OberonError::Storage(format!("oauth callback nonblocking setup failed: {err}"))
+                })?;
+                listeners.push(listener);
+            }
+            Err(err) => {
+                last_error = Some(err);
+            }
+        }
+    }
+
+    if listeners.is_empty() {
+        let detail = last_error
+            .map(|err| err.to_string())
+            .unwrap_or_else(|| "no candidate addresses".to_string());
+        return Err(OberonError::Storage(format!(
+            "oauth callback listener failed: {detail}"
+        )));
+    }
+
+    Ok(listeners)
 }
 
 fn spawn_daemon_process(socket_path: PathBuf) -> Result<(), OberonError> {
@@ -5649,12 +5719,12 @@ mod tests {
     use super::{
         AsyncUiEvent, BinaryLaunchTarget, CODE_BLOCK_BG, DaemonBackedTuiApp, FocusTarget,
         PendingSubmission, ScreenRoute, SessionMatchScore, TuiApp, TuiCommand, TuiShellState,
-        UiLine, Workspace, build_transcript_rows, build_transcript_viewport,
-        cancel_pending_submission, finalize_streamed_assistant, format_assistant_markdown,
-        format_installed_plugins, handle_async_ui_event, handle_pending_local_command,
-        handle_pending_timeout, parse_callback_request, parse_tui_command,
-        resolve_binary_launch_target, session_match_score, start_async_submit, status_line,
-        wait_for_oauth_callback,
+        UiLine, Workspace, bind_oauth_callback_listeners, build_transcript_rows,
+        build_transcript_viewport, cancel_pending_submission, clear_oauth_status_lines,
+        finalize_streamed_assistant, format_assistant_markdown, format_installed_plugins,
+        handle_async_ui_event, handle_pending_local_command, handle_pending_timeout,
+        parse_callback_request, parse_tui_command, resolve_binary_launch_target,
+        session_match_score, start_async_submit, status_line, wait_for_oauth_callback,
     };
     use oberon4_auth::{AccountRegistry, InMemoryAccountMetadataStore};
     use oberon4_core::{
@@ -5719,6 +5789,10 @@ mod tests {
         assert_eq!(parse_tui_command("/plugins").unwrap(), TuiCommand::Plugins);
         assert_eq!(
             parse_tui_command("/github-login").unwrap(),
+            TuiCommand::GithubLogin
+        );
+        assert_eq!(
+            parse_tui_command("/github-connect").unwrap(),
             TuiCommand::GithubLogin
         );
         assert_eq!(
@@ -6457,6 +6531,30 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("oauth callback canceled"));
+    }
+
+    #[test]
+    fn oauth_callback_listener_binds_localhost_candidates() {
+        let listeners = bind_oauth_callback_listeners("localhost", 0).unwrap();
+        assert!(!listeners.is_empty());
+    }
+
+    #[test]
+    fn oauth_status_cleanup_removes_github_login_url_lines() {
+        let mut shell = TuiShellState::default();
+        shell.transcript.push(UiLine {
+            role: "status".to_string(),
+            content: "GitHub login URL: http://localhost:1455/auth/callback".to_string(),
+        });
+        shell.transcript.push(UiLine {
+            role: "status".to_string(),
+            content: "connected github demo".to_string(),
+        });
+
+        clear_oauth_status_lines(&mut shell);
+
+        assert_eq!(shell.transcript.len(), 1);
+        assert_eq!(shell.transcript[0].content, "connected github demo");
     }
 
     #[test]
