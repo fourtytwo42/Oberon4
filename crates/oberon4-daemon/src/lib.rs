@@ -257,6 +257,18 @@ pub struct DaemonApp<C, S, P, OO, AO, GO, SS, AS> {
     account_store: AS,
 }
 
+pub struct DaemonOAuthProviders<OO, AO, GO> {
+    pub openai: OO,
+    pub anthropic: AO,
+    pub github: GO,
+}
+
+pub struct DaemonAccountState<SS, AS> {
+    pub accounts: AccountRegistry,
+    pub secrets: SS,
+    pub account_store: AS,
+}
+
 impl Default
     for DaemonApp<
         FileConfigStore,
@@ -303,12 +315,16 @@ impl Default
                 lifecycle: LifecycleState::Stopped,
             },
             ProviderRouter::new(config.endpoint.provider, client, anthropic),
-            oberon4_auth::OpenAiOAuthAdapter::default(),
-            oberon4_auth::AnthropicOAuthAdapter::default(),
-            oberon4_auth::GithubOAuthAdapter::new(),
-            accounts,
-            FileSecretStore::default(),
-            account_store,
+            DaemonOAuthProviders {
+                openai: oberon4_auth::OpenAiOAuthAdapter::default(),
+                anthropic: oberon4_auth::AnthropicOAuthAdapter::default(),
+                github: oberon4_auth::GithubOAuthAdapter::new(),
+            },
+            DaemonAccountState {
+                accounts,
+                secrets: FileSecretStore::default(),
+                account_store,
+            },
         )
     }
 }
@@ -327,24 +343,20 @@ where
     pub fn new(
         runtime: DaemonRuntime<C, S>,
         chat_provider: P,
-        openai_oauth: OO,
-        anthropic_oauth: AO,
-        github_oauth: GO,
-        accounts: AccountRegistry,
-        secrets: SS,
-        account_store: AS,
+        oauth: DaemonOAuthProviders<OO, AO, GO>,
+        account_state: DaemonAccountState<SS, AS>,
     ) -> Self {
         Self {
             runtime,
             chat_provider,
-            openai_oauth,
-            anthropic_oauth,
-            github_oauth,
-            accounts,
+            openai_oauth: oauth.openai,
+            anthropic_oauth: oauth.anthropic,
+            github_oauth: oauth.github,
+            accounts: account_state.accounts,
             pending_oauth_flows: BTreeMap::new(),
             pending_approval_turns: BTreeMap::new(),
-            secrets,
-            account_store,
+            secrets: account_state.secrets,
+            account_store: account_state.account_store,
         }
     }
 
@@ -1414,8 +1426,9 @@ mod tests {
     };
 
     use super::{
-        DaemonApp, DaemonIpcClient, DaemonRuntime, LifecycleState, LogEntry, LogLevel,
-        daemon_status, default_socket_path, log_entry, serve_unix_socket,
+        DaemonAccountState, DaemonApp, DaemonIpcClient, DaemonOAuthProviders, DaemonRuntime,
+        LifecycleState, LogEntry, LogLevel, daemon_status, default_socket_path, log_entry,
+        serve_unix_socket,
     };
     use oberon4_auth::{
         AccountMetadataStore, AccountRegistry, FileAccountMetadataStore,
@@ -1543,12 +1556,16 @@ mod tests {
         let mut app = DaemonApp::new(
             DaemonRuntime::default(),
             FakeChatProvider::default(),
-            FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
-            FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
-            FakeOAuthProvider::new(OAuthProviderKind::Github),
-            AccountRegistry::default(),
-            InMemorySecretStore::default(),
-            InMemoryAccountMetadataStore::default(),
+            DaemonOAuthProviders {
+                openai: FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
+                anthropic: FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+                github: FakeOAuthProvider::new(OAuthProviderKind::Github),
+            },
+            DaemonAccountState {
+                accounts: AccountRegistry::default(),
+                secrets: InMemorySecretStore::default(),
+                account_store: InMemoryAccountMetadataStore::default(),
+            },
         );
         let _ = app.start().unwrap();
 
@@ -1704,12 +1721,16 @@ mod tests {
         let mut app = DaemonApp::new(
             DaemonRuntime::default(),
             provider,
-            FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
-            FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
-            FakeOAuthProvider::new(OAuthProviderKind::Github),
-            AccountRegistry::default(),
-            InMemorySecretStore::default(),
-            InMemoryAccountMetadataStore::default(),
+            DaemonOAuthProviders {
+                openai: FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
+                anthropic: FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+                github: FakeOAuthProvider::new(OAuthProviderKind::Github),
+            },
+            DaemonAccountState {
+                accounts: AccountRegistry::default(),
+                secrets: InMemorySecretStore::default(),
+                account_store: InMemoryAccountMetadataStore::default(),
+            },
         );
         let _ = app.start().unwrap();
 
@@ -1748,12 +1769,16 @@ mod tests {
         let mut app = DaemonApp::new(
             DaemonRuntime::default(),
             FakeChatProvider::default(),
-            FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
-            FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
-            FakeOAuthProvider::new(OAuthProviderKind::Github),
-            AccountRegistry::default(),
-            InMemorySecretStore::default(),
-            InMemoryAccountMetadataStore::default(),
+            DaemonOAuthProviders {
+                openai: FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
+                anthropic: FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+                github: FakeOAuthProvider::new(OAuthProviderKind::Github),
+            },
+            DaemonAccountState {
+                accounts: AccountRegistry::default(),
+                secrets: InMemorySecretStore::default(),
+                account_store: InMemoryAccountMetadataStore::default(),
+            },
         );
         let err = app
             .handle_chat_stream(
@@ -1782,12 +1807,16 @@ mod tests {
             let app = DaemonApp::new(
                 DaemonRuntime::default(),
                 FakeChatProvider::default(),
-                FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
-                FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
-                FakeOAuthProvider::new(OAuthProviderKind::Github),
-                AccountRegistry::default(),
-                InMemorySecretStore::default(),
-                InMemoryAccountMetadataStore::default(),
+                DaemonOAuthProviders {
+                    openai: FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
+                    anthropic: FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+                    github: FakeOAuthProvider::new(OAuthProviderKind::Github),
+                },
+                DaemonAccountState {
+                    accounts: AccountRegistry::default(),
+                    secrets: InMemorySecretStore::default(),
+                    account_store: InMemoryAccountMetadataStore::default(),
+                },
             );
             serve_unix_socket(&thread_socket, app)
         });
@@ -1821,12 +1850,16 @@ mod tests {
         let mut app = DaemonApp::new(
             DaemonRuntime::default(),
             FakeChatProvider::default(),
-            FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
-            FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
-            FakeOAuthProvider::new(OAuthProviderKind::Github),
-            AccountRegistry::default(),
-            InMemorySecretStore::default(),
-            InMemoryAccountMetadataStore::default(),
+            DaemonOAuthProviders {
+                openai: FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
+                anthropic: FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+                github: FakeOAuthProvider::new(OAuthProviderKind::Github),
+            },
+            DaemonAccountState {
+                accounts: AccountRegistry::default(),
+                secrets: InMemorySecretStore::default(),
+                account_store: InMemoryAccountMetadataStore::default(),
+            },
         );
         let _ = app.start().unwrap();
         let session = SavedSession {
@@ -1895,12 +1928,16 @@ mod tests {
                 lifecycle: LifecycleState::Stopped,
             },
             FakeChatProvider::default(),
-            FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
-            FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
-            FakeOAuthProvider::new(OAuthProviderKind::Github),
-            AccountRegistry::default(),
-            FileSecretStore::new(&secret_path),
-            FileAccountMetadataStore::new(&account_path),
+            DaemonOAuthProviders {
+                openai: FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
+                anthropic: FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+                github: FakeOAuthProvider::new(OAuthProviderKind::Github),
+            },
+            DaemonAccountState {
+                accounts: AccountRegistry::default(),
+                secrets: FileSecretStore::new(&secret_path),
+                account_store: FileAccountMetadataStore::new(&account_path),
+            },
         );
         let _ = app.start().unwrap();
         let connect = app
@@ -1947,12 +1984,16 @@ mod tests {
                 lifecycle: LifecycleState::Stopped,
             },
             FakeChatProvider::default(),
-            FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
-            FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
-            FakeOAuthProvider::new(OAuthProviderKind::Github),
-            store.load_registry().unwrap(),
-            FileSecretStore::new(&secret_path),
-            store,
+            DaemonOAuthProviders {
+                openai: FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
+                anthropic: FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+                github: FakeOAuthProvider::new(OAuthProviderKind::Github),
+            },
+            DaemonAccountState {
+                accounts: store.load_registry().unwrap(),
+                secrets: FileSecretStore::new(&secret_path),
+                account_store: store,
+            },
         );
         let status = reloaded.status().unwrap();
         assert_eq!(status.active_account.as_deref(), Some("acct-demo"));
@@ -1990,12 +2031,16 @@ mod tests {
         let mut app = DaemonApp::new(
             DaemonRuntime::default(),
             provider,
-            FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
-            FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
-            FakeOAuthProvider::new(OAuthProviderKind::Github),
-            AccountRegistry::default(),
-            secrets,
-            InMemoryAccountMetadataStore::default(),
+            DaemonOAuthProviders {
+                openai: FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
+                anthropic: FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+                github: FakeOAuthProvider::new(OAuthProviderKind::Github),
+            },
+            DaemonAccountState {
+                accounts: AccountRegistry::default(),
+                secrets,
+                account_store: InMemoryAccountMetadataStore::default(),
+            },
         );
         let _ = app.start().unwrap();
 

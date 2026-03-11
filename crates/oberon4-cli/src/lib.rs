@@ -2121,7 +2121,10 @@ mod tests {
         AppConfig, DaemonCommand, DaemonEvent, FakeChatProvider, FakeOAuthProvider,
         InMemorySecretStore, OAuthProviderKind, SecretStore,
     };
-    use oberon4_daemon::{DaemonApp, DaemonIpcClient, DaemonRuntime, serve_unix_socket};
+    use oberon4_daemon::{
+        DaemonAccountState, DaemonApp, DaemonIpcClient, DaemonOAuthProviders, DaemonRuntime,
+        serve_unix_socket,
+    };
     use oberon4_provider_openai::{FakeTransport, OpenAiCompatibleClient, RetryPolicy};
 
     use super::{
@@ -2514,12 +2517,16 @@ mod tests {
             let app = DaemonApp::new(
                 DaemonRuntime::default(),
                 FakeChatProvider::default(),
-                FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
-                FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
-                FakeOAuthProvider::new(OAuthProviderKind::Github),
-                AccountRegistry::default(),
-                InMemorySecretStore::default(),
-                InMemoryAccountMetadataStore::default(),
+                DaemonOAuthProviders {
+                    openai: FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
+                    anthropic: FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+                    github: FakeOAuthProvider::new(OAuthProviderKind::Github),
+                },
+                DaemonAccountState {
+                    accounts: AccountRegistry::default(),
+                    secrets: InMemorySecretStore::default(),
+                    account_store: InMemoryAccountMetadataStore::default(),
+                },
             );
             serve_unix_socket(&thread_socket, app)
         });
@@ -2712,12 +2719,16 @@ mod tests {
             let app = DaemonApp::new(
                 DaemonRuntime::default(),
                 FakeChatProvider::default(),
-                FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
-                FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
-                FakeOAuthProvider::new(OAuthProviderKind::Github),
-                AccountRegistry::default(),
-                InMemorySecretStore::default(),
-                InMemoryAccountMetadataStore::default(),
+                DaemonOAuthProviders {
+                    openai: FakeOAuthProvider::new(OAuthProviderKind::OpenAi),
+                    anthropic: FakeOAuthProvider::new(OAuthProviderKind::Anthropic),
+                    github: FakeOAuthProvider::new(OAuthProviderKind::Github),
+                },
+                DaemonAccountState {
+                    accounts: AccountRegistry::default(),
+                    secrets: InMemorySecretStore::default(),
+                    account_store: InMemoryAccountMetadataStore::default(),
+                },
             );
             serve_unix_socket(&thread_socket, app)
         });
