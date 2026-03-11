@@ -568,6 +568,12 @@ pub struct GithubOAuthAdapter {
     inner: Option<OAuthFlowManager>,
 }
 
+impl Default for GithubOAuthAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GithubOAuthAdapter {
     pub fn new() -> Self {
         Self {
