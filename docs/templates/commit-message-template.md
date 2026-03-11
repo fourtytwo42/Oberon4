@@ -55,7 +55,7 @@ MRE: <minimal repro command or steps>
 Before: <failing evidence on repro>
 After: <passing evidence on same repro>
 IndependentCheck: <counterexample|property|differential|regression>
-DebugBrief: docs/debug-brief.md
+DebugBrief: docs/debug-brief.md|docs/handoffs/handoff-<name>.md
 
 # Required when Type is refactor:
 Characterization: added|existing
